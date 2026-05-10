@@ -1,8 +1,11 @@
 package io.streamnative.filter;
 
+import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.functions.api.Record;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 /**
@@ -15,6 +18,13 @@ import java.util.function.Supplier;
  *
  * <p>Records observed which bindings were actually touched, via {@link #topicResolved()},
  * {@link #propertiesResolved()}. Useful for tests and for measuring fast-path coverage.
+ *
+ * <p><strong>Source-format independence.</strong> The {@code __key__} binding is resolved through
+ * {@link Message#getKeyBytes()}, which transparently decodes a base64-encoded key produced by the
+ * Kafka-on-Pulsar (KoP) bridge when {@code kafkaEntryFormat=pulsar_non_batched} is configured.
+ * Selector authors compose against the <em>logical</em> key in both cases: a Kafka producer that
+ * sends {@code b"BTC"} and a native Pulsar producer that sends {@code "BTC"} both surface as
+ * {@code __key__ = 'BTC'} to the selector.
  */
 public final class MessageBindings {
 
@@ -48,12 +58,32 @@ public final class MessageBindings {
 
     public static MessageBindings from(Record<?> record) {
         return new MessageBindings(
-                () -> record.getKey().orElse(null),
+                () -> resolveLogicalKey(record),
                 () -> TopicNames.normalize(record.getTopicName().orElse(null)),
                 () -> {
                     Map<String, String> p = record.getProperties();
                     return p == null ? Map.of() : p;
                 });
+    }
+
+    /**
+     * Resolves the message's <em>logical</em> key, accounting for KoP base64-encoded keys.
+     *
+     * <p>When {@link Record#getMessage()} is present (the normal case for inputs to a Pulsar
+     * Function), we read the key via {@link Message#getKeyBytes()}: for KoP-bridged messages this
+     * returns the decoded Kafka key bytes; for native Pulsar messages it returns the UTF-8 bytes
+     * of {@link Message#getKey()}. We then convert to a String (UTF-8). Falls back to
+     * {@link Record#getKey()} when the message is unavailable (typically only in unit tests).
+     */
+    private static String resolveLogicalKey(Record<?> record) {
+        Optional<? extends Message<?>> msg = record.getMessage();
+        if (msg.isPresent() && msg.get().hasKey()) {
+            byte[] bytes = msg.get().getKeyBytes();
+            if (bytes != null) {
+                return new String(bytes, StandardCharsets.UTF_8);
+            }
+        }
+        return record.getKey().orElse(null);
     }
 
     public String getKey() {

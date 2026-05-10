@@ -1,9 +1,12 @@
 package io.streamnative.filter;
 
+import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.functions.api.Record;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Map;
 import java.util.Optional;
 
@@ -123,5 +126,71 @@ class MessageBindingsTests {
         assertThat(b.propertiesResolved()).isTrue();
         assertThat(b.topicResolved()).isFalse();
         Mockito.verify(record, Mockito.never()).getTopicName();
+    }
+
+    // ===== KoP / base64-encoded key handling =====
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void fromRecordReadsKeyViaMessageGetKeyBytes() {
+        // Native Pulsar path: key is "AAPL", getKeyBytes returns its UTF-8 bytes.
+        Record record = Mockito.mock(Record.class);
+        Message message = Mockito.mock(Message.class);
+        Mockito.when(record.getMessage()).thenReturn(Optional.of(message));
+        Mockito.when(message.hasKey()).thenReturn(true);
+        Mockito.when(message.getKeyBytes()).thenReturn("AAPL".getBytes(StandardCharsets.UTF_8));
+
+        MessageBindings b = MessageBindings.from(record);
+        assertThat(b.getKey()).isEqualTo("AAPL");
+        // We never had to fall back to record.getKey().
+        Mockito.verify(record, Mockito.never()).getKey();
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void fromRecordDecodesKoPBase64Key() {
+        // KoP pulsar_non_batched: the producer sent b"BTC"; the Kafka bridge stored the Pulsar
+        // key as base64 ("QlRD"). Message.getKeyBytes() transparently decodes back to "BTC".
+        byte[] decoded = "BTC".getBytes(StandardCharsets.UTF_8);
+        String encoded = Base64.getEncoder().encodeToString(decoded);
+        assertThat(encoded).isEqualTo("QlRD");
+
+        Record record = Mockito.mock(Record.class);
+        Message message = Mockito.mock(Message.class);
+        Mockito.when(record.getMessage()).thenReturn(Optional.of(message));
+        Mockito.when(message.hasKey()).thenReturn(true);
+        Mockito.when(message.hasBase64EncodedKey()).thenReturn(true);
+        // The Pulsar client's Message.getKeyBytes() returns the decoded bytes; we model that
+        // behavior directly here.
+        Mockito.when(message.getKeyBytes()).thenReturn(decoded);
+
+        MessageBindings b = MessageBindings.from(record);
+        assertThat(b.getKey()).isEqualTo("BTC");
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void fromRecordFallsBackToRecordGetKeyWhenMessageAbsent() {
+        // No Message present (e.g. a synthetic test record). Resolution falls back to
+        // Record.getKey() which is what the previous behavior used directly.
+        Record record = Mockito.mock(Record.class);
+        Mockito.when(record.getMessage()).thenReturn(Optional.empty());
+        Mockito.when(record.getKey()).thenReturn(Optional.of("LEGACY"));
+
+        MessageBindings b = MessageBindings.from(record);
+        assertThat(b.getKey()).isEqualTo("LEGACY");
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void fromRecordFallsBackWhenMessageHasNoKey() {
+        Record record = Mockito.mock(Record.class);
+        Message message = Mockito.mock(Message.class);
+        Mockito.when(record.getMessage()).thenReturn(Optional.of(message));
+        Mockito.when(message.hasKey()).thenReturn(false);
+        Mockito.when(record.getKey()).thenReturn(Optional.empty());
+
+        MessageBindings b = MessageBindings.from(record);
+        assertThat(b.getKey()).isNull();
     }
 }

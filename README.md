@@ -30,9 +30,9 @@ Apache ActiveMQ's selector implementation).
 
 | Binding | Source | Notes |
 |---|---|---|
-| `__key__` | `record.getKey()` | The message key, as a `String`. May be `null`. |
+| `__key__` | `record.getMessage().get().getKeyBytes()` decoded as UTF-8 | The **logical** message key. For KoP-bridged messages with `kafkaEntryFormat=pulsar_non_batched`, the base64-encoded Pulsar key is transparently decoded back to the original Kafka bytes — no per-topic configuration required. Falls back to `record.getKey()` when no underlying message is available. May be `null`. |
 | `__topic__` | `record.getTopicName()` | The fully-qualified source topic with any `-partition-N` suffix stripped. |
-| Any user property | `record.getProperties()` | Producers attach filterable attributes via `producer.newMessage().property(name, value)`. |
+| Any user property | `record.getProperties()` | Producers attach filterable attributes via `producer.newMessage().property(name, value)`. KoP surfaces Kafka headers as Pulsar string properties; binary headers are bridge-encoded by KoP itself and visible to selectors as their string form. |
 
 ### Examples
 
@@ -54,6 +54,29 @@ sentiment LIKE 'BULL%'
 -- Combinations
 __topic__ LIKE '%/trades/%' AND region IN ('US','UK') AND priority_tier = 'GOLD'
 ```
+
+### Kafka-on-Pulsar (KoP) compatibility
+
+The function is source-format agnostic. A Kafka producer that sends `key = b"BTC"` to a KoP topic
+configured with `kafkaEntryFormat=pulsar_non_batched` produces a Pulsar message whose stored key is
+base64 (`"QlRD"`), with `Message.hasBase64EncodedKey()=true`. Because the function reads the key
+through `Message.getKeyBytes()` — which the Pulsar client transparently decodes — the selector
+`__key__ = 'BTC'` matches in both KoP and native cases. No per-topic configuration or external
+metadata is needed: every message carries its own decode hint in `MessageMetadata`.
+
+Behavior by `kafkaEntryFormat`:
+
+| `kafkaEntryFormat` | Native Pulsar consumer can read? | This function works? | Notes |
+|---|---|---|---|
+| `pulsar` (default) | yes | yes | Kafka record stored as Pulsar message; key passes through unchanged. |
+| `pulsar_non_batched` | yes | yes | Key is base64-encoded; the function auto-decodes via `Message.getKeyBytes()`. |
+| `kafka` | **no** | **no** | Records stored in Kafka native wire format — only Kafka clients can consume. Selector-filtering this topic requires switching to one of the two formats above. |
+
+Tests covering the KoP matrix are scaffolded in `function/src/test/java/.../KoPFilterFunctionIT.java`
+and disabled by default — they require a Pulsar broker with the KoP protocol handler installed and
+a matching KoP release. The class javadoc lists the setup steps; the regex `topicsPattern`
+integration test in `RegexPatternIT.java` is enabled and validates dynamic topic discovery against
+a stock Pulsar testcontainer.
 
 ### Important constraints
 
