@@ -1,0 +1,3 @@
+name: selector-filter-function
+description: Generic broker-side selector filter for Apache Pulsar
+functionClass: io.streamnative.filter.SelectorFilterFunction

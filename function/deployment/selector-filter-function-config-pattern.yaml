@@ -1,0 +1,16 @@
+tenant: public
+namespace: filters
+name: selector-filter
+className: io.streamnative.filter.SelectorFilterFunction
+topicsPattern: persistent://public/quotes/.*
+processingGuarantees: MANUAL
+retainKeyOrdering: true
+forwardSourceMessageProperty: true
+cleanupSubscription: true
+parallelism: 1
+userConfig:
+  control-topic: persistent://public/control/queries
+resources:
+  cpu: 1.0
+  ram: 1073741824
+customRuntimeOptions: "{\"maxReplicas\":20}"

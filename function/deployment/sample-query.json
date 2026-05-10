@@ -1,0 +1,5 @@
+{
+  "name": "us-large-cap-trades",
+  "selector": "__topic__ LIKE 'persistent://public/trades/%' AND region = 'US' AND marketcap_bucket = 'LARGE'",
+  "outputTopic": "persistent://public/filtered/us-large-cap"
+}
