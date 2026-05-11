@@ -6,16 +6,17 @@ import java.util.Objects;
  * Settings applied to the per-consumer private output topic. Defaults are aggressive — private
  * topics are expected to be short-lived. Use the builder to override individual fields.
  *
- * <p>The defaults are designed to prevent topic explosion even if a client crashes or forgets to
- * call {@link FilteredConsumer#close()}:
+ * <p>The defaults are designed to prevent topic explosion even if a client crashes or forgets
+ * to call {@code close()} on the consumer returned from
+ * {@link FilterableConsumerBuilder#subscribe()}:
  * <ul>
  *   <li>Messages older than {@code messageTtlSeconds} are deleted from the topic backlog.</li>
  *   <li>The compaction/retention policy caps backlog age and size.</li>
  *   <li>Inactive-topic policy deletes the topic if no subscriptions exist for
  *       {@code inactiveDeleteSeconds}.</li>
- *   <li>{@code deleteOnClose} controls whether {@link FilteredConsumer#close()} actively
- *       deletes the topic. Even with {@code deleteOnClose=false}, the inactive-topic policy
- *       will eventually reap the topic.</li>
+ *   <li>{@code deleteOnClose} controls whether closing the consumer actively deletes the
+ *       topic. Even with {@code deleteOnClose=false}, the inactive-topic policy will
+ *       eventually reap the topic.</li>
  * </ul>
  */
 public final class PrivateTopicPolicy {

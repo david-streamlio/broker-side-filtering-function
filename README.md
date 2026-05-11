@@ -220,12 +220,12 @@ The function NAR appears at `function/target/selector-filter-function-${VERSION}
 artifact you register with `pulsar-admin functions create --jar`. The client jar is at
 `client/target/selector-filter-client-${VERSION}.jar`.
 
-## Client library — `Session` / `FilteredConsumer`
+## Client library — `Session` + `FilterControl`
 
-The `selector-filter-client` module ships a JMS-Session-style client that hides the control-topic
-plumbing. Each call to `Session.createConsumer(...)` generates a unique private output topic for
-that consumer, publishes the registration message, and returns a consumer subscribed to its own
-isolated stream.
+The `selector-filter-client` module ships a `Session` context plus a builder that returns a
+standard `org.apache.pulsar.client.api.Consumer<byte[]>` subscribed to its own private output
+topic. The returned consumer also implements `FilterControl`, so callers can swap the active
+selector at runtime without recreating the subscription.
 
 ```xml
 <dependency>
@@ -245,44 +245,87 @@ try (Session session = Session.builder()
         .privateTopicTenant("public")
         .privateTopicNamespace("filtered")
         .build();
-     FilteredConsumer consumer = session.createConsumer(
-             "persistent://public/quotes/trades",
-             "region = 'US' AND marketcap_bucket = 'LARGE'")) {
+     Consumer<byte[]> consumer = session.newConsumer()
+             .topic("persistent://public/quotes/trades")
+             .selector("region = 'US' AND marketcap_bucket = 'LARGE'")
+             .subscribe()) {
 
+    // Standard Pulsar Consumer API
     Message<byte[]> msg = consumer.receive();
     System.out.println(new String(msg.getData()));
     consumer.acknowledge(msg);
 }
 ```
 
-What happens inside `createConsumer`:
-1. A fresh `queryId` (UUID) is generated.
-2. A private output topic `persistent://{tenant}/{namespace}/filtered-{queryId}` is created and
+What happens inside `subscribe()`:
+1. The user selector is parsed against the same JMS-selector grammar the function uses. A
+   malformed selector throws `IllegalArgumentException` *before* any network I/O.
+2. A fresh `queryId` (UUID) is generated.
+3. A private output topic `persistent://{tenant}/{namespace}/filtered-{queryId}` is created and
    given aggressive TTL / retention / inactive-cleanup policies via `PulsarAdmin`.
-3. The session composes the effective selector as `__topic__ = '...' AND (<user selector>)` and
+4. The session composes the effective selector as `__topic__ = '...' AND (<user selector>)` and
    publishes a `QueryMessage` to the control topic, keyed by `queryId`.
-4. A native Pulsar `Consumer<byte[]>` is subscribed to the private topic, wrapped in a
-   `FilteredConsumer`.
+5. A native Pulsar `Consumer<byte[]>` is subscribed to the private topic and returned, wrapped so
+   it also implements `FilterControl`.
 
 What happens on `consumer.close()`:
 1. The underlying Pulsar consumer is closed.
 2. A tombstone (null body) is published to the control topic with the same `queryId`, prompting
-   the function to retract the query.
+   the function to retract the query. Tombstoning still happens if the underlying close throws.
 3. If `deleteOnClose=true` (the default), the private topic is deleted via `PulsarAdmin`.
+
+### Dynamic selector updates — `FilterControl`
+
+Cast the returned `Consumer<byte[]>` to `FilterControl` to inspect or replace its selector at
+runtime. The same `queryId` is reused — the function hot-reloads the compiled expression in
+place; the consumer keeps reading from the same private output topic.
+
+```java
+Consumer<byte[]> consumer = session.newConsumer()
+        .topic("persistent://public/quotes/trades")
+        .selector("region = 'US'")
+        .subscribe();
+
+FilterControl fc = (FilterControl) consumer;
+fc.setSelector("region IN ('US','UK')");      // hot reload — same queryId
+fc.setSelector(null);                          // drop user filter — topic-match only
+
+System.out.println(fc.queryId());              // stable for the lifetime of the consumer
+System.out.println(fc.currentSelector());      // current user-side selector (may be null)
+System.out.println(fc.sourceTopics());         // immutable list passed at build time
+System.out.println(fc.privateTopic());         // private output topic
+```
+
+Each consumer holds **exactly one** active selector. To register additional independent filters,
+build additional consumers from the same `Session`.
+
+`setSelector(...)` validates the new expression with the same parser as `subscribe()`; if it is
+malformed, it throws `IllegalArgumentException` and the previous selector remains active.
 
 ### Multi-source consumers
 
-`createConsumer(Collection<String> sourceTopics, String selector)` renders the source constraint
-as a JMS `IN` clause:
+`session.newConsumer().topics(Collection<String>)` renders the source constraint as a JMS `IN`
+clause:
 
 ```java
-session.createConsumer(
-    List.of("persistent://public/trades/eq", "persistent://public/trades/fx"),
-    "region IN ('US','UK')");
+session.newConsumer()
+    .topics(List.of("persistent://public/trades/eq", "persistent://public/trades/fx"))
+    .selector("region IN ('US','UK')")
+    .subscribe();
 // Composed selector:
 //   __topic__ IN ('persistent://public/trades/eq','persistent://public/trades/fx')
 //   AND (region IN ('US','UK'))
 ```
+
+### Builder reference
+
+| Method | Default | Meaning |
+|---|---|---|
+| `topic(String)` / `topics(Collection<String>)` | — | At least one is required. Calling both keeps only the latest. |
+| `selector(String)` | `null` | User-side JMS selector. `null` or blank means topic-match only. |
+| `subscriptionName(String)` | `session-<uuid>` | Subscription name on the private topic. |
+| `subscriptionType(SubscriptionType)` | `Exclusive` | Subscription type for the underlying consumer. |
+| `subscriptionInitialPosition(SubscriptionInitialPosition)` | `Earliest` | Initial position. |
 
 ### Tuning private-topic cleanup
 
@@ -310,11 +353,12 @@ Session.builder()
 
 ### Selector translation
 
-The function module already includes the SQL92 → boolean-expression translation layer via
-`com.datastax.oss:pulsar-jms-filters-common`, which wraps Apache ActiveMQ's `SelectorParser`. The
-client passes the selector string straight through; there is no client-side parser. Compiled
-expressions are cached per query inside the function, so per-message evaluation is O(1) lookups
-against the cached AST.
+Selectors are parsed by `com.datastax.oss:pulsar-jms-filters-common`, which wraps Apache
+ActiveMQ's `SelectorParser`. The **client** uses the same library to validate selector syntax at
+`subscribe()` / `setSelector()` time — so malformed expressions fail locally with
+`IllegalArgumentException` instead of being silently dropped as bad queries on the function's
+control topic. The **function** compiles and caches the same expression for O(1) per-message
+evaluation.
 
 ### Key-only fast path
 
@@ -409,14 +453,16 @@ function/                                     -- the broker-side Function (NAR)
   src/main/resources/META-INF/services/pulsar-io.yaml
   src/main/docker/Dockerfile
   deployment/
-client/                                       -- JMS-Session-style client library (JAR)
+client/                                       -- Session-style client library (JAR)
   pom.xml
   src/main/java/io/streamnative/filter/client/
     Session.java
     SessionBuilder.java
-    FilteredConsumer.java
+    FilterableConsumerBuilder.java
+    FilteringPulsarConsumer.java              -- Consumer<byte[]> + FilterControl wrapper
+    FilterControl.java                        -- dynamic-selector cast interface
     PrivateTopicPolicy.java
-    Selectors.java
+    Selectors.java                            -- compose + validate selector syntax
 ```
 
 ## References

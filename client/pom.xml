@@ -34,6 +34,15 @@
             <artifactId>pulsar-client-admin-api</artifactId>
         </dependency>
 
+        <!--
+          Selector parser. Same library the function module uses, so client-side validation is
+          bit-for-bit identical to what the function would later accept on the control topic.
+        -->
+        <dependency>
+            <groupId>com.datastax.oss</groupId>
+            <artifactId>pulsar-jms-filters-common</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>

@@ -21,7 +21,6 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -96,44 +95,65 @@ class SessionTests {
                 .build();
     }
 
-    @Test
-    void createConsumerCreatesPrivateTopicAndAppliesPolicies() throws Exception {
-        Session session = newSession(PrivateTopicPolicy.DEFAULT);
-
-        FilteredConsumer fc = session.createConsumer("persistent://public/in/trades", "region = 'US'");
-
-        assertThat(fc.getPrivateTopic()).startsWith("persistent://public/filtered/filtered-");
-        assertThat(fc.getComposedSelector())
-                .isEqualTo("__topic__ = 'persistent://public/in/trades' AND (region = 'US')");
-
-        verify(topics).createNonPartitionedTopic(fc.getPrivateTopic());
-        verify(topicPolicies).setMessageTTL(fc.getPrivateTopic(), 300);
-        verify(topicPolicies).setRetention(eq(fc.getPrivateTopic()), any(RetentionPolicies.class));
-        verify(topicPolicies).setInactiveTopicPolicies(eq(fc.getPrivateTopic()), any(InactiveTopicPolicies.class));
+    private static FilterControl asControl(Consumer<byte[]> c) {
+        assertThat(c).isInstanceOf(FilterControl.class);
+        return (FilterControl) c;
     }
 
     @Test
-    void createConsumerPublishesQueryToControlTopic() throws Exception {
+    void newConsumerReturnsConsumerThatIsAlsoFilterControl() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        Consumer<byte[]> c = session.newConsumer()
+                .topic("persistent://public/in/trades")
+                .selector("region = 'US'")
+                .subscribe();
+        assertThat(c).isInstanceOf(FilterControl.class);
+    }
 
-        FilteredConsumer fc = session.createConsumer("persistent://public/in/trades", "region = 'US'");
+    @Test
+    void subscribeCreatesPrivateTopicAndAppliesPolicies() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        Consumer<byte[]> c = session.newConsumer()
+                .topic("persistent://public/in/trades")
+                .selector("region = 'US'")
+                .subscribe();
+        FilterControl fc = asControl(c);
+
+        assertThat(fc.privateTopic()).startsWith("persistent://public/filtered/filtered-");
+        verify(topics).createNonPartitionedTopic(fc.privateTopic());
+        verify(topicPolicies).setMessageTTL(fc.privateTopic(), 300);
+        verify(topicPolicies).setRetention(eq(fc.privateTopic()), any(RetentionPolicies.class));
+        verify(topicPolicies).setInactiveTopicPolicies(eq(fc.privateTopic()), any(InactiveTopicPolicies.class));
+    }
+
+    @Test
+    void subscribePublishesQueryToControlTopic() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        Consumer<byte[]> c = session.newConsumer()
+                .topic("persistent://public/in/trades")
+                .selector("region = 'US'")
+                .subscribe();
+        FilterControl fc = asControl(c);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         verify(controlMsgBuilder).value(payload.capture());
-        verify(controlMsgBuilder).key(fc.getQueryId());
-        verify(controlMsgBuilder, times(1)).value(any(byte[].class));
+        verify(controlMsgBuilder).key(fc.queryId());
 
         QueryMessage qm = MAPPER.readValue(payload.getValue(), QueryMessage.class);
-        assertThat(qm.getSelector()).isEqualTo(fc.getComposedSelector());
-        assertThat(qm.getOutputTopic()).isEqualTo(fc.getPrivateTopic());
+        assertThat(qm.getSelector())
+                .isEqualTo("__topic__ = 'persistent://public/in/trades' AND (region = 'US')");
+        assertThat(qm.getOutputTopic()).isEqualTo(fc.privateTopic());
     }
 
     @Test
-    void createConsumerSubscribesOnPrivateTopic() throws Exception {
+    void subscribeUsesPrivateTopicAndDefaultSettings() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
-        FilteredConsumer fc = session.createConsumer("persistent://public/in/trades", null);
+        Consumer<byte[]> c = session.newConsumer()
+                .topic("persistent://public/in/trades")
+                .subscribe();
+        FilterControl fc = asControl(c);
 
-        verify(consumerBuilder).topic(fc.getPrivateTopic());
+        verify(consumerBuilder).topic(fc.privateTopic());
         verify(consumerBuilder).subscriptionType(SubscriptionType.Exclusive);
         verify(consumerBuilder).subscriptionInitialPosition(SubscriptionInitialPosition.Earliest);
         verify(consumerBuilder).subscribe();
@@ -142,32 +162,56 @@ class SessionTests {
     @Test
     void multipleSourceTopicsRenderInClause() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
-        FilteredConsumer fc = session.createConsumer(
-                List.of("persistent://public/in/a", "persistent://public/in/b"), "region = 'US'");
+        Consumer<byte[]> c = session.newConsumer()
+                .topics(List.of("persistent://public/in/a", "persistent://public/in/b"))
+                .selector("region = 'US'")
+                .subscribe();
+        FilterControl fc = asControl(c);
 
-        assertThat(fc.getComposedSelector()).isEqualTo(
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(controlMsgBuilder).value(payload.capture());
+        QueryMessage qm = MAPPER.readValue(payload.getValue(), QueryMessage.class);
+        assertThat(qm.getSelector()).isEqualTo(
                 "__topic__ IN ('persistent://public/in/a','persistent://public/in/b') AND (region = 'US')");
+        assertThat(fc.sourceTopics()).containsExactly(
+                "persistent://public/in/a", "persistent://public/in/b");
     }
 
     @Test
-    void closeFilteredConsumerRetractsQueryAndDeletesPrivateTopic() throws Exception {
+    void nullSelectorComposesToTopicConstraintOnly() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
-        FilteredConsumer fc = session.createConsumer("persistent://public/in/trades", null);
+        session.newConsumer().topic("persistent://public/in/trades").subscribe();
 
-        fc.close();
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(controlMsgBuilder).value(payload.capture());
+        QueryMessage qm = MAPPER.readValue(payload.getValue(), QueryMessage.class);
+        assertThat(qm.getSelector()).isEqualTo("__topic__ = 'persistent://public/in/trades'");
+    }
+
+    @Test
+    void closeRetractsQueryAndDeletesPrivateTopic() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        Consumer<byte[]> c = session.newConsumer()
+                .topic("persistent://public/in/trades")
+                .subscribe();
+        FilterControl fc = asControl(c);
+
+        c.close();
 
         verify(consumer).close();
         verify(controlMsgBuilder).value(isNull()); // tombstone
-        verify(topics).delete(fc.getPrivateTopic(), true);
+        verify(topics).delete(fc.privateTopic(), true);
     }
 
     @Test
     void closeWithDeleteOnCloseFalseSkipsDelete() throws Exception {
         PrivateTopicPolicy policy = PrivateTopicPolicy.builder().deleteOnClose(false).build();
         Session session = newSession(policy);
-        FilteredConsumer fc = session.createConsumer("persistent://public/in/trades", null);
+        Consumer<byte[]> c = session.newConsumer()
+                .topic("persistent://public/in/trades")
+                .subscribe();
 
-        fc.close();
+        c.close();
 
         verify(controlMsgBuilder).value(isNull()); // tombstone still sent
         verify(topics, never()).delete(anyString(), anyBoolean());
@@ -176,10 +220,12 @@ class SessionTests {
     @Test
     void closeIsIdempotent() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
-        FilteredConsumer fc = session.createConsumer("persistent://public/in/trades", null);
+        Consumer<byte[]> c = session.newConsumer()
+                .topic("persistent://public/in/trades")
+                .subscribe();
 
-        fc.close();
-        fc.close();
+        c.close();
+        c.close();
         verify(consumer, times(1)).close();
         verify(topics, times(1)).delete(anyString(), anyBoolean());
     }
@@ -189,7 +235,7 @@ class SessionTests {
         PrivateTopicPolicy policy = PrivateTopicPolicy.builder().applyPerTopicPolicies(false).build();
         Session session = newSession(policy);
 
-        session.createConsumer("persistent://public/in/trades", null);
+        session.newConsumer().topic("persistent://public/in/trades").subscribe();
 
         verify(topics, never()).createNonPartitionedTopic(anyString());
         verify(topicPolicies, never()).setMessageTTL(anyString(), anyInt());
@@ -208,7 +254,29 @@ class SessionTests {
     @Test
     void selectorEscapesSingleQuotesInSourceTopic() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
-        FilteredConsumer fc = session.createConsumer("topic-with-'-quote", null);
-        assertThat(fc.getComposedSelector()).isEqualTo("__topic__ = 'topic-with-''-quote'");
+        session.newConsumer().topic("topic-with-'-quote").subscribe();
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(controlMsgBuilder).value(payload.capture());
+        QueryMessage qm = MAPPER.readValue(payload.getValue(), QueryMessage.class);
+        assertThat(qm.getSelector()).isEqualTo("__topic__ = 'topic-with-''-quote'");
+    }
+
+    @Test
+    void subscribeWithMalformedSelectorThrowsIllegalArgumentBeforePublishing() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+
+        // Garbage selector that the JMS grammar will reject.
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> session.newConsumer()
+                        .topic("persistent://public/in/trades")
+                        .selector("THIS IS NOT VALID JMS @@##")
+                        .subscribe())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Invalid selector syntax");
+
+        // No private topic created, no control-topic publish, no subscribe.
+        verify(topics, never()).createNonPartitionedTopic(anyString());
+        verify(controlMsgBuilder, never()).value(any(byte[].class));
+        verify(consumerBuilder, never()).subscribe();
     }
 }

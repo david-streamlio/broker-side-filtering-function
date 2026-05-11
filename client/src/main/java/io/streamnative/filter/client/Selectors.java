@@ -1,15 +1,41 @@
 package io.streamnative.filter.client;
 
+import com.datastax.oss.pulsar.jms.selectors.SelectorSupport;
+import jakarta.jms.JMSException;
+
 import java.util.Collection;
 import java.util.Iterator;
 
 /**
- * Helpers that compose JMS-selector fragments. Source-topic constraints are added by the Session
- * so the user's selector evaluates only against messages from the destination(s) they asked for.
+ * Helpers that compose and validate JMS-selector fragments. Source-topic constraints are added by
+ * the Session so the user's selector evaluates only against messages from the destination(s) they
+ * asked for.
  */
 final class Selectors {
 
     private Selectors() {}
+
+    /**
+     * Validate a user-supplied selector against the same JMS-selector grammar the function uses.
+     * {@code null} or blank is allowed (means "no user-side filter"). Throws
+     * {@link IllegalArgumentException} otherwise; the thrown exception's {@code getCause()} is the
+     * underlying {@link JMSException} when one was produced by the parser.
+     */
+    static void validate(String userSelector) {
+        if (userSelector == null || userSelector.isBlank()) {
+            return;
+        }
+        try {
+            SelectorSupport built = SelectorSupport.build(userSelector, true);
+            if (built == null) {
+                throw new IllegalArgumentException(
+                        "Selector compiled to null (expected a non-empty expression): " + userSelector);
+            }
+        } catch (JMSException e) {
+            throw new IllegalArgumentException(
+                    "Invalid selector syntax: " + e.getMessage() + " (expression: " + userSelector + ")", e);
+        }
+    }
 
     /** Escapes a single value for inclusion as a JMS-selector string literal. */
     static String literal(String value) {
