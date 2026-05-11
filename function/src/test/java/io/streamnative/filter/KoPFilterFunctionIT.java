@@ -169,6 +169,7 @@ class KoPFilterFunctionIT {
                 .runtime(FunctionConfig.Runtime.JAVA)
                 .className("io.streamnative.filter.SelectorFilterFunction")
                 .inputs(List.of(INPUT_TOPIC))
+                .subscriptionPosition(org.apache.pulsar.client.api.SubscriptionInitialPosition.Earliest)
                 .processingGuarantees(FunctionConfig.ProcessingGuarantees.MANUAL)
                 .retainKeyOrdering(true)
                 .forwardSourceMessageProperty(true)
@@ -176,9 +177,33 @@ class KoPFilterFunctionIT {
                 .parallelism(1)
                 .userConfig(Map.of("control-topic", (Object) CONTROL_TOPIC))
                 .build();
-        // Upload the NAR from the test JVM's filesystem via the admin HTTP API. The broker
-        // stores it in its package registry — no in-container file path or file:// URL needed.
-        admin.functions().createFunction(config, FN_NAR.toString());
+        // Upload the NAR from the test JVM's filesystem via the admin HTTP API. Broker readiness
+        // and functions-worker leader election complete independently — the function deploy can
+        // race ahead of the leader election and produce "Leader not yet ready". Retry up to ~60s.
+        long deadline = System.currentTimeMillis() + 60_000L;
+        Exception last = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                admin.functions().createFunction(config, FN_NAR.toString());
+                return;
+            } catch (org.apache.pulsar.client.admin.PulsarAdminException e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")) {
+                    last = e;
+                    Thread.sleep(1_000);
+                    continue;
+                }
+                if (msg.contains("already exists")) {
+                    // Race within the retry loop: the first request reached the broker,
+                    // wrote the package metadata, then failed with "Leader not yet ready".
+                    // On retry the broker rejects the duplicate. Treat as success — the
+                    // function will be visible via admin.functions().getFunction().
+                    return;
+                }
+                throw e;
+            }
+        }
+        throw new IllegalStateException("Function deploy timed out waiting for leader readiness", last);
     }
 
     private static KafkaProducer<String, byte[]> kafkaProducer(String bootstrap) {

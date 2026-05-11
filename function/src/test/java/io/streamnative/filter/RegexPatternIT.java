@@ -57,7 +57,7 @@ class RegexPatternIT {
     private static final Path NAR = findNar();
 
     @Container
-    private final PulsarContainer pulsar = new PulsarContainer(
+    private static final PulsarContainer pulsar = new PulsarContainer(
             DockerImageName.parse("apachepulsar/pulsar:4.0.10"))
             .withFunctionsWorker()
             .withCopyFileToContainer(MountableFile.forHostPath(NAR), NAR_DEST)
@@ -70,6 +70,18 @@ class RegexPatternIT {
     void setup() throws Exception {
         client = PulsarClient.builder().serviceUrl(pulsar.getPulsarBrokerUrl()).build();
         admin  = PulsarAdmin.builder().serviceHttpUrl(pulsar.getHttpServiceUrl()).build();
+
+        // The HttpWaitStrategy for the admin port returns success before standalone has
+        // finished provisioning the public/default namespace. Poll until it exists, then
+        // create topics.
+        long deadline = System.currentTimeMillis() + 30_000L;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                admin.namespaces().getNamespaces("public");
+                if (admin.namespaces().getNamespaces("public").contains(NAMESPACE)) break;
+            } catch (Exception ignored) {}
+            Thread.sleep(500);
+        }
 
         admin.topics().createNonPartitionedTopic(CONTROL_TOPIC);
         admin.topics().createNonPartitionedTopic(INITIAL_TOPIC);
@@ -111,8 +123,10 @@ class RegexPatternIT {
                 .tenant("public")
                 .namespace("default")
                 .name("regex-pattern-it")
+                .runtime(FunctionConfig.Runtime.JAVA)
                 .className("io.streamnative.filter.SelectorFilterFunction")
                 .topicsPattern(TOPIC_PATTERN)
+                .subscriptionPosition(org.apache.pulsar.client.api.SubscriptionInitialPosition.Earliest)
                 .processingGuarantees(FunctionConfig.ProcessingGuarantees.MANUAL)
                 .retainKeyOrdering(true)
                 .forwardSourceMessageProperty(true)
@@ -120,7 +134,22 @@ class RegexPatternIT {
                 .parallelism(1)
                 .userConfig(Map.of("control-topic", (Object) CONTROL_TOPIC))
                 .build();
-        admin.functions().createFunctionWithUrl(config, "file://" + NAR_DEST);
+        // Retry deploy past the functions-worker leader-election window.
+        long fnDeadline = System.currentTimeMillis() + 60_000L;
+        while (System.currentTimeMillis() < fnDeadline) {
+            try {
+                admin.functions().createFunction(config, NAR.toString());
+                break;
+            } catch (org.apache.pulsar.client.admin.PulsarAdminException e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")) {
+                    Thread.sleep(1_000);
+                    continue;
+                }
+                if (msg.contains("already exists")) break;
+                throw e;
+            }
+        }
 
         Thread.sleep(8000); // wait for function start + control topic load
 

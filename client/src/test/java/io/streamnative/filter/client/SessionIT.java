@@ -50,7 +50,7 @@ class SessionIT {
     private static final Path NAR = findNar();
 
     @Container
-    private final PulsarContainer pulsar = new PulsarContainer(
+    private static final PulsarContainer pulsar = new PulsarContainer(
             DockerImageName.parse("apachepulsar/pulsar:4.0.10"))
             .withFunctionsWorker()
             .withCopyFileToContainer(MountableFile.forHostPath(NAR), NAR_DEST)
@@ -78,8 +78,10 @@ class SessionIT {
                 .tenant(FN_TENANT)
                 .namespace(FN_NS)
                 .name(FN_NAME)
+                .runtime(FunctionConfig.Runtime.JAVA)
                 .className("io.streamnative.filter.SelectorFilterFunction")
                 .inputs(java.util.List.of(INPUT_TOPIC))
+                .subscriptionPosition(org.apache.pulsar.client.api.SubscriptionInitialPosition.Earliest)
                 .processingGuarantees(FunctionConfig.ProcessingGuarantees.MANUAL)
                 .retainKeyOrdering(true)
                 .forwardSourceMessageProperty(true)
@@ -87,7 +89,7 @@ class SessionIT {
                 .parallelism(1)
                 .userConfig(Map.of("control-topic", (Object) CONTROL_TOPIC))
                 .build();
-        admin.functions().createFunctionWithUrl(config, "file://" + NAR_DEST);
+        admin.functions().createFunction(config, NAR.toString());
 
         // Give the function time to start subscribing.
         Thread.sleep(8000);

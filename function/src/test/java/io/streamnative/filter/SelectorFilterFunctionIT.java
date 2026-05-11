@@ -54,7 +54,7 @@ class SelectorFilterFunctionIT {
     private static final Path NAR = findNar();
 
     @Container
-    private final PulsarContainer pulsar = new PulsarContainer(
+    private static final PulsarContainer pulsar = new PulsarContainer(
             DockerImageName.parse("apachepulsar/pulsar:4.0.10"))
             .withFunctionsWorker()
             .withCopyFileToContainer(MountableFile.forHostPath(NAR), NAR_DEST)
@@ -102,8 +102,10 @@ class SelectorFilterFunctionIT {
                 .tenant(FUNCTION_TENANT)
                 .namespace(FUNCTION_NS)
                 .name(FUNCTION_NAME)
+                .runtime(FunctionConfig.Runtime.JAVA)
                 .className(SelectorFilterFunction.class.getName())
                 .inputs(java.util.List.of(INPUT_TOPIC))
+                .subscriptionPosition(org.apache.pulsar.client.api.SubscriptionInitialPosition.Earliest)
                 .processingGuarantees(FunctionConfig.ProcessingGuarantees.MANUAL)
                 .retainKeyOrdering(true)
                 .forwardSourceMessageProperty(true)
@@ -111,10 +113,24 @@ class SelectorFilterFunctionIT {
                 .parallelism(1)
                 .userConfig(Map.of("control-topic", (Object) CONTROL_TOPIC))
                 .build();
-        admin.functions().createFunctionWithUrl(config, "file://" + NAR_DEST);
+        deployWithLeaderRetry(admin, config, NAR.toString());
 
-        // 5. Wait briefly for the function to subscribe.
-        Thread.sleep(8000);
+        // 5. Wait for the function to be RUNNING (with status logging for diagnostics).
+        for (int i = 0; i < 30; i++) {
+            try {
+                var status = admin.functions().getFunctionStatus(FUNCTION_TENANT, FUNCTION_NS, FUNCTION_NAME);
+                LOG.info("Function status (attempt {}): numInstances={} numRunning={} firstError='{}'",
+                        i, status.getNumInstances(), status.getNumRunning(),
+                        status.getInstances().isEmpty() ? "n/a"
+                                : status.getInstances().get(0).getStatus().getError());
+                if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) {
+                    break;
+                }
+            } catch (Exception e) {
+                LOG.info("getFunctionStatus attempt {} failed: {}", i, e.getMessage());
+            }
+            Thread.sleep(1000);
+        }
 
         // 6. Drive input messages.
         try (Producer<byte[]> in = client.newProducer(Schema.BYTES).topic(INPUT_TOPIC).create()) {
@@ -137,6 +153,35 @@ class SelectorFilterFunctionIT {
         assertThat(m3).as("Only US messages should pass the selector").isNull();
 
         outputConsumer.close();
+    }
+
+    /**
+     * Retries createFunction past the functions-worker leader-election window. Treats
+     * "already exists" as success (a previous attempt persisted metadata then failed with
+     * "Leader not yet ready").
+     */
+    private static void deployWithLeaderRetry(PulsarAdmin admin, FunctionConfig config, String pkg)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + 60_000L;
+        Exception last = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                admin.functions().createFunction(config, pkg);
+                return;
+            } catch (org.apache.pulsar.client.admin.PulsarAdminException e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")) {
+                    last = e;
+                    Thread.sleep(1_000);
+                    continue;
+                }
+                if (msg.contains("already exists")) {
+                    return;
+                }
+                throw e;
+            }
+        }
+        throw new IllegalStateException("Function deploy timed out waiting for leader readiness", last);
     }
 
     private static Path findNar() {
