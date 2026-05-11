@@ -75,13 +75,13 @@ edges the function does not try to hide:
 | Header value's bytes are themselves a valid base64 string | KoP injects an extra property `__ksn_internal_header_format` containing a JSON map that disambiguates which header values are base64 vs UTF-8. The function **hides this property from selector lookups** (`__ksn_internal_header_format IS NOT NULL` will never match) but **preserves it in the forwarded property map** so downstream KoP-aware tools can still decode correctly. |
 | Property is flagged base64-encoded in `__ksn_internal_header_format` | The function **transparently decodes** the property: base64 → bytes → UTF-8 string (if valid). Selectors compare against the decoded form (e.g. `header_key = 'key'` instead of `header_key = 'a2V5'`). Decoded values are cached per record so repeated lookups across many queries reuse the same `String` instance. If the decoded bytes are not valid UTF-8 (true binary headers), the function falls back to surfacing the raw base64 string and selectors must compare against that. |
 
-Behavior by `kafkaEntryFormat`:
+Behavior by `kafkaEntryFormat` when a **Kafka producer** writes to the topic and the **function** (a native Pulsar consumer) is meant to filter it:
 
 | `kafkaEntryFormat` | Native Pulsar consumer can read? | This function works? | Notes |
 |---|---|---|---|
-| `pulsar` (default) | yes | yes | Kafka record stored as Pulsar message; key passes through unchanged. |
-| `pulsar_non_batched` | yes | yes | Key is base64-encoded; the function auto-decodes via `Message.getKeyBytes()`. |
-| `kafka` | **no** | **no** | Records stored in Kafka native wire format — only Kafka clients can consume. Selector-filtering this topic requires switching to one of the two formats above. |
+| `pulsar` (default) | **no** for Kafka-produced records | **no** | Kafka records are stored as **batched** Pulsar messages designed for Kafka clients. Native Pulsar consumers log `BatchDeSerializeError` and drop them. Pulsar-produced records DO work. |
+| `pulsar_non_batched` | yes | **yes** | Each Kafka record is one Pulsar message. The key is base64-encoded in the Pulsar key field; the function decodes via `Message.getKeyBytes()` so `__key__ = '<original-bytes>'` matches as expected. **This is the recommended format for Kafka↔native-Pulsar interop.** |
+| `kafka` | no | **no** | Records stored in Kafka native wire format — only Kafka clients can consume. Selector-filtering this topic is impossible regardless of selector. |
 
 Live KoP coverage runs in `function/src/test/java/.../KoPFilterFunctionIT.java` against
 [`streamnative/sn-platform:4.2.0.6`](https://hub.docker.com/r/streamnative/sn-platform), which
@@ -89,8 +89,8 @@ bundles the KSN (Kafka StreamNative) protocol handler. Three tests cover the mat
 
 | Test | What it proves |
 |---|---|
-| `pulsarFormatTopicFiltersByKeyAndProperty` | With `kafkaEntryFormat=pulsar` (default), a Kafka producer sending `key="BTC"`, header `region=US`, plus two negative cases, results in exactly one matching message reaching the filtered output topic. |
-| `pulsarNonBatchedFormatTopicFiltersByDecodedKey` | With `kafkaEntryFormat=pulsar_non_batched`, KoP base64-encodes the Pulsar key but the function's `Message.getKeyBytes()` path decodes transparently — `__key__ = 'BTC'` matches. |
+| `pulsarFormatTopicIsNotConsumableFromNativePulsarFunction` | With `kafkaEntryFormat=pulsar` (default), Kafka-produced records are stored as batched Pulsar messages; the function logs `BatchDeSerializeError` and produces zero output. Documents the limitation. |
+| `pulsarNonBatchedFormatTopicFiltersByDecodedKey` | With `kafkaEntryFormat=pulsar_non_batched`, KoP base64-encodes the Pulsar key but the function's `Message.getKeyBytes()` path decodes transparently — `__key__ = 'BTC'` matches. **Happy path for Kafka↔function interop.** |
 | `kafkaFormatTopicIsNotReadableByFunctionAndProducesNoOutput` | With `kafkaEntryFormat=kafka`, the function (a native Pulsar consumer) cannot read the records; selector-filtering on these topics is impossible. The test asserts zero output appears within 20 seconds. |
 
 Each test spins up a fresh container (since `kafkaEntryFormat` is a global broker setting) and uses
@@ -344,6 +344,12 @@ the function-worker Prometheus endpoint; compute rates in your monitoring system
 | `filter.messages.out` | count | `+fanout` per matching input | Total fan-out sends across all matching queries. |
 | `filter.bytes.out` | bytes | `+payload.length * fanout` per matching input | Total bytes published to output topics. |
 | `filter.send.failures` | count | `+1` per failing input | Records where one or more output sends failed (record is then `record.fail()`'d for redelivery). |
+
+**Per-message latency** (when enabled):
+
+| Metric | Unit | Meaning |
+|---|---|---|
+| `filter.processing.time.ms` | sample (double, ms) | Wall-clock time from `process()` entry to ack/fail completion. Recorded as a sample so dashboards can compute p50/p95/p99. **Disable via `userConfig.enable-processing-time-metric=false`** if profiling shows the metric itself is a bottleneck at extreme throughput — the function then makes zero `System.nanoTime()` and zero `recordMetric` calls on the timing path. Default: enabled. |
 
 **Query lifecycle**:
 

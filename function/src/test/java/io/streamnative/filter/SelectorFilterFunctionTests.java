@@ -577,6 +577,66 @@ class SelectorFilterFunctionTests {
         verify(builder).sendAsync();
     }
 
+    // ===== Processing-time metric =====
+
+    @Test
+    void processRecordsProcessingTimeMetricByDefault() throws Exception {
+        // Default behavior — no userConfig key set means the metric is on.
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        mockOutputBuilder("persistent://public/out/a", CompletableFuture.completedFuture(null));
+        fn.loadQueryForTest("q1", queryJson("region = 'US'", "persistent://public/out/a"));
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        verify(ctx, times(1)).recordMetric(eq(SelectorFilterFunction.METRIC_PROCESSING_TIME_MS), anyDouble());
+    }
+
+    @Test
+    void processRecordsProcessingTimeMetricForDroppedPath() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        // No queries -> dropped path.
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        verify(ctx, times(1)).recordMetric(eq(SelectorFilterFunction.METRIC_PROCESSING_TIME_MS), anyDouble());
+    }
+
+    @Test
+    void processingTimeMetricCanBeDisabledViaUserConfig() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        when(ctx.getUserConfigValue(eq(SelectorFilterFunction.CFG_PROCESSING_TIME_METRIC)))
+                .thenReturn(Optional.of("false"));
+
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        mockOutputBuilder("persistent://public/out/a", CompletableFuture.completedFuture(null));
+        fn.loadQueryForTest("q1", queryJson("region = 'US'", "persistent://public/out/a"));
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        verify(ctx, never()).recordMetric(eq(SelectorFilterFunction.METRIC_PROCESSING_TIME_MS), anyDouble());
+    }
+
+    @Test
+    void processingTimeMetricDisabledAlsoSkipsDroppedPath() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        when(ctx.getUserConfigValue(eq(SelectorFilterFunction.CFG_PROCESSING_TIME_METRIC)))
+                .thenReturn(Optional.of("false"));
+
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        verify(ctx, never()).recordMetric(eq(SelectorFilterFunction.METRIC_PROCESSING_TIME_MS), anyDouble());
+    }
+
     @Test
     void processStripsPartitionSuffixForTopicBinding() throws Exception {
         givenControlTopic("persistent://public/control/queries");

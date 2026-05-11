@@ -32,7 +32,7 @@
         <junit.version>5.11.4</junit.version>
         <mockito.version>5.14.2</mockito.version>
         <assertj.version>3.26.3</assertj.version>
-        <testcontainers.version>1.20.4</testcontainers.version>
+        <testcontainers.version>1.21.3</testcontainers.version>
 
         <nifi-nar-maven-plugin.version>1.5.1</nifi-nar-maven-plugin.version>
         <docker-maven-plugin.version>0.45.1</docker-maven-plugin.version>
@@ -142,6 +142,19 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-failsafe-plugin</artifactId>
                     <version>${maven-failsafe-plugin.version}</version>
+                    <configuration>
+                        <!--
+                          Docker Desktop 4.67+ exposes a daemon-proxy socket whose default
+                          /info response is an empty stub when docker-java requests an
+                          unversioned URL — testcontainers then rejects it with a
+                          BadRequestException and gives up. Pin docker-java's API version
+                          via the api.version system property so it builds /v1.43/info URLs
+                          and gets a real response.
+                        -->
+                        <systemPropertyVariables>
+                            <api.version>1.43</api.version>
+                        </systemPropertyVariables>
+                    </configuration>
                     <executions>
                         <execution>
                             <goals>

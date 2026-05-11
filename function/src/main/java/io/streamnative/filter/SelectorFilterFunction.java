@@ -30,6 +30,12 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     private static final Logger LOG = LoggerFactory.getLogger(SelectorFilterFunction.class);
 
     static final String CFG_CONTROL_TOPIC = "control-topic";
+    /**
+     * userConfig key (boolean string). Default {@code true}. When {@code false} the function
+     * never calls {@link System#nanoTime()} or records {@link #METRIC_PROCESSING_TIME_MS} — useful
+     * if profiling shows the metric itself is a bottleneck under extreme throughput.
+     */
+    static final String CFG_PROCESSING_TIME_METRIC = "enable-processing-time-metric";
     static final long LOG_FREQUENCY = 100_000L;
 
     // Message-count metrics. Per Prometheus convention these are monotonic counters; rates are
@@ -55,6 +61,13 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
     static final String METRIC_SEND_FAILURES = "filter.send.failures";
 
+    /**
+     * Per-message wall-clock processing time in milliseconds. Recorded as a sample (double) so
+     * the monitoring layer can compute percentiles (p50/p95/p99). Only emitted when
+     * {@link #CFG_PROCESSING_TIME_METRIC} is enabled.
+     */
+    static final String METRIC_PROCESSING_TIME_MS = "filter.processing.time.ms";
+
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
@@ -64,6 +77,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
     private volatile TableView<byte[]> controlTopicView;
     private volatile Context boundContext;
+    private volatile boolean processingTimeMetricEnabled = true;
 
     @Override
     public void initialize(Context ctx) throws Exception {
@@ -74,6 +88,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         }
 
         this.boundContext = ctx;
+        this.processingTimeMetricEnabled = resolveBoolean(ctx, CFG_PROCESSING_TIME_METRIC, true);
+        LOG.info("Processing-time metric ({}) is {}", METRIC_PROCESSING_TIME_MS,
+                processingTimeMetricEnabled ? "ENABLED" : "DISABLED");
 
         PulsarClient pulsarClient = ctx.getPulsarClient();
         this.controlTopicView = pulsarClient.newTableView(Schema.BYTES)
@@ -92,6 +109,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     public CompletableFuture<Void> process(byte[] payload, Context ctx) throws Exception {
         this.boundContext = ctx;
 
+        // Cheap branch: if the metric is disabled, no nanoTime call at all.
+        final long startNanos = processingTimeMetricEnabled ? System.nanoTime() : 0L;
+
         int payloadBytes = payload == null ? 0 : payload.length;
         ctx.recordMetric(METRIC_MESSAGES_IN, 1.0);
         ctx.recordMetric(METRIC_BYTES_IN, payloadBytes);
@@ -99,7 +119,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         Record<?> record = ctx.getCurrentRecord();
 
         if (compiled.isEmpty()) {
-            return ackAsDropped(ctx, record, payloadBytes);
+            return ackAsDropped(ctx, record, payloadBytes, startNanos);
         }
 
         MessageBindings bindings = MessageBindings.from(record);
@@ -129,7 +149,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         }
 
         if (sends.isEmpty()) {
-            return ackAsDropped(ctx, record, payloadBytes);
+            return ackAsDropped(ctx, record, payloadBytes, startNanos);
         }
 
         final int fanout = sends.size();
@@ -150,16 +170,40 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                                     c, droppedCount.get(), compiled.size());
                         }
                     }
+                    recordProcessingTime(ctx, startNanos);
                 })
                 .thenApply(v -> null);
     }
 
-    private CompletableFuture<Void> ackAsDropped(Context ctx, Record<?> record, int payloadBytes) {
+    private CompletableFuture<Void> ackAsDropped(Context ctx, Record<?> record, int payloadBytes, long startNanos) {
         droppedCount.incrementAndGet();
         ctx.recordMetric(METRIC_MESSAGES_DROPPED, 1.0);
         ctx.recordMetric(METRIC_BYTES_DROPPED, payloadBytes);
         record.ack();
+        recordProcessingTime(ctx, startNanos);
         return CompletableFuture.completedFuture(null);
+    }
+
+    /**
+     * Records the elapsed wall-clock time since {@code startNanos} as a sample on
+     * {@link #METRIC_PROCESSING_TIME_MS}. No-op when the metric is disabled. Called from both the
+     * matched-fanout completion path (async, on the broker IO thread) and the dropped/empty path
+     * (sync, on the broker thread that invoked process()).
+     */
+    private void recordProcessingTime(Context ctx, long startNanos) {
+        if (!processingTimeMetricEnabled) {
+            return;
+        }
+        double elapsedMs = (System.nanoTime() - startNanos) / 1_000_000.0;
+        ctx.recordMetric(METRIC_PROCESSING_TIME_MS, elapsedMs);
+    }
+
+    private static boolean resolveBoolean(Context ctx, String key, boolean defaultValue) {
+        Object value = ctx.getUserConfigValue(key).orElse(null);
+        if (value == null) {
+            return defaultValue;
+        }
+        return Boolean.parseBoolean(value.toString());
     }
 
     private String resolveControlTopic(Context ctx) {
