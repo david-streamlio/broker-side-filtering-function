@@ -453,6 +453,130 @@ class SelectorFilterFunctionTests {
                 .containsEntry("region", "US");
     }
 
+    // ===== Function-level transparent KoP base64 decoding =====
+
+    @Test
+    void processMatchesAgainstDecodedBase64PropertyEndToEnd() throws Exception {
+        // KoP delivered "header_key" as base64 "a2V5" (decodes to "key"). The disambig flags
+        // the property as base64. End-to-end through process(): a selector against the DECODED
+        // form ("key") must match.
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        when(record.getProperties()).thenReturn(Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"header_key\":\"base64\"}",
+                "header_key", "a2V5"));
+
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(
+                "persistent://public/out/a", CompletableFuture.completedFuture(null));
+
+        fn.loadQueryForTest("q1", queryJson("header_key = 'key'", "persistent://public/out/a"));
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        verify(builder).sendAsync();
+        verify(record).ack();
+        verify(record, never()).fail();
+    }
+
+    @Test
+    void processDoesNotMatchAgainstRawBase64WhenTransparentDecodeFires() throws Exception {
+        // The complementary case: the property is decoded, so a selector comparing against the
+        // RAW base64 string must NOT match.
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        when(record.getProperties()).thenReturn(Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"header_key\":\"base64\"}",
+                "header_key", "a2V5"));
+
+        fn.loadQueryForTest("q1", queryJson("header_key = 'a2V5'", "persistent://public/out/a"));
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        verify(record).ack();
+        verify(ctx, never()).newOutputMessage(anyString(), any(Schema.class));
+    }
+
+    @Test
+    void processMatchesAgainstRawBase64ForTrueBinaryPropertyEndToEnd() throws Exception {
+        // Property flagged as base64 but whose decoded bytes [0x88] aren't valid UTF-8. The
+        // function falls back to surfacing the raw base64 string; the selector compares against
+        // that.
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        when(record.getProperties()).thenReturn(Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"bin_h\":\"base64\"}",
+                "bin_h", "iA=="));
+
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(
+                "persistent://public/out/a", CompletableFuture.completedFuture(null));
+
+        fn.loadQueryForTest("q1", queryJson("bin_h = 'iA=='", "persistent://public/out/a"));
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        verify(builder).sendAsync();
+        verify(record).ack();
+    }
+
+    @Test
+    void processForwardsRawPropertiesEvenWhenSelectorSawDecodedForm() throws Exception {
+        // Decoding is a selector-only view. The forward path must publish the ORIGINAL Pulsar
+        // properties (raw base64 + disambig) so KoP-aware downstream tools can decide for
+        // themselves how to interpret.
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        when(record.getProperties()).thenReturn(Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"header_key\":\"base64\"}",
+                "header_key", "a2V5"));
+
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(
+                "persistent://public/out/a", CompletableFuture.completedFuture(null));
+
+        fn.loadQueryForTest("q1", queryJson("header_key = 'key'", "persistent://public/out/a"));
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(builder).properties(propsCaptor.capture());
+        Map<String, String> forwarded = propsCaptor.getValue();
+        assertThat(forwarded)
+                .as("Forward path is untouched by selector-side decoding")
+                .containsEntry("header_key", "a2V5")
+                .containsKey(MessageBindings.KOP_INTERNAL_HEADER_FORMAT);
+    }
+
+    @Test
+    void processHandlesMixedFlaggedAndUnflaggedPropertiesEndToEnd() throws Exception {
+        // A realistic record with one base64-flagged header (decoded) and one regular UTF-8
+        // header (passed through). A compound selector touching both must match correctly.
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        when(record.getProperties()).thenReturn(Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"flagged\":\"base64\"}",
+                "flagged", "a2V5",     // decodes to "key"
+                "region", "US"));
+
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(
+                "persistent://public/out/a", CompletableFuture.completedFuture(null));
+
+        fn.loadQueryForTest("q1", queryJson(
+                "flagged = 'key' AND region = 'US'", "persistent://public/out/a"));
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        verify(builder).sendAsync();
+    }
+
     @Test
     void processStripsPartitionSuffixForTopicBinding() throws Exception {
         givenControlTopic("persistent://public/control/queries");
