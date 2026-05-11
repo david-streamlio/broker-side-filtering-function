@@ -64,6 +64,16 @@ through `Message.getKeyBytes()` — which the Pulsar client transparently decode
 `__key__ = 'BTC'` matches in both KoP and native cases. No per-topic configuration or external
 metadata is needed: every message carries its own decode hint in `MessageMetadata`.
 
+**Kafka header → Pulsar property** conversion is performed by KoP at ingest time and has lossy
+edges the function does not try to hide:
+
+| KoP behavior | What selectors see |
+|---|---|
+| Multiple Kafka headers with the same key | Only the **latest** value survives. Selectors evaluating against that header compare against the latest. |
+| Header value is valid UTF-8 | Property value is the UTF-8 string (e.g. `header-value`). Selectors write literal string comparisons: `header_key = 'header-value'`. |
+| Header value is **not** valid UTF-8 | Property value is the **base64** encoding (e.g. `iA==` for `0x88`). Selectors must compare against the base64 string: `binary_header = 'iA=='`. The bytes can't be losslessly represented as a Pulsar string property otherwise. |
+| Header value's bytes are themselves a valid base64 string | KoP injects an extra property `__ksn_internal_header_format` containing a JSON map that disambiguates which header values are base64 vs UTF-8. The function **hides this property from selector lookups** (`__ksn_internal_header_format IS NOT NULL` will never match) but **preserves it in the forwarded property map** so downstream KoP-aware tools can still decode correctly. |
+
 Behavior by `kafkaEntryFormat`:
 
 | `kafkaEntryFormat` | Native Pulsar consumer can read? | This function works? | Notes |

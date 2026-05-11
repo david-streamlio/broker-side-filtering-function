@@ -31,6 +31,16 @@ public final class MessageBindings {
     public static final String KEY_BINDING = "__key__";
     public static final String TOPIC_BINDING = "__topic__";
 
+    /**
+     * KoP-injected disambiguation property that signals which Kafka headers were encoded as
+     * base64 (vs raw UTF-8) when surfaced as Pulsar properties. This is bridge-internal metadata,
+     * never a user-filterable signal — we hide it from selectors so a stray reference can't
+     * accidentally match. The value is still preserved in {@link #getProperties()} so the
+     * function's forward path (writing to output topics) keeps it available for KoP-aware
+     * downstream consumers.
+     */
+    public static final String KOP_INTERNAL_HEADER_FORMAT = "__ksn_internal_header_format";
+
     private final Supplier<String> keySupplier;
     private final Supplier<String> topicSupplier;
     private final Supplier<Map<String, String>> propertiesSupplier;
@@ -116,6 +126,11 @@ public final class MessageBindings {
         }
         if (TOPIC_BINDING.equals(name)) {
             return getTopic();
+        }
+        if (KOP_INTERNAL_HEADER_FORMAT.equals(name)) {
+            // Hide KoP's internal disambiguation property from selectors; it must not be a
+            // filterable signal even if a selector author tries to reference it by name.
+            return null;
         }
         return getProperties().get(name);
     }

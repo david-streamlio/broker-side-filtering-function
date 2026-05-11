@@ -415,6 +415,45 @@ class SelectorFilterFunctionTests {
     }
 
     @Test
+    void kopInternalHeaderFormatIsForwardedButNotFilterable() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        // Source record carries the KoP-injected disambiguation property alongside real ones.
+        when(record.getProperties()).thenReturn(Map.of(
+                "region", "US",
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"region\":\"string\"}"));
+
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(
+                "persistent://public/out/a", CompletableFuture.completedFuture(null));
+
+        // A selector that tries to use the internal property must NOT match (it's hidden).
+        fn.loadQueryForTest("hidden-q", queryJson(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT + " IS NOT NULL",
+                "persistent://public/out/a"));
+
+        // A selector against a real property works and triggers the forward.
+        fn.loadQueryForTest("real-q", queryJson("region = 'US'", "persistent://public/out/a"));
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        // Exactly one output, from the real query. The hidden-q never matched because
+        // __ksn_internal_header_format is filtered to null at lookup time.
+        verify(builder, times(1)).sendAsync();
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(builder).properties(propsCaptor.capture());
+        Map<String, String> forwarded = propsCaptor.getValue();
+        assertThat(forwarded)
+                .as("KoP internal property is preserved in the forwarded properties map for "
+                        + "downstream KoP-aware tools")
+                .containsKey(MessageBindings.KOP_INTERNAL_HEADER_FORMAT)
+                .containsEntry("region", "US");
+    }
+
+    @Test
     void processStripsPartitionSuffixForTopicBinding() throws Exception {
         givenControlTopic("persistent://public/control/queries");
         SelectorFilterFunction fn = new SelectorFilterFunction();

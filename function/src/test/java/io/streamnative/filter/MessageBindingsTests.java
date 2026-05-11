@@ -181,6 +181,41 @@ class MessageBindingsTests {
         assertThat(b.getKey()).isEqualTo("LEGACY");
     }
 
+    // ===== KoP property handling =====
+
+    @Test
+    void kopInternalHeaderFormatIsHiddenFromLookup() {
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"header-key\":\"base64\"}",
+                "region", "US"));
+
+        // The internal property must NOT surface to the selector engine, even though it's
+        // present in the underlying map (we don't strip it from getProperties() because the
+        // forward path may want to keep it for downstream KoP-aware tools).
+        assertThat(b.lookup(MessageBindings.KOP_INTERNAL_HEADER_FORMAT)).isNull();
+
+        // Other properties resolve normally.
+        assertThat(b.lookup("region")).isEqualTo("US");
+
+        // Preserved for forwarding.
+        assertThat(b.getProperties()).containsKey(MessageBindings.KOP_INTERNAL_HEADER_FORMAT);
+    }
+
+    @Test
+    void kopBase64EncodedBinaryHeaderSurfacesAsIs() {
+        // KoP's encoding rule: binary header bytes [0x88] → property value "iA==" (base64).
+        // We pass through unchanged; the selector author compares against the base64 string.
+        MessageBindings b = new MessageBindings("k", "t", Map.of("binary-header", "iA=="));
+        assertThat(b.lookup("binary-header")).isEqualTo("iA==");
+    }
+
+    @Test
+    void kopUtf8HeaderSurfacesAsUtf8String() {
+        // KoP's encoding rule: valid-UTF-8 header bytes → property value is the UTF-8 string.
+        MessageBindings b = new MessageBindings("k", "t", Map.of("header-key", "header-value-2"));
+        assertThat(b.lookup("header-key")).isEqualTo("header-value-2");
+    }
+
     @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
     void fromRecordFallsBackWhenMessageHasNoKey() {
