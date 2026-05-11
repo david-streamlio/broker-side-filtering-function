@@ -8,6 +8,7 @@
         <groupId>io.streamnative</groupId>
         <artifactId>selector-filter-parent</artifactId>
         <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>selector-filter-function</artifactId>

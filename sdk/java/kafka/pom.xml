@@ -8,44 +8,28 @@
         <groupId>io.streamnative</groupId>
         <artifactId>selector-filter-parent</artifactId>
         <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../../pom.xml</relativePath>
     </parent>
 
-    <artifactId>selector-filter-client</artifactId>
+    <artifactId>selector-filter-client-kafka</artifactId>
     <packaging>jar</packaging>
-    <name>Selector Filter — Session Client</name>
+    <name>Selector Filter — Kafka Client</name>
     <description>
-        JMS-Session-style client library that creates per-consumer private output topics, registers
-        JMS selector queries with the broker-side filter function via the control topic, and cleans
-        up private topics on close.
+        Kafka-client SDK over the broker-side selector filter function. Returns real
+        org.apache.kafka.clients.consumer.Consumer instances pointed at a KoP-enabled Pulsar
+        broker; adds FilterControl for dynamic-selector ops via the shared Session in
+        selector-filter-client.
     </description>
 
     <dependencies>
         <dependency>
             <groupId>io.streamnative</groupId>
-            <artifactId>selector-filter-common</artifactId>
+            <artifactId>selector-filter-client</artifactId>
         </dependency>
 
         <dependency>
-            <groupId>org.apache.pulsar</groupId>
-            <artifactId>pulsar-client-api</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.pulsar</groupId>
-            <artifactId>pulsar-client-admin-api</artifactId>
-        </dependency>
-
-        <!--
-          Selector parser. Same library the function module uses, so client-side validation is
-          bit-for-bit identical to what the function would later accept on the control topic.
-        -->
-        <dependency>
-            <groupId>com.datastax.oss</groupId>
-            <artifactId>pulsar-jms-filters-common</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
         </dependency>
 
         <dependency>
@@ -94,6 +78,13 @@
             <artifactId>junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>${slf4j.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- The function NAR is provided as a test resource via system property; no Maven dep. -->
     </dependencies>
 
     <build>

@@ -1,0 +1,43 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://github.com/david-streamlio/broker-side-filtering-function/blob/main/protocol/query-message.schema.json",
+    "title": "QueryMessage",
+    "description": "Control-topic record format for the broker-side selector filter function. Each record is published to the control topic keyed by a stable query-id. The function maintains a Pulsar TableView over the control topic; publishes with a non-null body register or hot-reload the compiled selector for that query-id; publishes with a null/empty body (TableView tombstone) retract the query and stop fan-out. The JSON contract below describes the non-tombstone body; tombstones have no body and are not schema-validated.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["selector", "outputTopic"],
+    "properties": {
+        "name": {
+            "type": ["string", "null"],
+            "description": "Human-readable label used in function logs. Optional; absent or null is fine.",
+            "minLength": 1
+        },
+        "selector": {
+            "type": "string",
+            "description": "JMS-selector expression — a SQL92 WHERE-clause subset evaluated against record bindings: __key__ (decoded UTF-8 message key), __topic__ (fully-qualified source topic with -partition-N stripped), and any Pulsar user property by name. Parsed by Apache ActiveMQ SelectorParser via com.datastax.oss:pulsar-jms-filters-common; SDKs validate selector syntax client-side before publishing. Must be non-empty.",
+            "minLength": 1
+        },
+        "outputTopic": {
+            "type": "string",
+            "description": "Fully-qualified Pulsar topic the function writes matching messages to. The function honors forwardSourceMessageProperty and retainKeyOrdering, so payload bytes, key, and user properties are forwarded verbatim. Must be a persistent or non-persistent Pulsar topic FQN.",
+            "minLength": 1,
+            "pattern": "^(persistent|non-persistent)://[^/]+/[^/]+/[^/]+$"
+        }
+    },
+    "examples": [
+        {
+            "name": "us-large-cap-trades",
+            "selector": "__topic__ LIKE 'persistent://public/trades/%' AND region = 'US' AND marketcap_bucket = 'LARGE'",
+            "outputTopic": "persistent://public/filtered/us-large-cap"
+        },
+        {
+            "selector": "__key__ IN ('AAPL','MSFT','GOOGL')",
+            "outputTopic": "persistent://public/filtered/megacap"
+        },
+        {
+            "name": "non-batched-kop-route",
+            "selector": "region = 'US' AND priority_tier = 'GOLD'",
+            "outputTopic": "persistent://public/default/filtered-c4f9e7b1-d2a3-4f6e-9b1a-1234567890ab"
+        }
+    ]
+}

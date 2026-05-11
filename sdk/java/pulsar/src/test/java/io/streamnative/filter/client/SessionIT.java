@@ -33,7 +33,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * driving everything.
  *
  * <p>Requires Docker and a pre-built {@code function/target/selector-filter-function-*.nar}. Run
- * {@code mvn -pl function package} before invoking this IT (or use {@code mvn verify} at the
+ * {@code mvn -pl functions/selector-filter package} before invoking this IT (or use
+ * {@code mvn verify} at the
  * reactor root, which builds in dependency order automatically).
  */
 @Testcontainers
@@ -323,12 +324,15 @@ class SessionIT {
     }
 
     private static Path findNar() {
-        Path target = Paths.get(System.getProperty("user.dir"), "..", "function", "target").normalize();
+        // Module dir is sdk/java/pulsar; NAR lives at functions/selector-filter/target/.
+        Path target = Paths.get(System.getProperty("user.dir"),
+                "..", "..", "..", "functions", "selector-filter", "target").normalize();
         File[] files = target.toFile().listFiles((dir, name) ->
                 name.startsWith("selector-filter-function-") && name.endsWith(".nar"));
         if (files == null || files.length == 0) {
             throw new IllegalStateException(
-                    "NAR not found in " + target + ". Run 'mvn -pl function package' first.");
+                    "NAR not found in " + target
+                            + ". Run 'mvn -pl functions/selector-filter package' first.");
         }
         return files[0].toPath();
     }

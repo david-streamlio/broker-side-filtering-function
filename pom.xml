@@ -14,9 +14,9 @@
 
     <modules>
         <module>common</module>
-        <module>function</module>
-        <module>client</module>
-        <module>client-kafka</module>
+        <module>functions/selector-filter</module>
+        <module>sdk/java/pulsar</module>
+        <module>sdk/java/kafka</module>
     </modules>
 
     <properties>

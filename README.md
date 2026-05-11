@@ -83,7 +83,7 @@ Behavior by `kafkaEntryFormat` when a **Kafka producer** writes to the topic and
 | `pulsar_non_batched` | yes in principle | **no on KoP 4.2.0.6** | The function's key-decode logic is unit-tested and correct (`MessageBindingsTests.fromRecordDecodesKoPBase64Key`). However, observed KoP 4.2.0.6 behavior emits messages with batch-envelope framing whose `SingleMessageMetadata` omits required fields. The Pulsar Function's `ConsumerImpl` raises `IllegalStateException: Some required fields are missing` at deserialization — the message never reaches our function code. **Verified live in `KoPFilterFunctionIT.pulsarNonBatchedFormatProducesMessagesIncompatibleWithFunctionConsumer`** (recorded as a negative test). A future KoP version that emits strictly non-batched envelopes, or a native Pulsar producer that explicitly sets `hasBase64EncodedKey`, will exercise the happy path. |
 | `kafka` | no | **no** | Records stored in Kafka native wire format — only Kafka clients can consume. Selector-filtering this topic is impossible regardless of selector. |
 
-Live KoP coverage runs in `function/src/test/java/.../KoPFilterFunctionIT.java` against
+Live KoP coverage runs in `functions/selector-filter/src/test/java/.../KoPFilterFunctionIT.java` against
 [`streamnative/sn-platform:4.2.0.6`](https://hub.docker.com/r/streamnative/sn-platform), which
 bundles the KSN (Kafka StreamNative) protocol handler. Three tests cover the matrix:
 
@@ -216,9 +216,11 @@ mvn -B clean verify
 mvn -B clean package -Pdocker
 ```
 
-The function NAR appears at `function/target/selector-filter-function-${VERSION}.nar` and is the
-artifact you register with `pulsar-admin functions create --jar`. The client jar is at
-`client/target/selector-filter-client-${VERSION}.jar`.
+The function NAR appears at
+`functions/selector-filter/target/selector-filter-function-${VERSION}.nar` and is the artifact
+you register with `pulsar-admin functions create --jar`. The Pulsar client jar is at
+`sdk/java/pulsar/target/selector-filter-client-${VERSION}.jar`; the Kafka client jar at
+`sdk/java/kafka/target/selector-filter-client-kafka-${VERSION}.jar`.
 
 ## Client library — `Session` + `FilterControl`
 
@@ -530,37 +532,44 @@ with different control topics.
 ## Project layout
 
 ```
-pom.xml                                       -- parent (multi-module)
-common/                                       -- shared QueryMessage type
-  src/main/java/io/streamnative/filter/common/QueryMessage.java
-function/                                     -- the broker-side Function (NAR)
-  pom.xml
-  src/main/java/io/streamnative/filter/
-    SelectorFilterFunction.java
-    SelectorEvaluator.java                    -- compile + match + binding-requirement analysis
-    CompiledQuery.java
-    MessageBindings.java                      -- lazy __key__/__topic__/properties resolver
-    TopicNames.java
-  src/main/resources/META-INF/services/pulsar-io.yaml
-  src/main/docker/Dockerfile
-  deployment/
-client/                                       -- Session-style client library (JAR)
-  pom.xml
-  src/main/java/io/streamnative/filter/client/
-    Session.java                              -- shared context + public registerPrivateQuery API
-    SessionBuilder.java
-    PrivateQuery.java                         -- value object passed between Session and SDKs
-    FilterableConsumerBuilder.java            -- Pulsar-native consumer builder
-    FilteringPulsarConsumer.java              -- Consumer<byte[]> + FilterControl wrapper
-    FilterControl.java                        -- dynamic-selector cast interface
-    PrivateTopicPolicy.java
-    Selectors.java                            -- compose + validate selector syntax
-client-kafka/                                 -- Kafka-flavoured client library (JAR)
-  pom.xml
-  src/main/java/io/streamnative/filter/client/kafka/
-    FilterableKafkaConsumers.java             -- static factory entry point
-    FilterableKafkaConsumerBuilder.java       -- fluent Kafka consumer builder
-    FilteringKafkaConsumer.java               -- Consumer<K,V> + FilterControl wrapper
+pom.xml                                       -- Java reactor parent (lists leaf modules)
+protocol/                                     -- cross-language wire contracts
+  query-message.schema.json                   -- JSON Schema for the control-topic record
+common/                                       -- Java shared types (used by function + JVM SDKs)
+  src/main/java/io/streamnative/filter/common/
+    QueryMessage.java                         -- Java impl of protocol/query-message.schema.json
+functions/                                    -- Pulsar function deployment artifacts (NARs)
+  selector-filter/                            -- the broker-side filter function NAR
+    pom.xml
+    src/main/java/io/streamnative/filter/
+      SelectorFilterFunction.java
+      SelectorEvaluator.java                  -- compile + match + binding-requirement analysis
+      CompiledQuery.java
+      MessageBindings.java                    -- lazy __key__/__topic__/properties resolver
+      TopicNames.java
+    src/main/resources/META-INF/services/pulsar-io.yaml
+    src/main/docker/Dockerfile
+    deployment/
+sdk/                                          -- client SDKs across all languages
+  java/
+    pulsar/                                   -- Pulsar-native SDK (JAR)
+      pom.xml
+      src/main/java/io/streamnative/filter/client/
+        Session.java                          -- context + public registerPrivateQuery API
+        SessionBuilder.java
+        PrivateQuery.java                     -- value object passed between Session and SDKs
+        FilterableConsumerBuilder.java        -- Pulsar-native consumer builder
+        FilteringPulsarConsumer.java          -- Consumer<byte[]> + FilterControl wrapper
+        FilterControl.java                    -- dynamic-selector cast interface
+        PrivateTopicPolicy.java
+        Selectors.java                        -- compose + validate selector syntax
+    kafka/                                    -- Kafka-flavoured SDK over KoP (JAR)
+      pom.xml
+      src/main/java/io/streamnative/filter/client/kafka/
+        FilterableKafkaConsumers.java         -- static factory entry point
+        FilterableKafkaConsumerBuilder.java   -- fluent Kafka consumer builder
+        FilteringKafkaConsumer.java           -- Consumer<K,V> + FilterControl wrapper
+  # FUTURE: sdk/python/, sdk/cpp/, ...
 ```
 
 ## References

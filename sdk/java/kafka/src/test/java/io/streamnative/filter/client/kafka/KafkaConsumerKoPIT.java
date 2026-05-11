@@ -46,7 +46,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * + dynamic-selector hot-reload working as advertised.
  *
  * <p>Requires Docker AND a pre-built {@code function/target/selector-filter-function-*.nar} — run
- * {@code mvn -pl function package} first, or {@code mvn verify} at the reactor root.
+ * {@code mvn -pl functions/selector-filter package} first, or {@code mvn verify} at the
+ * reactor root.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class KafkaConsumerKoPIT {
@@ -304,12 +305,15 @@ class KafkaConsumerKoPIT {
     }
 
     private static Path findFunctionNar() {
-        Path target = Paths.get(System.getProperty("user.dir"), "..", "function", "target").normalize();
+        // Module dir is sdk/java/kafka; NAR lives at functions/selector-filter/target/.
+        Path target = Paths.get(System.getProperty("user.dir"),
+                "..", "..", "..", "functions", "selector-filter", "target").normalize();
         File[] files = target.toFile().listFiles((dir, name) ->
                 name.startsWith("selector-filter-function-") && name.endsWith(".nar"));
         if (files == null || files.length == 0) {
             throw new IllegalStateException(
-                    "NAR not found in " + target + ". Run 'mvn -pl function package' first.");
+                    "NAR not found in " + target
+                            + ". Run 'mvn -pl functions/selector-filter package' first.");
         }
         return files[0].toPath();
     }
