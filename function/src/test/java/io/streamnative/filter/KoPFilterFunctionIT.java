@@ -152,9 +152,7 @@ class KoPFilterFunctionIT {
                 // "kafka" format the function still deploys but won't receive readable messages
                 // — see the negative test.
                 deployFunction(admin);
-
-                // Give the function's TableView listener time to subscribe.
-                Thread.sleep(8_000);
+                waitForFunctionRunning(admin, "public", "default", "selector-filter-kop-it");
 
                 body.run(client, admin, kafkaBootstrap);
             }
@@ -322,6 +320,28 @@ class KoPFilterFunctionIT {
                         .isNull();
             }
         });
+    }
+
+    /**
+     * Polls {@code getFunctionStatus} until {@code numRunning == numInstances}. Catches the
+     * race where messages produced immediately after {@code createFunction} are missed because
+     * the function instance hasn't subscribed yet.
+     */
+    private static void waitForFunctionRunning(PulsarAdmin admin, String tenant, String ns, String name)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + 30_000L;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                var status = admin.functions().getFunctionStatus(tenant, ns, name);
+                if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) {
+                    LOG.info("Function {}/{}/{} is RUNNING ({} instances)", tenant, ns, name,
+                            status.getNumInstances());
+                    return;
+                }
+            } catch (Exception ignored) {}
+            Thread.sleep(500);
+        }
+        throw new IllegalStateException("Timed out waiting for function " + name + " to be RUNNING");
     }
 
     private static Path findFunctionNar() {

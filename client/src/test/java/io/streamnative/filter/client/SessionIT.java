@@ -91,8 +91,15 @@ class SessionIT {
                 .build();
         admin.functions().createFunction(config, NAR.toString());
 
-        // Give the function time to start subscribing.
-        Thread.sleep(8000);
+        // Poll until the function instance is RUNNING.
+        long fnReadyDeadline = System.currentTimeMillis() + 30_000L;
+        while (System.currentTimeMillis() < fnReadyDeadline) {
+            try {
+                var status = admin.functions().getFunctionStatus(FN_TENANT, FN_NS, FN_NAME);
+                if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) break;
+            } catch (Exception ignored) {}
+            Thread.sleep(500);
+        }
 
         inputProducer = client.newProducer(Schema.BYTES).topic(INPUT_TOPIC).create();
     }
