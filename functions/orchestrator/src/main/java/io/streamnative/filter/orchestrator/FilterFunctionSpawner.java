@@ -1,0 +1,30 @@
+package io.streamnative.filter.orchestrator;
+
+import io.streamnative.filter.common.FilterRequest;
+
+/**
+ * Strategy for materializing a per-input-topic filter-function instance. Phase 4 supplies a
+ * production implementation backed by {@code PulsarAdmin.functions().createFunction(...)} that
+ * spawns the function from a pre-uploaded Pulsar package URL and configures the per-function
+ * control topic. Phase 3 uses a no-op stub for unit testing the orchestrator's routing logic.
+ *
+ * <p>Returns a {@link RegistryEntry} describing the materialized function (its name + its control
+ * topic). The orchestrator writes this entry to the registry store after a successful spawn.
+ *
+ * <p>Implementations MUST be idempotent: invoking with the same {@code registryKey} when the
+ * function is already running is a no-op and should return a {@link RegistryEntry} consistent with
+ * the running instance.
+ */
+interface FilterFunctionSpawner {
+
+    /**
+     * Materialize a filter-function instance for the given registry key (input topic FQN or
+     * topicsPattern).
+     *
+     * @param registryKey the input topic FQN or topicsPattern that this filter function is bound to
+     * @param req         the originating FilterRequest (provides input topics, pattern, serializers,
+     *                    clientType — orchestrator uses these to populate the registry entry)
+     * @param cfg         orchestrator configuration (package URL, tenant/namespace, parallelism…)
+     */
+    RegistryEntry spawn(String registryKey, FilterRequest req, OrchestratorConfig cfg) throws Exception;
+}

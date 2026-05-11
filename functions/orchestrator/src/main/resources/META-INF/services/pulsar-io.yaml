@@ -1,0 +1,3 @@
+name: selector-filter-orchestrator
+description: Orchestrates per-input-topic selector-filter function instances; consumes FilterRequests from the SDK
+functionClass: io.streamnative.filter.orchestrator.OrchestratorFunction
