@@ -83,11 +83,20 @@ Behavior by `kafkaEntryFormat`:
 | `pulsar_non_batched` | yes | yes | Key is base64-encoded; the function auto-decodes via `Message.getKeyBytes()`. |
 | `kafka` | **no** | **no** | Records stored in Kafka native wire format — only Kafka clients can consume. Selector-filtering this topic requires switching to one of the two formats above. |
 
-Tests covering the KoP matrix are scaffolded in `function/src/test/java/.../KoPFilterFunctionIT.java`
-and disabled by default — they require a Pulsar broker with the KoP protocol handler installed and
-a matching KoP release. The class javadoc lists the setup steps; the regex `topicsPattern`
-integration test in `RegexPatternIT.java` is enabled and validates dynamic topic discovery against
-a stock Pulsar testcontainer.
+Live KoP coverage runs in `function/src/test/java/.../KoPFilterFunctionIT.java` against
+[`streamnative/sn-platform:4.2.0.6`](https://hub.docker.com/r/streamnative/sn-platform), which
+bundles the KSN (Kafka StreamNative) protocol handler. Three tests cover the matrix:
+
+| Test | What it proves |
+|---|---|
+| `pulsarFormatTopicFiltersByKeyAndProperty` | With `kafkaEntryFormat=pulsar` (default), a Kafka producer sending `key="BTC"`, header `region=US`, plus two negative cases, results in exactly one matching message reaching the filtered output topic. |
+| `pulsarNonBatchedFormatTopicFiltersByDecodedKey` | With `kafkaEntryFormat=pulsar_non_batched`, KoP base64-encodes the Pulsar key but the function's `Message.getKeyBytes()` path decodes transparently — `__key__ = 'BTC'` matches. |
+| `kafkaFormatTopicIsNotReadableByFunctionAndProducesNoOutput` | With `kafkaEntryFormat=kafka`, the function (a native Pulsar consumer) cannot read the records; selector-filtering on these topics is impossible. The test asserts zero output appears within 20 seconds. |
+
+Each test spins up a fresh container (since `kafkaEntryFormat` is a global broker setting) and uses
+`PULSAR_PREFIX_*` env vars to inject KoP config into `broker.conf`. Requires Docker. The regex
+`topicsPattern` integration test in `RegexPatternIT.java` is independent and runs against a stock
+Pulsar testcontainer.
 
 ### Important constraints
 
