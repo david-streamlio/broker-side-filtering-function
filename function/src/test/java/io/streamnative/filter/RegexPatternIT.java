@@ -151,8 +151,9 @@ class RegexPatternIT {
             }
         }
 
-        // Poll until the function instance is RUNNING before producing messages.
-        long fnReadyDeadline = System.currentTimeMillis() + 30_000L;
+        // Poll until the function instance is RUNNING, then a 5s grace period for initialize()
+        // to prime the TableView before producing input messages.
+        long fnReadyDeadline = System.currentTimeMillis() + 90_000L;
         while (System.currentTimeMillis() < fnReadyDeadline) {
             try {
                 var status = admin.functions().getFunctionStatus("public", "default", "regex-pattern-it");
@@ -160,6 +161,7 @@ class RegexPatternIT {
             } catch (Exception ignored) {}
             Thread.sleep(500);
         }
+        Thread.sleep(5_000);
 
         // 4. Drive a message to the INITIAL topic — must arrive on the output.
         try (Producer<byte[]> p = client.newProducer(Schema.BYTES).topic(INITIAL_TOPIC).create()) {

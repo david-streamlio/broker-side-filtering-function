@@ -115,22 +115,19 @@ class SelectorFilterFunctionIT {
                 .build();
         deployWithLeaderRetry(admin, config, NAR.toString());
 
-        // 5. Wait for the function to be RUNNING (with status logging for diagnostics).
-        for (int i = 0; i < 30; i++) {
+        // 5. Wait for the function to be RUNNING, then give initialize() time to prime
+        //    the TableView before producing messages.
+        for (int i = 0; i < 90; i++) {
             try {
                 var status = admin.functions().getFunctionStatus(FUNCTION_TENANT, FUNCTION_NS, FUNCTION_NAME);
-                LOG.info("Function status (attempt {}): numInstances={} numRunning={} firstError='{}'",
-                        i, status.getNumInstances(), status.getNumRunning(),
-                        status.getInstances().isEmpty() ? "n/a"
-                                : status.getInstances().get(0).getStatus().getError());
                 if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) {
+                    LOG.info("Function RUNNING after {}s", i);
                     break;
                 }
-            } catch (Exception e) {
-                LOG.info("getFunctionStatus attempt {} failed: {}", i, e.getMessage());
-            }
+            } catch (Exception ignored) {}
             Thread.sleep(1000);
         }
+        Thread.sleep(5_000);
 
         // 6. Drive input messages.
         try (Producer<byte[]> in = client.newProducer(Schema.BYTES).topic(INPUT_TOPIC).create()) {

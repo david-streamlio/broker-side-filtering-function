@@ -91,8 +91,9 @@ class SessionIT {
                 .build();
         admin.functions().createFunction(config, NAR.toString());
 
-        // Poll until the function instance is RUNNING.
-        long fnReadyDeadline = System.currentTimeMillis() + 30_000L;
+        // Poll until the function instance is RUNNING, then a 5s grace period for
+        // initialize() to prime the TableView before producing input messages.
+        long fnReadyDeadline = System.currentTimeMillis() + 90_000L;
         while (System.currentTimeMillis() < fnReadyDeadline) {
             try {
                 var status = admin.functions().getFunctionStatus(FN_TENANT, FN_NS, FN_NAME);
@@ -100,6 +101,7 @@ class SessionIT {
             } catch (Exception ignored) {}
             Thread.sleep(500);
         }
+        Thread.sleep(5_000);
 
         inputProducer = client.newProducer(Schema.BYTES).topic(INPUT_TOPIC).create();
     }

@@ -329,13 +329,19 @@ class KoPFilterFunctionIT {
      */
     private static void waitForFunctionRunning(PulsarAdmin admin, String tenant, String ns, String name)
             throws Exception {
-        long deadline = System.currentTimeMillis() + 30_000L;
+        // Pulsar 4.2's expected_healthcheck_interval=30 means the first heartbeat may arrive
+        // ~30s after instance start. Allow up to 90s.
+        long deadline = System.currentTimeMillis() + 90_000L;
         while (System.currentTimeMillis() < deadline) {
             try {
                 var status = admin.functions().getFunctionStatus(tenant, ns, name);
                 if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) {
                     LOG.info("Function {}/{}/{} is RUNNING ({} instances)", tenant, ns, name,
                             status.getNumInstances());
+                    // RUNNING fires once the instance starts; initialize() may still be priming
+                    // the TableView. Give it a beat so the query registry is populated before
+                    // we produce input messages.
+                    Thread.sleep(5_000);
                     return;
                 }
             } catch (Exception ignored) {}
