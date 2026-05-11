@@ -88,15 +88,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
                 .create();
 
         this.registry = new RegistryStore(stateView, stateProducer);
-
-        // Phase 4 will replace this with a real spawner backed by ctx.getPulsarAdmin().
-        // For Phase 3 the orchestrator's routing logic is exercisable via the test seam
-        // constructor; the production wire-up is a placeholder until Phase 4.
-        this.spawner = (registryKey, req, cfg) -> {
-            throw new UnsupportedOperationException(
-                    "Real FilterFunctionSpawner not yet wired (Phase 4). Phase-3 production "
-                            + "deployment cannot spawn filter functions; tests inject a mock spawner.");
-        };
+        this.spawner  = new DefaultFilterFunctionSpawner(ctx.getPulsarAdmin());
 
         LOG.info("OrchestratorFunction initialized. stateTopic={}, packageUrl={}, "
                         + "fnTenant={}, fnNamespace={}, ctrlTopicTenant={}, ctrlTopicNs={}, "
