@@ -175,28 +175,37 @@ class KoPFilterFunctionIT {
                 .parallelism(1)
                 .userConfig(Map.of("control-topic", (Object) CONTROL_TOPIC))
                 .build();
-        // Upload the NAR from the test JVM's filesystem via the admin HTTP API. Broker readiness
-        // and functions-worker leader election complete independently — the function deploy can
-        // race ahead of the leader election and produce "Leader not yet ready". Retry up to ~60s.
-        long deadline = System.currentTimeMillis() + 60_000L;
+        deployWithLeaderRetry(admin, config, FN_NAR.toString(),
+                "public", "default", "selector-filter-kop-it");
+    }
+
+    /**
+     * Deploys with retry on "Leader not yet ready". The wrinkle: each failed attempt may have
+     * already uploaded the function package on the way to its 503; the next attempt then fails
+     * with "Package metadata already exists". We delete the stale package between retries so
+     * each attempt starts fresh.
+     */
+    static void deployWithLeaderRetry(PulsarAdmin admin, FunctionConfig config, String pkg,
+                                     String tenant, String ns, String name) throws Exception {
+        String packageUrl = "function://" + tenant + "/" + ns + "/" + name + "@0";
+        long deadline = System.currentTimeMillis() + 90_000L;
         Exception last = null;
         while (System.currentTimeMillis() < deadline) {
             try {
-                admin.functions().createFunction(config, FN_NAR.toString());
+                admin.functions().createFunction(config, pkg);
                 return;
             } catch (org.apache.pulsar.client.admin.PulsarAdminException e) {
+                last = e;
                 String msg = e.getMessage() == null ? "" : e.getMessage();
-                if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")) {
-                    last = e;
+                if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")
+                        || msg.contains("already exists")) {
+                    try {
+                        admin.packages().delete(packageUrl);
+                    } catch (Exception ignored) {
+                        // Package may not exist if the previous attempt failed before upload.
+                    }
                     Thread.sleep(1_000);
                     continue;
-                }
-                if (msg.contains("already exists")) {
-                    // Race within the retry loop: the first request reached the broker,
-                    // wrote the package metadata, then failed with "Leader not yet ready".
-                    // On retry the broker rejects the duplicate. Treat as success — the
-                    // function will be visible via admin.functions().getFunction().
-                    return;
                 }
                 throw e;
             }

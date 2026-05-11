@@ -134,22 +134,8 @@ class RegexPatternIT {
                 .parallelism(1)
                 .userConfig(Map.of("control-topic", (Object) CONTROL_TOPIC))
                 .build();
-        // Retry deploy past the functions-worker leader-election window.
-        long fnDeadline = System.currentTimeMillis() + 60_000L;
-        while (System.currentTimeMillis() < fnDeadline) {
-            try {
-                admin.functions().createFunction(config, NAR.toString());
-                break;
-            } catch (org.apache.pulsar.client.admin.PulsarAdminException e) {
-                String msg = e.getMessage() == null ? "" : e.getMessage();
-                if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")) {
-                    Thread.sleep(1_000);
-                    continue;
-                }
-                if (msg.contains("already exists")) break;
-                throw e;
-            }
-        }
+        KoPFilterFunctionIT.deployWithLeaderRetry(admin, config, NAR.toString(),
+                "public", "default", "regex-pattern-it");
 
         // Poll until the function instance is RUNNING, then a 5s grace period for initialize()
         // to prime the TableView before producing input messages.

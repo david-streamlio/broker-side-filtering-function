@@ -89,7 +89,7 @@ class SessionIT {
                 .parallelism(1)
                 .userConfig(Map.of("control-topic", (Object) CONTROL_TOPIC))
                 .build();
-        admin.functions().createFunction(config, NAR.toString());
+        deployWithLeaderRetry(admin, config, NAR.toString(), FN_TENANT, FN_NS, FN_NAME);
 
         // Poll until the function instance is RUNNING, then a 5s grace period for
         // initialize() to prime the TableView before producing input messages.
@@ -164,6 +164,37 @@ class SessionIT {
                     .as("private topic should be cleaned up on close")
                     .doesNotContain(privateTopic);
         }
+    }
+
+    /**
+     * Deploys with retry on "Leader not yet ready", deleting the stale package between
+     * attempts (it gets uploaded on the way to the 503 and would otherwise block retries
+     * with "Package metadata already exists").
+     */
+    private static void deployWithLeaderRetry(PulsarAdmin admin, FunctionConfig config, String pkg,
+                                              String tenant, String ns, String name) throws Exception {
+        String packageUrl = "function://" + tenant + "/" + ns + "/" + name + "@0";
+        long deadline = System.currentTimeMillis() + 90_000L;
+        Exception last = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                admin.functions().createFunction(config, pkg);
+                return;
+            } catch (org.apache.pulsar.client.admin.PulsarAdminException e) {
+                last = e;
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")
+                        || msg.contains("already exists")) {
+                    try {
+                        admin.packages().delete(packageUrl);
+                    } catch (Exception ignored) {}
+                    Thread.sleep(1_000);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw new IllegalStateException("Function deploy timed out waiting for leader readiness", last);
     }
 
     private static Path findNar() {

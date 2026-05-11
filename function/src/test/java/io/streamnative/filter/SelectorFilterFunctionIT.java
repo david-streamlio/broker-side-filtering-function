@@ -113,7 +113,8 @@ class SelectorFilterFunctionIT {
                 .parallelism(1)
                 .userConfig(Map.of("control-topic", (Object) CONTROL_TOPIC))
                 .build();
-        deployWithLeaderRetry(admin, config, NAR.toString());
+        KoPFilterFunctionIT.deployWithLeaderRetry(admin, config, NAR.toString(),
+                FUNCTION_TENANT, FUNCTION_NS, FUNCTION_NAME);
 
         // 5. Wait for the function to be RUNNING, then give initialize() time to prime
         //    the TableView before producing messages.
@@ -150,35 +151,6 @@ class SelectorFilterFunctionIT {
         assertThat(m3).as("Only US messages should pass the selector").isNull();
 
         outputConsumer.close();
-    }
-
-    /**
-     * Retries createFunction past the functions-worker leader-election window. Treats
-     * "already exists" as success (a previous attempt persisted metadata then failed with
-     * "Leader not yet ready").
-     */
-    private static void deployWithLeaderRetry(PulsarAdmin admin, FunctionConfig config, String pkg)
-            throws Exception {
-        long deadline = System.currentTimeMillis() + 60_000L;
-        Exception last = null;
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                admin.functions().createFunction(config, pkg);
-                return;
-            } catch (org.apache.pulsar.client.admin.PulsarAdminException e) {
-                String msg = e.getMessage() == null ? "" : e.getMessage();
-                if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")) {
-                    last = e;
-                    Thread.sleep(1_000);
-                    continue;
-                }
-                if (msg.contains("already exists")) {
-                    return;
-                }
-                throw e;
-            }
-        }
-        throw new IllegalStateException("Function deploy timed out waiting for leader readiness", last);
     }
 
     private static Path findNar() {
