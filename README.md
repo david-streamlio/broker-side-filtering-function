@@ -73,6 +73,7 @@ edges the function does not try to hide:
 | Header value is valid UTF-8 | Property value is the UTF-8 string (e.g. `header-value`). Selectors write literal string comparisons: `header_key = 'header-value'`. |
 | Header value is **not** valid UTF-8 | Property value is the **base64** encoding (e.g. `iA==` for `0x88`). Selectors must compare against the base64 string: `binary_header = 'iA=='`. The bytes can't be losslessly represented as a Pulsar string property otherwise. |
 | Header value's bytes are themselves a valid base64 string | KoP injects an extra property `__ksn_internal_header_format` containing a JSON map that disambiguates which header values are base64 vs UTF-8. The function **hides this property from selector lookups** (`__ksn_internal_header_format IS NOT NULL` will never match) but **preserves it in the forwarded property map** so downstream KoP-aware tools can still decode correctly. |
+| Property is flagged base64-encoded in `__ksn_internal_header_format` | The function **transparently decodes** the property: base64 → bytes → UTF-8 string (if valid). Selectors compare against the decoded form (e.g. `header_key = 'key'` instead of `header_key = 'a2V5'`). Decoded values are cached per record so repeated lookups across many queries reuse the same `String` instance. If the decoded bytes are not valid UTF-8 (true binary headers), the function falls back to surfacing the raw base64 string and selectors must compare against that. |
 
 Behavior by `kafkaEntryFormat`:
 

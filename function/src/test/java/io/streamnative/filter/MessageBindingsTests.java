@@ -228,4 +228,125 @@ class MessageBindingsTests {
         MessageBindings b = MessageBindings.from(record);
         assertThat(b.getKey()).isNull();
     }
+
+    // ===== KoP transparent base64 property decoding =====
+
+    @Test
+    void flaggedBase64PropertyWithValidUtf8DecodeSurfacesDecodedForm() {
+        // The Kafka producer sent header bytes [0x6b,0x65,0x79] (= "key" UTF-8). KoP stored
+        // the Pulsar property as "a2V5" (base64) for disambiguation. With the disambig property
+        // flagging this header as base64-encoded, the function transparently surfaces "key".
+        String base64 = Base64.getEncoder().encodeToString("key".getBytes(StandardCharsets.UTF_8));
+        assertThat(base64).isEqualTo("a2V5");
+
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"header-key\":\"base64\"}",
+                "header-key", base64));
+
+        assertThat(b.lookup("header-key")).isEqualTo("key");
+    }
+
+    @Test
+    void flaggedBase64PropertyWithBinaryDecodeFallsBackToRaw() {
+        // A truly binary header. Bytes [0x88] are not valid UTF-8; base64 is "iA==".
+        // Decoding succeeds, UTF-8 validation fails → return the raw base64 string so the
+        // selector can compare against it.
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"bin-header\":\"base64\"}",
+                "bin-header", "iA=="));
+
+        assertThat(b.lookup("bin-header")).isEqualTo("iA==");
+    }
+
+    @Test
+    void unflaggedPropertyIsNotDecodedEvenIfItLooksLikeBase64() {
+        // A property whose value happens to be a valid base64 string but is NOT flagged as
+        // base64 by the disambig. The function leaves it alone — selector compares against
+        // the literal string.
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"other\":\"base64\"}",
+                "header-key", "a2V5"));
+
+        assertThat(b.lookup("header-key")).isEqualTo("a2V5");
+    }
+
+    @Test
+    void decodedPropertyValueIsCachedAcrossLookups() {
+        // Repeated lookups within the same MessageBindings must return the same String
+        // reference, proving the decoded value is cached rather than re-allocated each call.
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"h\":\"base64\"}",
+                "h", "a2V5"));
+
+        Object first  = b.lookup("h");
+        Object second = b.lookup("h");
+        Object third  = b.lookup("h");
+
+        assertThat(first).isEqualTo("key");
+        assertThat(second).isSameAs(first);
+        assertThat(third).isSameAs(first);
+    }
+
+    @Test
+    void rawFallbackIsAlsoCached() {
+        // Binary-decode case: the raw base64 string is the resolved value. Multiple lookups
+        // must return the same reference.
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"bin\":\"base64\"}",
+                "bin", "iA=="));
+
+        Object first  = b.lookup("bin");
+        Object second = b.lookup("bin");
+        assertThat(first).isEqualTo("iA==");
+        assertThat(second).isSameAs(first);
+    }
+
+    @Test
+    void malformedDisambigJsonDisablesAutoDecode() {
+        // If KoP's disambig property is corrupted, fall back to raw pass-through for safety.
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{not-json",
+                "header-key", "a2V5"));
+
+        assertThat(b.lookup("header-key")).isEqualTo("a2V5");
+    }
+
+    @Test
+    void unexpectedDisambigSchemaDisablesAutoDecode() {
+        // An array (rather than the expected object) shape: no decoding triggered.
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "[\"header-key\"]",
+                "header-key", "a2V5"));
+
+        assertThat(b.lookup("header-key")).isEqualTo("a2V5");
+    }
+
+    @Test
+    void disambigWithNonBase64EncodingValueIsIgnored() {
+        // Disambig that names a property with format "string" should not trigger base64 decode.
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT, "{\"header-key\":\"string\"}",
+                "header-key", "a2V5"));
+
+        assertThat(b.lookup("header-key")).isEqualTo("a2V5");
+    }
+
+    @Test
+    void noDisambigPropertyMeansNoDecodeAttempted() {
+        // Without __ksn_internal_header_format, a base64-looking value is passed through.
+        MessageBindings b = new MessageBindings("k", "t", Map.of("header-key", "a2V5"));
+        assertThat(b.lookup("header-key")).isEqualTo("a2V5");
+    }
+
+    @Test
+    void multipleFlaggedPropertiesAreHandledIndependently() {
+        MessageBindings b = new MessageBindings("k", "t", Map.of(
+                MessageBindings.KOP_INTERNAL_HEADER_FORMAT,
+                "{\"text-h\":\"base64\",\"bin-h\":\"base64\"}",
+                "text-h", "a2V5",     // base64 of "key" — valid UTF-8 → decoded surfaces
+                "bin-h", "iA=="));    // base64 of [0x88] — invalid UTF-8 → raw passes
+
+        assertThat(b.lookup("text-h")).isEqualTo("key");
+        assertThat(b.lookup("bin-h")).isEqualTo("iA==");
+    }
 }

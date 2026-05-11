@@ -1,11 +1,24 @@
 package io.streamnative.filter;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.functions.api.Record;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -25,19 +38,27 @@ import java.util.function.Supplier;
  * Selector authors compose against the <em>logical</em> key in both cases: a Kafka producer that
  * sends {@code b"BTC"} and a native Pulsar producer that sends {@code "BTC"} both surface as
  * {@code __key__ = 'BTC'} to the selector.
+ *
+ * <p><strong>Transparent base64 property decoding.</strong> When KoP attaches the
+ * {@link #KOP_INTERNAL_HEADER_FORMAT} disambiguation property naming one or more user properties
+ * as {@code "base64"}-encoded, the {@link #lookup(String)} path decodes those values once and
+ * surfaces the UTF-8 form (when the decoded bytes are valid UTF-8). The decoded value is cached
+ * for the lifetime of the bindings so repeated lookups within a single record evaluation reuse
+ * the same {@code String} instance. Properties whose base64-decoded bytes are not valid UTF-8 are
+ * passed through unchanged — selectors must compare against the base64 string in that case.
  */
 public final class MessageBindings {
+
+    private static final Logger LOG = LoggerFactory.getLogger(MessageBindings.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public static final String KEY_BINDING = "__key__";
     public static final String TOPIC_BINDING = "__topic__";
 
     /**
-     * KoP-injected disambiguation property that signals which Kafka headers were encoded as
-     * base64 (vs raw UTF-8) when surfaced as Pulsar properties. This is bridge-internal metadata,
-     * never a user-filterable signal — we hide it from selectors so a stray reference can't
-     * accidentally match. The value is still preserved in {@link #getProperties()} so the
-     * function's forward path (writing to output topics) keeps it available for KoP-aware
-     * downstream consumers.
+     * KoP-injected disambiguation property whose JSON value names user properties whose raw value
+     * is base64-encoded (vs raw UTF-8). Hidden from selectors, but consulted by
+     * {@link #lookup(String)} to drive transparent decoding of the named properties.
      */
     public static final String KOP_INTERNAL_HEADER_FORMAT = "__ksn_internal_header_format";
 
@@ -51,6 +72,13 @@ public final class MessageBindings {
     private boolean topicResolved;
     private Map<String, String> properties;
     private boolean propertiesResolved;
+
+    // Lazily-built base64-decode state. The format-parse runs at most once per record; the cache
+    // is populated on demand and holds one entry per base64-flagged property that has been looked
+    // up so far (decoded or raw fallback).
+    private boolean formatParsed;
+    private Set<String> base64FlaggedNames;
+    private Map<String, String> decodedCache;
 
     public MessageBindings(String key, String topic, Map<String, String> properties) {
         this.keySupplier        = () -> key;
@@ -132,7 +160,110 @@ public final class MessageBindings {
             // filterable signal even if a selector author tries to reference it by name.
             return null;
         }
-        return getProperties().get(name);
+        Map<String, String> props = getProperties();
+        String raw = props.get(name);
+        if (raw == null) {
+            return null;
+        }
+        if (isBase64Flagged(name, props)) {
+            return decodedOrRaw(name, raw);
+        }
+        return raw;
+    }
+
+    /**
+     * Lazily inspects {@link #KOP_INTERNAL_HEADER_FORMAT}, parses its JSON value once per record,
+     * and returns whether {@code name} is one of the properties KoP marked as base64-encoded.
+     */
+    private boolean isBase64Flagged(String name, Map<String, String> props) {
+        if (!formatParsed) {
+            String fmt = props.get(KOP_INTERNAL_HEADER_FORMAT);
+            base64FlaggedNames = fmt == null ? Collections.emptySet() : parseFormatSpec(fmt);
+            formatParsed = true;
+        }
+        return base64FlaggedNames.contains(name);
+    }
+
+    /**
+     * Returns the cached decoded form of {@code raw} (decoding on first request), falling back to
+     * {@code raw} when the base64-decode succeeds but the bytes aren't valid UTF-8, or when the
+     * input isn't legal base64.
+     */
+    private String decodedOrRaw(String name, String raw) {
+        if (decodedCache == null) {
+            decodedCache = new HashMap<>();
+        } else {
+            String cached = decodedCache.get(name);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        String resolved = tryBase64DecodeToUtf8(raw);
+        if (resolved == null) {
+            resolved = raw;
+        }
+        decodedCache.put(name, resolved);
+        return resolved;
+    }
+
+    /**
+     * Returns the UTF-8 form of {@code base64} when it decodes cleanly to a valid UTF-8 byte
+     * sequence; {@code null} when either the input is not valid base64 or the bytes are not
+     * valid UTF-8. The caller falls back to the raw string in the {@code null} case.
+     */
+    private static String tryBase64DecodeToUtf8(String base64) {
+        byte[] decoded;
+        try {
+            decoded = Base64.getDecoder().decode(base64);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        if (!isValidUtf8(decoded)) {
+            return null;
+        }
+        return new String(decoded, StandardCharsets.UTF_8);
+    }
+
+    private static boolean isValidUtf8(byte[] bytes) {
+        try {
+            StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes));
+            return true;
+        } catch (CharacterCodingException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Parses KoP's {@code __ksn_internal_header_format} JSON. The expected shape is a JSON object
+     * whose values name an encoding (e.g. {@code "base64"} or {@code "string"}). This method
+     * collects property names whose value is the string {@code "base64"} (case-insensitive). Any
+     * other JSON shape, or a parse failure, yields an empty set — base64 auto-decode then never
+     * fires for that record, which is the safe default.
+     */
+    private static Set<String> parseFormatSpec(String json) {
+        try {
+            JsonNode root = MAPPER.readTree(json);
+            if (root == null || !root.isObject()) {
+                return Collections.emptySet();
+            }
+            Set<String> flagged = new HashSet<>();
+            Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> e = fields.next();
+                JsonNode value = e.getValue();
+                if (value != null && value.isTextual()
+                        && "base64".equalsIgnoreCase(value.asText())) {
+                    flagged.add(e.getKey());
+                }
+            }
+            return flagged.isEmpty() ? Collections.emptySet() : flagged;
+        } catch (Exception e) {
+            LOG.debug("Failed to parse {} JSON: {}", KOP_INTERNAL_HEADER_FORMAT, e.toString());
+            return Collections.emptySet();
+        }
     }
 
     /** Test/observability hook: true iff the topic binding has been resolved. */
