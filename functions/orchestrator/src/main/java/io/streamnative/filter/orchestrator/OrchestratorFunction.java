@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.Command;
 import io.streamnative.filter.common.FilterRequest;
 import io.streamnative.filter.common.QueryMessage;
+import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
@@ -52,6 +53,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
     private RegistryStore registry;
     private FilterFunctionSpawner spawner;
     private PulsarClient pulsarClient;
+    private PulsarAdmin ownedAdmin;
     /** Per-per-function-control-topic producer cache. Lazy. */
     private ConcurrentMap<String, Producer<byte[]>> controlProducers;
     private Producer<byte[]> stateProducer;
@@ -88,7 +90,14 @@ public class OrchestratorFunction implements Function<byte[], Void> {
                 .create();
 
         this.registry = new RegistryStore(stateView, stateProducer);
-        this.spawner  = new DefaultFilterFunctionSpawner(ctx.getPulsarAdmin());
+
+        // Construct our own PulsarAdmin from userConfig — Context.getPulsarAdmin() is only
+        // available when the function worker is configured with pulsarFunctionsCluster, which
+        // lightweight (and many production) deployments don't enable by default.
+        this.ownedAdmin = PulsarAdmin.builder()
+                .serviceHttpUrl(config.pulsarAdminUrl())
+                .build();
+        this.spawner = new DefaultFilterFunctionSpawner(ownedAdmin);
 
         LOG.info("OrchestratorFunction initialized. stateTopic={}, packageUrl={}, "
                         + "fnTenant={}, fnNamespace={}, ctrlTopicTenant={}, ctrlTopicNs={}, "
@@ -304,6 +313,9 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         }
         if (stateView != null) {
             try { stateView.close(); } catch (Exception e) { LOG.warn("Close state view", e); }
+        }
+        if (ownedAdmin != null) {
+            try { ownedAdmin.close(); } catch (Exception e) { LOG.warn("Close pulsar admin", e); }
         }
     }
 }

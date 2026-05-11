@@ -34,6 +34,13 @@ final class OrchestratorConfig {
     /** Whether to set per-topic compaction on each per-function control topic. */
     static final String KEY_APPLY_COMPACTION          = "apply-compaction";
 
+    /**
+     * Pulsar HTTP admin URL the orchestrator uses to spawn filter functions. Required because
+     * {@code ctx.getPulsarAdmin()} is only available in workers configured with
+     * {@code pulsarFunctionsCluster} — lightweight deployments may not enable it.
+     */
+    static final String KEY_PULSAR_ADMIN_URL          = "pulsar-admin-url";
+
     /** Compaction threshold (bytes) for per-function control topics + registry-state topic. */
     static final String KEY_COMPACTION_THRESHOLD      = "compaction-threshold-bytes";
 
@@ -46,12 +53,13 @@ final class OrchestratorConfig {
     private final int functionParallelism;
     private final boolean applyCompaction;
     private final long compactionThresholdBytes;
+    private final String pulsarAdminUrl;
 
     private OrchestratorConfig(String stateTopic, String functionPackageUrl,
                                String functionTenant, String functionNamespace,
                                String controlTopicTenant, String controlTopicNamespace,
                                int functionParallelism, boolean applyCompaction,
-                               long compactionThresholdBytes) {
+                               long compactionThresholdBytes, String pulsarAdminUrl) {
         this.stateTopic               = stateTopic;
         this.functionPackageUrl       = functionPackageUrl;
         this.functionTenant           = functionTenant;
@@ -61,6 +69,7 @@ final class OrchestratorConfig {
         this.functionParallelism      = functionParallelism;
         this.applyCompaction          = applyCompaction;
         this.compactionThresholdBytes = compactionThresholdBytes;
+        this.pulsarAdminUrl           = pulsarAdminUrl;
     }
 
     static OrchestratorConfig fromContext(Context ctx) {
@@ -73,15 +82,17 @@ final class OrchestratorConfig {
         int parallelism      = optionalInt(ctx, KEY_FUNCTION_PARALLELISM, 1);
         boolean compaction   = optionalBoolean(ctx, KEY_APPLY_COMPACTION, true);
         long threshold       = optionalLong(ctx, KEY_COMPACTION_THRESHOLD, 10L * 1024 * 1024); // 10 MB
+        String adminUrl      = requireString(ctx, KEY_PULSAR_ADMIN_URL);
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
-                ctrlTenant, ctrlNamespace, parallelism, compaction, threshold);
+                ctrlTenant, ctrlNamespace, parallelism, compaction, threshold, adminUrl);
     }
 
     /** Package-private factory for tests. */
     static OrchestratorConfig forTesting(String stateTopic, String packageUrl,
                                          String fnTenant, String fnNamespace) {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
-                fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024);
+                fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
+                "http://localhost:8080");
     }
 
     public String stateTopic()                  { return stateTopic; }
@@ -93,6 +104,7 @@ final class OrchestratorConfig {
     public int functionParallelism()            { return functionParallelism; }
     public boolean applyCompaction()            { return applyCompaction; }
     public long compactionThresholdBytes()      { return compactionThresholdBytes; }
+    public String pulsarAdminUrl()              { return pulsarAdminUrl; }
 
     private static String requireString(Context ctx, String key) {
         Object raw = ctx.getUserConfigValue(key).orElse(null);
@@ -109,13 +121,26 @@ final class OrchestratorConfig {
     private static int optionalInt(Context ctx, String key, int defaultValue) {
         Object raw = ctx.getUserConfigValue(key).orElse(null);
         if (raw == null) return defaultValue;
-        return Integer.parseInt(raw.toString().trim());
+        if (raw instanceof Number n) return n.intValue();
+        // Pulsar may JSON-round-trip ints as floats ("1" → "1.0"); tolerate both.
+        String s = raw.toString().trim();
+        try {
+            return Integer.parseInt(s);
+        } catch (NumberFormatException e) {
+            return (int) Double.parseDouble(s);
+        }
     }
 
     private static long optionalLong(Context ctx, String key, long defaultValue) {
         Object raw = ctx.getUserConfigValue(key).orElse(null);
         if (raw == null) return defaultValue;
-        return Long.parseLong(raw.toString().trim());
+        if (raw instanceof Number n) return n.longValue();
+        String s = raw.toString().trim();
+        try {
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return (long) Double.parseDouble(s);
+        }
     }
 
     private static boolean optionalBoolean(Context ctx, String key, boolean defaultValue) {
@@ -135,13 +160,14 @@ final class OrchestratorConfig {
                 && Objects.equals(functionTenant, that.functionTenant)
                 && Objects.equals(functionNamespace, that.functionNamespace)
                 && Objects.equals(controlTopicTenant, that.controlTopicTenant)
-                && Objects.equals(controlTopicNamespace, that.controlTopicNamespace);
+                && Objects.equals(controlTopicNamespace, that.controlTopicNamespace)
+                && Objects.equals(pulsarAdminUrl, that.pulsarAdminUrl);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(stateTopic, functionPackageUrl, functionTenant, functionNamespace,
                 controlTopicTenant, controlTopicNamespace, functionParallelism,
-                applyCompaction, compactionThresholdBytes);
+                applyCompaction, compactionThresholdBytes, pulsarAdminUrl);
     }
 }

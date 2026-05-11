@@ -46,6 +46,18 @@
             <artifactId>pulsar-client-admin-api</artifactId>
             <scope>provided</scope>
         </dependency>
+        <!--
+          Runtime admin client for inside-the-function spawn calls. We construct PulsarAdmin
+          ourselves from the orchestrator's userConfig (pulsar-admin-url) rather than via
+          ctx.getPulsarAdmin(), because the latter is only available when the function worker
+          is configured with pulsarFunctionsCluster — which lightweight testcontainer / minimal
+          deployments don't enable by default.
+        -->
+        <dependency>
+            <groupId>org.apache.pulsar</groupId>
+            <artifactId>pulsar-client-admin-original</artifactId>
+            <version>${pulsar.version}</version>
+        </dependency>
 
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -59,6 +71,11 @@
         </dependency>
 
         <!-- TEST -->
+        <dependency>
+            <groupId>io.streamnative</groupId>
+            <artifactId>selector-filter-client</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
