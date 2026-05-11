@@ -2,7 +2,9 @@ package io.streamnative.filter.client.kafka;
 
 import io.streamnative.filter.client.PrivateQuery;
 import io.streamnative.filter.client.Session;
+import io.streamnative.filter.common.ClientType;
 import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.pulsar.client.api.PulsarClientException;
 
@@ -100,7 +102,13 @@ public final class FilterableKafkaConsumerBuilder<K, V> {
             throw new IllegalStateException("At least one source topic is required");
         }
 
-        PrivateQuery pq = session.registerPrivateQuery(List.copyOf(sourceTopics), selector);
+        // Pass through the Kafka deserializer class FQNs (when configured) so the orchestrator
+        // can detect schema mismatches across registrations on the same input topic.
+        String keyDeserializer   = kafkaProps.getProperty(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG);
+        String valueDeserializer = kafkaProps.getProperty(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG);
+        PrivateQuery pq = session.registerPrivateQuery(
+                List.copyOf(sourceTopics), selector,
+                keyDeserializer, valueDeserializer, ClientType.KAFKA);
         try {
             String kafkaTopic = kafkaTopicNameFor(pq.privateTopic());
             Consumer<K, V> underlying = kafkaConsumerFactory.apply(kafkaProps);

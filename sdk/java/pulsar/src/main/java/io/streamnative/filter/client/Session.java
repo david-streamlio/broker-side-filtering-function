@@ -2,7 +2,8 @@ package io.streamnative.filter.client;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.streamnative.filter.common.QueryMessage;
+import io.streamnative.filter.common.ClientType;
+import io.streamnative.filter.common.FilterRequest;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Consumer;
@@ -24,9 +25,9 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Context object for the broker-side selector filter function. Owns the Pulsar client/admin
- * handles, the control-topic producer, and the {@link PrivateTopicPolicy} applied to per-consumer
- * private output topics.
+ * Context object for the broker-side selector filter SDK. Owns the Pulsar client/admin handles,
+ * the orchestrator's input topic producer (the topic the SDK publishes {@link FilterRequest}s to),
+ * and the {@link PrivateTopicPolicy} applied to per-consumer private output topics.
  *
  * <p>Two consumer-construction paths use this session:
  * <ul>
@@ -38,6 +39,10 @@ import java.util.concurrent.TimeUnit;
  *       {@link #retirePrivateQuery} — to drive its own real {@code KafkaConsumer} pointed at a
  *       KoP-enabled broker.</li>
  * </ul>
+ *
+ * <p>Wire protocol: SDK publishes {@link FilterRequest} (REGISTER/MODIFY/UNREGISTER) keyed by
+ * queryId to the orchestrator's input topic ({@link SessionBuilder#controlTopic configured
+ * controlTopic}). Orchestrator translates and routes to per-filter-function control topics.
  *
  * <p>Sessions are thread-safe: multiple consumer constructions may run concurrently.
  * {@link #close()} closes all resources owned by this session including any Pulsar handles it
@@ -106,8 +111,8 @@ public final class Session implements Closeable {
     public String getPrivateTopicNamespace()          { return privateTopicNamespace; }
 
     /**
-     * Used by tests; in production the function picks up control-topic updates in sub-second time
-     * and most callers can skip this.
+     * Used by tests; in production the orchestrator picks up new requests in sub-second time and
+     * most callers can skip this.
      */
     public boolean waitForReadiness(long timeout, TimeUnit unit) throws InterruptedException {
         long deadline = System.nanoTime() + unit.toNanos(timeout);
@@ -135,62 +140,82 @@ public final class Session implements Closeable {
     // =============================================================================
 
     /**
-     * Register a filtered query with the broker-side function. Generates a fresh {@code queryId},
-     * creates and configures the private output topic, validates the user selector, and publishes
-     * the {@link QueryMessage} to the control topic.
+     * Register a filtered query — Pulsar-flavour convenience overload (no serializer info,
+     * {@link ClientType#PULSAR}). See the full overload for details.
+     */
+    public PrivateQuery registerPrivateQuery(List<String> sourceTopics, String userSelector)
+            throws PulsarClientException {
+        return registerPrivateQuery(sourceTopics, userSelector, null, null, ClientType.PULSAR);
+    }
+
+    /**
+     * Register a filtered query with the orchestrator. Generates a fresh {@code queryId}, derives
+     * a private output topic name, validates the user selector, optionally creates and configures
+     * the private output topic, and publishes a {@link FilterRequest#getCommand() REGISTER}
+     * {@link FilterRequest} to the orchestrator's input topic.
      *
      * <p>Callers (per-transport consumer builders) take the returned {@link PrivateQuery} and
      * attach their own consumer to {@link PrivateQuery#privateTopic()}. On failure of that next
      * step they should call {@link #retirePrivateQuery(PrivateQuery)} to clean up.
      *
+     * @param sourceTopics      input topics to filter (at least one); each must be a fully-qualified Pulsar topic
+     * @param userSelector      JMS-selector expression; validated client-side
+     * @param keyDeserializer   FQN of consumer-side key deserializer, or {@code null} if not asserted
+     * @param valueDeserializer FQN of consumer-side value deserializer, or {@code null} if not asserted
+     * @param clientType        SDK family producing this request
      * @throws IllegalArgumentException if {@code sourceTopics} is empty or {@code userSelector}
      *                                  is non-blank but malformed.
      * @throws PulsarClientException    on control-topic publish failure.
      */
-    public PrivateQuery registerPrivateQuery(List<String> sourceTopics, String userSelector)
-            throws PulsarClientException {
+    public PrivateQuery registerPrivateQuery(List<String> sourceTopics, String userSelector,
+                                             String keyDeserializer, String valueDeserializer,
+                                             ClientType clientType) throws PulsarClientException {
         if (sourceTopics == null || sourceTopics.isEmpty()) {
             throw new IllegalArgumentException("At least one source topic is required");
         }
         Selectors.validate(userSelector);
 
-        String queryId         = UUID.randomUUID().toString();
-        String privateTopic    = String.format("persistent://%s/%s/filtered-%s",
+        String queryId      = UUID.randomUUID().toString();
+        String privateTopic = String.format("persistent://%s/%s/filtered-%s",
                 privateTopicTenant, privateTopicNamespace, queryId);
-        String topicConstraint = Selectors.topicIn(sourceTopics);
-        String composedSelector = Selectors.combine(topicConstraint, userSelector);
 
         createAndConfigurePrivateTopic(privateTopic);
-        publishQuery(queryId, composedSelector, privateTopic);
 
-        LOG.info("Registered query queryId={} private={} selector=[{}]",
-                queryId, privateTopic, composedSelector);
-        return new PrivateQuery(queryId, privateTopic, sourceTopics, topicConstraint);
+        FilterRequest req = FilterRequest.register(sourceTopics, privateTopic, userSelector,
+                keyDeserializer, valueDeserializer, clientType);
+        publishFilterRequest(queryId, req);
+
+        LOG.info("Registered query queryId={} private={} selector=[{}] clientType={}",
+                queryId, privateTopic, userSelector, clientType);
+        return new PrivateQuery(queryId, privateTopic, sourceTopics);
     }
 
     /**
-     * Replace the active user-side selector on an existing query. Validates the new expression,
-     * composes it with the original topic constraint, and republishes the {@link QueryMessage} on
-     * the same {@code queryId} key — the function hot-reloads its compiled expression in place.
+     * Replace the active user-side selector on an existing query. Validates the new expression
+     * and publishes a {@link FilterRequest#getCommand() MODIFY} on the same {@code queryId} key —
+     * the orchestrator then republishes the underlying {@code QueryMessage} on each per-function
+     * control topic where this queryId is registered, causing a hot reload.
      *
-     * @throws IllegalArgumentException if {@code newUserSelector} is non-blank but malformed.
+     * @throws IllegalArgumentException if {@code newUserSelector} is malformed or blank.
      * @throws PulsarClientException    on control-topic publish failure.
      */
     public void updatePrivateQuery(PrivateQuery pq, String newUserSelector) throws PulsarClientException {
         Selectors.validate(newUserSelector);
-        String composed = Selectors.combine(pq.topicConstraint(), newUserSelector);
-        publishQuery(pq.queryId(), composed, pq.privateTopic());
-        LOG.info("Updated query queryId={} selector=[{}]", pq.queryId(), composed);
+        FilterRequest req = FilterRequest.modify(newUserSelector);
+        req.validate();  // MODIFY requires non-blank selector — fail at SDK, not at orchestrator
+        publishFilterRequest(pq.queryId(), req);
+        LOG.info("Updated query queryId={} selector=[{}]", pq.queryId(), newUserSelector);
     }
 
     /**
-     * Retract a previously-registered query. Publishes a tombstone to the control topic and (per
+     * Retract a previously-registered query. Publishes an UNREGISTER {@link FilterRequest} keyed
+     * by queryId (orchestrator fans out tombstones to every per-function control topic) and (per
      * the configured {@link PrivateTopicPolicy}) deletes the private output topic. Best-effort —
      * does not throw; log-only on errors.
      */
     public void retirePrivateQuery(PrivateQuery pq) {
         try {
-            controlProducer.newMessage().key(pq.queryId()).value(null).send();
+            publishFilterRequest(pq.queryId(), FilterRequest.unregister());
             LOG.info("Retracted query queryId={}", pq.queryId());
         } catch (PulsarClientException e) {
             LOG.warn("Failed to retract queryId={}: {}", pq.queryId(), e.getMessage());
@@ -277,13 +302,12 @@ public final class Session implements Closeable {
         }
     }
 
-    private void publishQuery(String queryId, String selector, String outputTopic) throws PulsarClientException {
-        QueryMessage qm = new QueryMessage("session-" + queryId, selector, outputTopic);
+    private void publishFilterRequest(String queryId, FilterRequest request) throws PulsarClientException {
         byte[] payload;
         try {
-            payload = MAPPER.writeValueAsBytes(qm);
+            payload = MAPPER.writeValueAsBytes(request);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Failed to serialize QueryMessage", e);
+            throw new IllegalStateException("Failed to serialize FilterRequest", e);
         }
         controlProducer.newMessage().key(queryId).value(payload).send();
     }

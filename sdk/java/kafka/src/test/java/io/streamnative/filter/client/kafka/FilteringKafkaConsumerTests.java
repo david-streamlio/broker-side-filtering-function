@@ -1,9 +1,11 @@
 package io.streamnative.filter.client.kafka;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.client.FilterControl;
 import io.streamnative.filter.client.kafka.KafkaTestFixtures.Mocks;
-import io.streamnative.filter.common.QueryMessage;
+import io.streamnative.filter.common.Command;
+import io.streamnative.filter.common.FilterRequest;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -22,14 +24,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 class FilteringKafkaConsumerTests {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private Mocks mocks;
     private Properties props;
@@ -49,6 +51,16 @@ class FilteringKafkaConsumerTests {
                 .topic("persistent://public/in/trades")
                 .selector(selector)
                 .subscribe();
+    }
+
+    private List<FilterRequest> captureAllPublished(int expected) throws Exception {
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(mocks.controlMsgBuilder, times(expected)).value(payload.capture());
+        return payload.getAllValues().stream()
+                .map(b -> {
+                    try { return MAPPER.readValue(b, FilterRequest.class); }
+                    catch (Exception e) { throw new RuntimeException(e); }
+                }).toList();
     }
 
     // ------------------------------------------------------------- Delegation
@@ -164,44 +176,35 @@ class FilteringKafkaConsumerTests {
     }
 
     @Test
-    void setSelectorRepublishesOnSameQueryIdAndComposesTopicConstraint() throws Exception {
+    void setSelectorPublishesModifyOnSameQueryIdWithRawSelector() throws Exception {
         Consumer<String, byte[]> c = subscribe("region = 'US'");
         FilterControl fc = (FilterControl) c;
         String initialQueryId = fc.queryId();
 
-        // Initial publish from subscribe()
-        ArgumentCaptor<byte[]> firstPayload = ArgumentCaptor.forClass(byte[].class);
-        verify(mocks.controlMsgBuilder).value(firstPayload.capture());
-        verify(mocks.controlMsgBuilder).key(initialQueryId);
-        QueryMessage initialQm = MAPPER.readValue(firstPayload.getValue(), QueryMessage.class);
-        assertThat(initialQm.getSelector())
-                .isEqualTo("__topic__ = 'persistent://public/in/trades' AND (region = 'US')");
-
-        // setSelector republishes on SAME queryId
         fc.setSelector("region = 'UK'");
         assertThat(fc.queryId()).isEqualTo(initialQueryId);
         assertThat(fc.currentSelector()).isEqualTo("region = 'UK'");
 
-        ArgumentCaptor<byte[]> all = ArgumentCaptor.forClass(byte[].class);
-        verify(mocks.controlMsgBuilder, times(2)).value(all.capture());
+        List<FilterRequest> all = captureAllPublished(2);
         verify(mocks.controlMsgBuilder, times(2)).key(initialQueryId);
-        QueryMessage updated = MAPPER.readValue(all.getAllValues().get(1), QueryMessage.class);
-        assertThat(updated.getSelector())
-                .isEqualTo("__topic__ = 'persistent://public/in/trades' AND (region = 'UK')");
-        assertThat(updated.getOutputTopic()).isEqualTo(fc.privateTopic());
+
+        assertThat(all.get(0).getCommand()).isEqualTo(Command.REGISTER);
+        assertThat(all.get(0).getSelector()).isEqualTo("region = 'US'");
+
+        assertThat(all.get(1).getCommand()).isEqualTo(Command.MODIFY);
+        assertThat(all.get(1).getSelector()).isEqualTo("region = 'UK'");
     }
 
     @Test
-    void setSelectorNullPublishesTopicConstraintOnly() throws Exception {
+    void setSelectorNullThrows() throws Exception {
         Consumer<String, byte[]> c = subscribe("region = 'US'");
         FilterControl fc = (FilterControl) c;
-        fc.setSelector(null);
-        assertThat(fc.currentSelector()).isNull();
 
-        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(mocks.controlMsgBuilder, times(2)).value(payload.capture());
-        QueryMessage updated = MAPPER.readValue(payload.getAllValues().get(1), QueryMessage.class);
-        assertThat(updated.getSelector()).isEqualTo("__topic__ = 'persistent://public/in/trades'");
+        assertThatThrownBy(() -> fc.setSelector(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("selector");
+
+        verify(mocks.controlMsgBuilder, times(1)).value(any(byte[].class)); // only the REGISTER
     }
 
     @Test
@@ -214,7 +217,7 @@ class FilteringKafkaConsumerTests {
                 .isInstanceOf(IllegalArgumentException.class);
 
         verify(mocks.controlMsgBuilder, times(1)).value(any(byte[].class));
-        assertThat(fc.currentSelector()).isEqualTo("region = 'US'"); // unchanged
+        assertThat(fc.currentSelector()).isEqualTo("region = 'US'");
     }
 
     @Test
@@ -231,25 +234,27 @@ class FilteringKafkaConsumerTests {
     // ------------------------------------------------------------- Close
 
     @Test
-    void closeClosesUnderlyingAndRetractsQuery() throws Exception {
+    void closePublishesUnregisterAndCallsUnderlying() throws Exception {
         Consumer<String, byte[]> c = subscribe(null);
         FilterControl fc = (FilterControl) c;
 
         c.close();
 
         verify(underlying).close();
-        verify(mocks.controlMsgBuilder).value(isNull()); // tombstone
+        List<FilterRequest> all = captureAllPublished(2);
+        assertThat(all.get(1).getCommand()).isEqualTo(Command.UNREGISTER);
         verify(mocks.topics).delete(org.mockito.ArgumentMatchers.eq(fc.privateTopic()),
                 org.mockito.ArgumentMatchers.eq(true));
     }
 
     @Test
-    void closeWithTimeoutDelegatesAndRetracts() throws Exception {
+    void closeWithTimeoutDelegatesAndPublishesUnregister() throws Exception {
         Consumer<String, byte[]> c = subscribe(null);
         c.close(Duration.ofSeconds(3));
 
         verify(underlying).close(Duration.ofSeconds(3));
-        verify(mocks.controlMsgBuilder).value(isNull()); // tombstone
+        List<FilterRequest> all = captureAllPublished(2);
+        assertThat(all.get(1).getCommand()).isEqualTo(Command.UNREGISTER);
     }
 
     @Test
@@ -258,18 +263,20 @@ class FilteringKafkaConsumerTests {
         c.close();
         c.close();
         verify(underlying, times(1)).close();
+        captureAllPublished(2); // REGISTER + ONE UNREGISTER
         verify(mocks.topics, times(1)).delete(anyString(), anyBoolean());
     }
 
     @Test
-    void closeStillRetractsWhenUnderlyingCloseThrows() throws Exception {
+    void closeStillPublishesUnregisterWhenUnderlyingCloseThrows() throws Exception {
         Consumer<String, byte[]> c = subscribe(null);
         FilterControl fc = (FilterControl) c;
         RuntimeException boom = new RuntimeException("kafka close failed");
         org.mockito.Mockito.doThrow(boom).when(underlying).close();
 
         assertThatThrownBy(c::close).isSameAs(boom);
-        verify(mocks.controlMsgBuilder).value(isNull()); // tombstone still sent
+        List<FilterRequest> all = captureAllPublished(2);
+        assertThat(all.get(1).getCommand()).isEqualTo(Command.UNREGISTER);
         verify(mocks.topics).delete(org.mockito.ArgumentMatchers.eq(fc.privateTopic()),
                 org.mockito.ArgumentMatchers.eq(true));
     }

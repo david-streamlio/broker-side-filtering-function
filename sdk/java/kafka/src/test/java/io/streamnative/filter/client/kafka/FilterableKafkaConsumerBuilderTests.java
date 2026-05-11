@@ -1,7 +1,12 @@
 package io.streamnative.filter.client.kafka;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.client.FilterControl;
 import io.streamnative.filter.client.kafka.KafkaTestFixtures.Mocks;
+import io.streamnative.filter.common.ClientType;
+import io.streamnative.filter.common.Command;
+import io.streamnative.filter.common.FilterRequest;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,6 +27,9 @@ import static org.mockito.Mockito.verify;
 
 class FilterableKafkaConsumerBuilderTests {
 
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
     private Mocks mocks;
     private Properties props;
 
@@ -34,6 +42,13 @@ class FilterableKafkaConsumerBuilderTests {
     void setup() throws Exception {
         mocks = KafkaTestFixtures.newSessionWithMocks();
         props = KafkaTestFixtures.stubKafkaProps();
+    }
+
+    private FilterRequest captureLatestPublished() throws Exception {
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(mocks.controlMsgBuilder, atLeastOnce()).value(payload.capture());
+        return MAPPER.readValue(payload.getAllValues().get(payload.getAllValues().size() - 1),
+                FilterRequest.class);
     }
 
     @Test
@@ -124,8 +139,6 @@ class FilterableKafkaConsumerBuilderTests {
                 .selector("region = 'US'")
                 .subscribe();
 
-        // Underlying Kafka consumer must have been subscribed to the Kafka name of the
-        // private Pulsar topic — last segment of `persistent://public/default/filtered-<uuid>`.
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> topics = ArgumentCaptor.forClass(List.class);
         verify(underlying).subscribe(topics.capture());
@@ -137,7 +150,7 @@ class FilterableKafkaConsumerBuilderTests {
     }
 
     @Test
-    void onKafkaSubscribeFailureUnderlyingClosedAndQueryRetired() throws Exception {
+    void onKafkaSubscribeFailureUnderlyingClosedAndQueryUnregistered() throws Exception {
         @SuppressWarnings("unchecked")
         Consumer<String, byte[]> underlying = (Consumer<String, byte[]>) mock(Consumer.class);
         RuntimeException boom = new RuntimeException("kafka subscribe failed");
@@ -152,7 +165,14 @@ class FilterableKafkaConsumerBuilderTests {
                 .isSameAs(boom);
 
         verify(underlying).close();                                  // factory-produced consumer closed
-        verify(mocks.controlMsgBuilder, atLeastOnce()).value(org.mockito.ArgumentMatchers.isNull()); // tombstone
+        // Two publishes: REGISTER from registerPrivateQuery, then UNREGISTER from retirePrivateQuery
+        // when the subscribe failure triggered cleanup.
+        ArgumentCaptor<byte[]> payloads = ArgumentCaptor.forClass(byte[].class);
+        verify(mocks.controlMsgBuilder, atLeastOnce()).value(payloads.capture());
+        FilterRequest last = MAPPER.readValue(
+                payloads.getAllValues().get(payloads.getAllValues().size() - 1),
+                FilterRequest.class);
+        assertThat(last.getCommand()).isEqualTo(Command.UNREGISTER);
         verify(mocks.topics).delete(anyString(), anyBoolean());      // private topic deleted
     }
 
@@ -165,7 +185,7 @@ class FilterableKafkaConsumerBuilderTests {
     }
 
     @Test
-    void registrationPublishesQueryMessageBeforeUnderlyingSubscribe() throws Exception {
+    void registrationPublishesFilterRequestBeforeUnderlyingSubscribe() throws Exception {
         @SuppressWarnings("unchecked")
         Consumer<String, byte[]> underlying = (Consumer<String, byte[]>) mock(Consumer.class);
 
@@ -176,17 +196,53 @@ class FilterableKafkaConsumerBuilderTests {
                 .selector("region = 'US'")
                 .subscribe();
 
-        // Both happen — but registration publish should come first. We can't easily
-        // verify ordering against two different mocks, so just verify both happened.
         verify(mocks.controlMsgBuilder).value(any(byte[].class));
         verify(underlying).subscribe(any(List.class));
     }
 
     @Test
+    void registerPropagatesKafkaSerializersAndClientType() throws Exception {
+        Consumer<String, byte[]> underlying = fakeKafkaConsumer();
+        FilterableKafkaConsumers
+                .<String, byte[]>newConsumer(mocks.session, props)
+                .withKafkaConsumerFactory(p -> underlying)
+                .topic("persistent://public/in/x")
+                .selector("region = 'US'")
+                .subscribe();
+
+        FilterRequest req = captureLatestPublished();
+        assertThat(req.getCommand()).isEqualTo(Command.REGISTER);
+        assertThat(req.getClientType()).isEqualTo(ClientType.KAFKA);
+        // KafkaTestFixtures.stubKafkaProps sets these.
+        assertThat(req.getKeyDeserializer())
+                .isEqualTo("org.apache.kafka.common.serialization.StringDeserializer");
+        assertThat(req.getValueDeserializer())
+                .isEqualTo("org.apache.kafka.common.serialization.ByteArrayDeserializer");
+    }
+
+    @Test
+    void registerHandlesMissingSerializerProperties() throws Exception {
+        // Operator may pass props without key/value deserializer (unusual but valid for testing).
+        Properties bareProps = new Properties();
+        bareProps.put("bootstrap.servers", "stub:9094");
+        bareProps.put("group.id", "stub-group");
+
+        Consumer<String, byte[]> underlying = fakeKafkaConsumer();
+        FilterableKafkaConsumers
+                .<String, byte[]>newConsumer(mocks.session, bareProps)
+                .withKafkaConsumerFactory(p -> underlying)
+                .topic("persistent://public/in/x")
+                .selector("region = 'US'")
+                .subscribe();
+
+        FilterRequest req = captureLatestPublished();
+        assertThat(req.getClientType()).isEqualTo(ClientType.KAFKA);
+        assertThat(req.getKeyDeserializer()).isNull();
+        assertThat(req.getValueDeserializer()).isNull();
+    }
+
+    @Test
     void neverEmptyTopicListInUnderlyingSubscribe() {
-        // Constructing topics(List.of()) is already rejected — but the same constraint must hold
-        // if someone reaches in via topic(...) then topics(...) with valid lists. Re-verifying
-        // here documents the invariant.
         assertThatThrownBy(() -> FilterableKafkaConsumers
                 .<String, byte[]>newConsumer(mocks.session, props)
                 .topics(List.of()))

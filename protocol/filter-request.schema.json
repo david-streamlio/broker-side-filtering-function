@@ -1,0 +1,78 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://github.com/david-streamlio/broker-side-filtering-function/blob/main/protocol/filter-request.schema.json",
+    "title": "FilterRequest",
+    "description": "SDK→Orchestrator wire format. Published to the orchestrator's input topic; key = queryId (UUIDv4 string). The orchestrator translates each FilterRequest into a per-filter-function QueryMessage (see query-message.schema.json) on the corresponding per-function control topic. Three commands: REGISTER (first-time, from SDK subscribe()), MODIFY (selector replacement, from setSelector/add-update methods), UNREGISTER (retract, from consumer close() or delete-selector). The orchestrator treats UNREGISTER on unknown queryId as idempotent (silent success). REGISTER on existing queryId is idempotent only if all fields match (broker redelivery); mismatched fields are rejected.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["command"],
+    "properties": {
+        "command": {
+            "type": "string",
+            "enum": ["REGISTER", "MODIFY", "UNREGISTER"],
+            "description": "Lifecycle command. REGISTER spawns or reuses a per-input-topic filter function and registers the query. MODIFY replaces the selector on an existing queryId. UNREGISTER retracts the query and tombstones it on every per-function control topic where it was published."
+        },
+        "inputTopics": {
+            "type": ["array", "null"],
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1,
+            "description": "Fully-qualified Pulsar input topic FQNs to filter. Mutually exclusive with topicsPattern. Required on REGISTER (with topicsPattern as the alternative). Ignored on MODIFY and UNREGISTER."
+        },
+        "topicsPattern": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "Regex pattern matching multiple input topics (handed straight to the spawned filter function's Pulsar pattern subscription). Mutually exclusive with inputTopics. Required on REGISTER (with inputTopics as the alternative). Ignored on MODIFY and UNREGISTER."
+        },
+        "outputTopic": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "pattern": "^(persistent|non-persistent)://[^/]+/[^/]+/[^/]+$",
+            "description": "Fully-qualified Pulsar topic the filter function fans matching messages out to. SDK-generated. Required on REGISTER. Ignored on MODIFY (the previously-registered outputTopic is reused) and UNREGISTER."
+        },
+        "selector": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "JMS-selector expression. Required on REGISTER and MODIFY. Ignored on UNREGISTER. SDKs validate syntax client-side before publishing."
+        },
+        "keyDeserializer": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "Fully-qualified class name (via Class.getName()) of the consumer-side key deserializer, when known. Used by the orchestrator to detect schema mismatches across registrations on the same input topic. Optional; null means the SDK is not asserting a key schema. Use FQNs only — short names will be treated as different from FQNs by the equality check."
+        },
+        "valueDeserializer": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "Fully-qualified class name of the consumer-side value deserializer, when known. Same comparison rules as keyDeserializer."
+        },
+        "clientType": {
+            "type": ["string", "null"],
+            "enum": ["KAFKA", "PULSAR", null],
+            "description": "Indicates the SDK family producing the request. Required on REGISTER. Recorded in the registry entry. v1 has no per-clientType behavior; reserved for future routing decisions (e.g., output-topic placement for Kafka clients needing KoP-mapped namespaces)."
+        }
+    },
+    "examples": [
+        {
+            "command": "REGISTER",
+            "inputTopics": ["persistent://public/in/trades"],
+            "outputTopic": "persistent://public/filtered/filtered-c4f9e7b1-d2a3-4f6e-9b1a-1234567890ab",
+            "selector": "region = 'US'",
+            "keyDeserializer":   "org.apache.kafka.common.serialization.StringDeserializer",
+            "valueDeserializer": "org.apache.kafka.common.serialization.ByteArrayDeserializer",
+            "clientType": "KAFKA"
+        },
+        {
+            "command": "REGISTER",
+            "topicsPattern": "persistent://public/trades/.*",
+            "outputTopic": "persistent://public/filtered/filtered-0e7b1c4a-9b1a-4f6e-d2a3-7890abcdef12",
+            "selector": "__key__ IN ('AAPL','MSFT','GOOGL')",
+            "clientType": "PULSAR"
+        },
+        {
+            "command": "MODIFY",
+            "selector": "region IN ('US','UK')"
+        },
+        {
+            "command": "UNREGISTER"
+        }
+    ]
+}

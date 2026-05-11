@@ -1,7 +1,10 @@
 package io.streamnative.filter.client;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.streamnative.filter.common.QueryMessage;
+import io.streamnative.filter.common.ClientType;
+import io.streamnative.filter.common.Command;
+import io.streamnative.filter.common.FilterRequest;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.Topics;
 import org.apache.pulsar.client.admin.TopicPolicies;
@@ -37,7 +40,8 @@ import static org.mockito.Mockito.when;
 
 class SessionTests {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private PulsarClient client;
     private PulsarAdmin admin;
@@ -88,7 +92,7 @@ class SessionTests {
         return Session.builder()
                 .pulsarClient(client)
                 .pulsarAdmin(admin)
-                .controlTopic("persistent://public/control/queries")
+                .controlTopic("persistent://public/orchestrator/filter-requests")
                 .privateTopicTenant("public")
                 .privateTopicNamespace("filtered")
                 .privateTopicPolicy(policy)
@@ -99,6 +103,25 @@ class SessionTests {
         assertThat(c).isInstanceOf(FilterControl.class);
         return (FilterControl) c;
     }
+
+    /** Capture the most recent published payload and parse it as a FilterRequest. */
+    private FilterRequest capturePublished() throws Exception {
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(controlMsgBuilder).value(payload.capture());
+        return MAPPER.readValue(payload.getValue(), FilterRequest.class);
+    }
+
+    private List<FilterRequest> captureAllPublished(int expectedCount) throws Exception {
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(controlMsgBuilder, times(expectedCount)).value(payload.capture());
+        return payload.getAllValues().stream()
+                .map(b -> {
+                    try { return MAPPER.readValue(b, FilterRequest.class); }
+                    catch (Exception e) { throw new RuntimeException(e); }
+                }).toList();
+    }
+
+    // ---------------------------------------------------------------- Subscribe path
 
     @Test
     void newConsumerReturnsConsumerThatIsAlsoFilterControl() throws Exception {
@@ -127,7 +150,7 @@ class SessionTests {
     }
 
     @Test
-    void subscribePublishesQueryToControlTopic() throws Exception {
+    void subscribePublishesRegisterFilterRequest() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
         Consumer<byte[]> c = session.newConsumer()
                 .topic("persistent://public/in/trades")
@@ -135,14 +158,17 @@ class SessionTests {
                 .subscribe();
         FilterControl fc = asControl(c);
 
-        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(controlMsgBuilder).value(payload.capture());
         verify(controlMsgBuilder).key(fc.queryId());
-
-        QueryMessage qm = MAPPER.readValue(payload.getValue(), QueryMessage.class);
-        assertThat(qm.getSelector())
-                .isEqualTo("__topic__ = 'persistent://public/in/trades' AND (region = 'US')");
-        assertThat(qm.getOutputTopic()).isEqualTo(fc.privateTopic());
+        FilterRequest req = capturePublished();
+        assertThat(req.getCommand()).isEqualTo(Command.REGISTER);
+        assertThat(req.getInputTopics()).containsExactly("persistent://public/in/trades");
+        assertThat(req.getTopicsPattern()).isNull();
+        assertThat(req.getOutputTopic()).isEqualTo(fc.privateTopic());
+        // Raw user selector — NO __topic__ composition (the orchestrator routes by input topic).
+        assertThat(req.getSelector()).isEqualTo("region = 'US'");
+        assertThat(req.getClientType()).isEqualTo(ClientType.PULSAR);
+        assertThat(req.getKeyDeserializer()).isNull();
+        assertThat(req.getValueDeserializer()).isNull();
     }
 
     @Test
@@ -150,6 +176,7 @@ class SessionTests {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
         Consumer<byte[]> c = session.newConsumer()
                 .topic("persistent://public/in/trades")
+                .selector("region = 'US'")
                 .subscribe();
         FilterControl fc = asControl(c);
 
@@ -160,7 +187,7 @@ class SessionTests {
     }
 
     @Test
-    void multipleSourceTopicsRenderInClause() throws Exception {
+    void multipleSourceTopicsLandInInputTopicsArray() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
         Consumer<byte[]> c = session.newConsumer()
                 .topics(List.of("persistent://public/in/a", "persistent://public/in/b"))
@@ -168,52 +195,59 @@ class SessionTests {
                 .subscribe();
         FilterControl fc = asControl(c);
 
-        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(controlMsgBuilder).value(payload.capture());
-        QueryMessage qm = MAPPER.readValue(payload.getValue(), QueryMessage.class);
-        assertThat(qm.getSelector()).isEqualTo(
-                "__topic__ IN ('persistent://public/in/a','persistent://public/in/b') AND (region = 'US')");
+        FilterRequest req = capturePublished();
+        assertThat(req.getInputTopics()).containsExactly(
+                "persistent://public/in/a", "persistent://public/in/b");
+        assertThat(req.getSelector()).isEqualTo("region = 'US'");
         assertThat(fc.sourceTopics()).containsExactly(
                 "persistent://public/in/a", "persistent://public/in/b");
     }
 
     @Test
-    void nullSelectorComposesToTopicConstraintOnly() throws Exception {
+    void nullSelectorIsPassedThroughAsNull() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
         session.newConsumer().topic("persistent://public/in/trades").subscribe();
 
-        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(controlMsgBuilder).value(payload.capture());
-        QueryMessage qm = MAPPER.readValue(payload.getValue(), QueryMessage.class);
-        assertThat(qm.getSelector()).isEqualTo("__topic__ = 'persistent://public/in/trades'");
+        FilterRequest req = capturePublished();
+        assertThat(req.getCommand()).isEqualTo(Command.REGISTER);
+        assertThat(req.getSelector()).isNull();
+        assertThat(req.getInputTopics()).containsExactly("persistent://public/in/trades");
     }
 
+    // ---------------------------------------------------------------- Close path (UNREGISTER)
+
     @Test
-    void closeRetractsQueryAndDeletesPrivateTopic() throws Exception {
+    void closePublishesUnregisterAndDeletesPrivateTopic() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
         Consumer<byte[]> c = session.newConsumer()
                 .topic("persistent://public/in/trades")
+                .selector("region = 'US'")
                 .subscribe();
         FilterControl fc = asControl(c);
 
         c.close();
 
         verify(consumer).close();
-        verify(controlMsgBuilder).value(isNull()); // tombstone
+        // Two publishes total: REGISTER on subscribe, UNREGISTER on close. Verify the second.
+        List<FilterRequest> all = captureAllPublished(2);
+        assertThat(all.get(0).getCommand()).isEqualTo(Command.REGISTER);
+        assertThat(all.get(1).getCommand()).isEqualTo(Command.UNREGISTER);
         verify(topics).delete(fc.privateTopic(), true);
     }
 
     @Test
-    void closeWithDeleteOnCloseFalseSkipsDelete() throws Exception {
+    void closeWithDeleteOnCloseFalseStillPublishesUnregister() throws Exception {
         PrivateTopicPolicy policy = PrivateTopicPolicy.builder().deleteOnClose(false).build();
         Session session = newSession(policy);
         Consumer<byte[]> c = session.newConsumer()
                 .topic("persistent://public/in/trades")
+                .selector("region = 'US'")
                 .subscribe();
 
         c.close();
 
-        verify(controlMsgBuilder).value(isNull()); // tombstone still sent
+        List<FilterRequest> all = captureAllPublished(2);
+        assertThat(all.get(1).getCommand()).isEqualTo(Command.UNREGISTER);
         verify(topics, never()).delete(anyString(), anyBoolean());
     }
 
@@ -222,20 +256,25 @@ class SessionTests {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
         Consumer<byte[]> c = session.newConsumer()
                 .topic("persistent://public/in/trades")
+                .selector("region = 'US'")
                 .subscribe();
 
         c.close();
         c.close();
         verify(consumer, times(1)).close();
+        // Two publishes total even after a redundant close: REGISTER + ONE UNREGISTER.
+        captureAllPublished(2);
         verify(topics, times(1)).delete(anyString(), anyBoolean());
     }
+
+    // ---------------------------------------------------------------- Policy-controlled flows
 
     @Test
     void applyPerTopicPoliciesFalseSkipsAdminCalls() throws Exception {
         PrivateTopicPolicy policy = PrivateTopicPolicy.builder().applyPerTopicPolicies(false).build();
         Session session = newSession(policy);
 
-        session.newConsumer().topic("persistent://public/in/trades").subscribe();
+        session.newConsumer().topic("persistent://public/in/trades").selector("region = 'US'").subscribe();
 
         verify(topics, never()).createNonPartitionedTopic(anyString());
         verify(topicPolicies, never()).setMessageTTL(anyString(), anyInt());
@@ -251,22 +290,12 @@ class SessionTests {
         verify(admin, never()).close();
     }
 
-    @Test
-    void selectorEscapesSingleQuotesInSourceTopic() throws Exception {
-        Session session = newSession(PrivateTopicPolicy.DEFAULT);
-        session.newConsumer().topic("topic-with-'-quote").subscribe();
-
-        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(controlMsgBuilder).value(payload.capture());
-        QueryMessage qm = MAPPER.readValue(payload.getValue(), QueryMessage.class);
-        assertThat(qm.getSelector()).isEqualTo("__topic__ = 'topic-with-''-quote'");
-    }
+    // ---------------------------------------------------------------- Validation
 
     @Test
     void subscribeWithMalformedSelectorThrowsIllegalArgumentBeforePublishing() throws Exception {
         Session session = newSession(PrivateTopicPolicy.DEFAULT);
 
-        // Garbage selector that the JMS grammar will reject.
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> session.newConsumer()
                         .topic("persistent://public/in/trades")
                         .selector("THIS IS NOT VALID JMS @@##")
@@ -278,5 +307,27 @@ class SessionTests {
         verify(topics, never()).createNonPartitionedTopic(anyString());
         verify(controlMsgBuilder, never()).value(any(byte[].class));
         verify(consumerBuilder, never()).subscribe();
+    }
+
+    // ---------------------------------------------------------------- Public API for Kafka SDK
+
+    @Test
+    void registerPrivateQueryWithSerializersAndClientTypeKafka() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        PrivateQuery pq = session.registerPrivateQuery(
+                List.of("persistent://public/in/trades"),
+                "region = 'US'",
+                "org.apache.kafka.common.serialization.StringDeserializer",
+                "org.apache.kafka.common.serialization.ByteArrayDeserializer",
+                ClientType.KAFKA);
+
+        verify(controlMsgBuilder).key(pq.queryId());
+        FilterRequest req = capturePublished();
+        assertThat(req.getCommand()).isEqualTo(Command.REGISTER);
+        assertThat(req.getClientType()).isEqualTo(ClientType.KAFKA);
+        assertThat(req.getKeyDeserializer())
+                .isEqualTo("org.apache.kafka.common.serialization.StringDeserializer");
+        assertThat(req.getValueDeserializer())
+                .isEqualTo("org.apache.kafka.common.serialization.ByteArrayDeserializer");
     }
 }

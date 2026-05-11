@@ -4,8 +4,8 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Immutable handle for a query registered with the broker-side filter function. Returned from
- * {@link Session#registerPrivateQuery(List, String)}; passed back to
+ * Immutable handle for a query registered with the orchestrator. Returned from
+ * {@link Session#registerPrivateQuery(List, String)} (and its overloads); passed back to
  * {@link Session#updatePrivateQuery(PrivateQuery, String)} and
  * {@link Session#retirePrivateQuery(PrivateQuery)} for lifecycle operations.
  *
@@ -18,13 +18,11 @@ public final class PrivateQuery {
     private final String queryId;
     private final String privateTopic;
     private final List<String> sourceTopics;
-    private final String topicConstraint;
 
-    PrivateQuery(String queryId, String privateTopic, List<String> sourceTopics, String topicConstraint) {
-        this.queryId         = Objects.requireNonNull(queryId, "queryId");
-        this.privateTopic    = Objects.requireNonNull(privateTopic, "privateTopic");
-        this.sourceTopics    = List.copyOf(sourceTopics);
-        this.topicConstraint = Objects.requireNonNull(topicConstraint, "topicConstraint");
+    PrivateQuery(String queryId, String privateTopic, List<String> sourceTopics) {
+        this.queryId      = Objects.requireNonNull(queryId, "queryId");
+        this.privateTopic = Objects.requireNonNull(privateTopic, "privateTopic");
+        this.sourceTopics = List.copyOf(sourceTopics);
     }
 
     /** Stable identifier; same value used to publish, update, and retract the query. */
@@ -45,26 +43,17 @@ public final class PrivateQuery {
         return sourceTopics;
     }
 
-    /**
-     * The {@code __topic__ = '...'} or {@code __topic__ IN (...)} fragment composed with the
-     * user selector. Wrappers re-use it when republishing on {@code setSelector}.
-     */
-    public String topicConstraint() {
-        return topicConstraint;
-    }
-
     @Override
     public boolean equals(Object o) {
         if (!(o instanceof PrivateQuery that)) return false;
         return queryId.equals(that.queryId)
                 && privateTopic.equals(that.privateTopic)
-                && sourceTopics.equals(that.sourceTopics)
-                && topicConstraint.equals(that.topicConstraint);
+                && sourceTopics.equals(that.sourceTopics);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(queryId, privateTopic, sourceTopics, topicConstraint);
+        return Objects.hash(queryId, privateTopic, sourceTopics);
     }
 
     @Override

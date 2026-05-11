@@ -1,7 +1,9 @@
 package io.streamnative.filter.client;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.streamnative.filter.common.QueryMessage;
+import io.streamnative.filter.common.Command;
+import io.streamnative.filter.common.FilterRequest;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.Topics;
 import org.apache.pulsar.client.admin.TopicPolicies;
@@ -21,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,7 +41,8 @@ import static org.mockito.Mockito.when;
 
 class FilteringPulsarConsumerTests {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private PulsarClient client;
     private PulsarAdmin admin;
@@ -87,7 +91,7 @@ class FilteringPulsarConsumerTests {
         session = Session.builder()
                 .pulsarClient(client)
                 .pulsarAdmin(admin)
-                .controlTopic("persistent://public/control/queries")
+                .controlTopic("persistent://public/orchestrator/filter-requests")
                 .privateTopicTenant("public")
                 .privateTopicNamespace("filtered")
                 .build();
@@ -98,6 +102,16 @@ class FilteringPulsarConsumerTests {
                 .topic("persistent://public/in/trades")
                 .selector(selector)
                 .subscribe();
+    }
+
+    private List<FilterRequest> captureAllPublished(int expected) throws Exception {
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(controlMsgBuilder, times(expected)).value(payload.capture());
+        return payload.getAllValues().stream()
+                .map(b -> {
+                    try { return MAPPER.readValue(b, FilterRequest.class); }
+                    catch (Exception e) { throw new RuntimeException(e); }
+                }).toList();
     }
 
     // --------------------------------------------------------------- Delegation
@@ -178,53 +192,58 @@ class FilteringPulsarConsumerTests {
     }
 
     @Test
-    void setSelectorRepublishesOnSameQueryIdAndComposesTopicConstraint() throws Exception {
+    void setSelectorPublishesModifyOnSameQueryIdWithRawSelector() throws Exception {
         Consumer<byte[]> c = subscribe("region = 'US'");
         FilterControl fc = (FilterControl) c;
         String initialQueryId = fc.queryId();
 
-        // Initial publish from subscribe()
-        ArgumentCaptor<byte[]> firstPayload = ArgumentCaptor.forClass(byte[].class);
-        verify(controlMsgBuilder).value(firstPayload.capture());
-        verify(controlMsgBuilder).key(initialQueryId);
-        QueryMessage initialQm = MAPPER.readValue(firstPayload.getValue(), QueryMessage.class);
-        assertThat(initialQm.getSelector())
-                .isEqualTo("__topic__ = 'persistent://public/in/trades' AND (region = 'US')");
-
-        // setSelector publishes again on SAME queryId
+        // setSelector republishes — verify a MODIFY FilterRequest on the same key.
         fc.setSelector("region = 'UK'");
         assertThat(fc.queryId()).isEqualTo(initialQueryId);
         assertThat(fc.currentSelector()).isEqualTo("region = 'UK'");
 
-        ArgumentCaptor<byte[]> secondPayload = ArgumentCaptor.forClass(byte[].class);
-        verify(controlMsgBuilder, times(2)).value(secondPayload.capture());
+        // Two publishes total: REGISTER from subscribe(), MODIFY from setSelector.
+        List<FilterRequest> all = captureAllPublished(2);
         verify(controlMsgBuilder, times(2)).key(initialQueryId);
-        QueryMessage updated = MAPPER.readValue(secondPayload.getValue(), QueryMessage.class);
-        assertThat(updated.getSelector())
-                .isEqualTo("__topic__ = 'persistent://public/in/trades' AND (region = 'UK')");
-        assertThat(updated.getOutputTopic()).isEqualTo(fc.privateTopic());
+
+        assertThat(all.get(0).getCommand()).isEqualTo(Command.REGISTER);
+        assertThat(all.get(0).getSelector()).isEqualTo("region = 'US'");
+
+        assertThat(all.get(1).getCommand()).isEqualTo(Command.MODIFY);
+        assertThat(all.get(1).getSelector()).isEqualTo("region = 'UK'");
+        // MODIFY body carries only command + selector; other fields null.
+        assertThat(all.get(1).getInputTopics()).isNull();
+        assertThat(all.get(1).getOutputTopic()).isNull();
     }
 
     @Test
-    void setSelectorNullPublishesTopicConstraintOnly() throws Exception {
+    void setSelectorNullThrows() throws Exception {
+        // MODIFY requires non-blank selector — validated at the SDK so the user gets an immediate
+        // error instead of a silent reject at the orchestrator. If the user wants to drop the
+        // filter, they should close this consumer and build a new one without a selector.
         Consumer<byte[]> c = subscribe("region = 'US'");
         FilterControl fc = (FilterControl) c;
 
-        fc.setSelector(null);
-        assertThat(fc.currentSelector()).isNull();
+        assertThatThrownBy(() -> fc.setSelector(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("selector");
 
-        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(controlMsgBuilder, times(2)).value(payload.capture());
-        QueryMessage updated = MAPPER.readValue(payload.getAllValues().get(1), QueryMessage.class);
-        assertThat(updated.getSelector()).isEqualTo("__topic__ = 'persistent://public/in/trades'");
+        // No second publish — failed validation must not republish.
+        verify(controlMsgBuilder, times(1)).value(any(byte[].class));
+        assertThat(fc.currentSelector()).isEqualTo("region = 'US'"); // unchanged
     }
 
     @Test
-    void setSelectorEmptyTreatedSameAsNull() throws Exception {
+    void setSelectorBlankThrows() throws Exception {
         Consumer<byte[]> c = subscribe("region = 'US'");
         FilterControl fc = (FilterControl) c;
-        fc.setSelector("   ");
-        assertThat(fc.currentSelector()).isNull();
+
+        assertThatThrownBy(() -> fc.setSelector("   "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("selector");
+
+        verify(controlMsgBuilder, times(1)).value(any(byte[].class));
+        assertThat(fc.currentSelector()).isEqualTo("region = 'US'");
     }
 
     @Test
@@ -232,13 +251,13 @@ class FilteringPulsarConsumerTests {
         Consumer<byte[]> c = subscribe("region = 'US'");
         FilterControl fc = (FilterControl) c;
 
-        // One publish from subscribe()
+        // Initial REGISTER publish.
         verify(controlMsgBuilder, times(1)).value(any(byte[].class));
 
         assertThatThrownBy(() -> fc.setSelector("THIS IS NOT @@## VALID"))
                 .isInstanceOf(IllegalArgumentException.class);
 
-        // Still only the initial publish — failed validation must not republish.
+        // Still only the initial publish.
         verify(controlMsgBuilder, times(1)).value(any(byte[].class));
         assertThat(fc.currentSelector()).isEqualTo("region = 'US'"); // unchanged
     }
@@ -257,13 +276,14 @@ class FilteringPulsarConsumerTests {
     // --------------------------------------------------------------- Close semantics
 
     @Test
-    void closeRetractsThenCallsUnderlyingClose() throws Exception {
+    void closePublishesUnregisterThenCallsUnderlyingClose() throws Exception {
         Consumer<byte[]> c = subscribe("region = 'US'");
         FilterControl fc = (FilterControl) c;
         c.close();
 
         verify(underlying).close();
-        verify(controlMsgBuilder).value(isNull()); // tombstone
+        List<FilterRequest> all = captureAllPublished(2);
+        assertThat(all.get(1).getCommand()).isEqualTo(Command.UNREGISTER);
         verify(topics).delete(eq(fc.privateTopic()), eq(true));
     }
 
@@ -273,6 +293,8 @@ class FilteringPulsarConsumerTests {
         c.close();
         c.close();
         verify(underlying, times(1)).close();
+        // Two publishes total even with redundant close: REGISTER + ONE UNREGISTER.
+        captureAllPublished(2);
         verify(topics, times(1)).delete(anyString(), anyBoolean());
     }
 
@@ -285,8 +307,9 @@ class FilteringPulsarConsumerTests {
 
         assertThatThrownBy(c::close).isSameAs(boom);
 
-        // Tombstone was still sent and topic still deleted, even though delegate.close() failed.
-        verify(controlMsgBuilder).value(isNull());
+        // UNREGISTER was still sent and topic still deleted, even though delegate.close() failed.
+        List<FilterRequest> all = captureAllPublished(2);
+        assertThat(all.get(1).getCommand()).isEqualTo(Command.UNREGISTER);
         verify(topics).delete(eq(fc.privateTopic()), eq(true));
     }
 
