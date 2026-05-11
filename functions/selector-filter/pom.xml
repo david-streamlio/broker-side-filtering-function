@@ -43,8 +43,8 @@
         </dependency>
 
         <dependency>
-            <groupId>com.datastax.oss</groupId>
-            <artifactId>pulsar-jms-filters-common</artifactId>
+            <groupId>io.streamnative</groupId>
+            <artifactId>pulsar-jms-filters</artifactId>
         </dependency>
 
         <dependency>

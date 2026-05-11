@@ -1,7 +1,7 @@
 package io.streamnative.filter;
 
-import com.datastax.oss.pulsar.jms.selectors.SelectorSupport;
-import jakarta.jms.JMSException;
+import io.streamnative.pulsar.jms.selectors.SelectorSupport;
+import javax.jms.JMSException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

@@ -3,7 +3,7 @@ package io.streamnative.filter;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.QueryMessage;
-import jakarta.jms.JMSException;
+import javax.jms.JMSException;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.TableView;

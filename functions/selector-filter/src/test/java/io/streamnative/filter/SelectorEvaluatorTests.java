@@ -1,6 +1,6 @@
 package io.streamnative.filter;
 
-import jakarta.jms.JMSException;
+import javax.jms.JMSException;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
