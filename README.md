@@ -360,6 +360,97 @@ ActiveMQ's `SelectorParser`. The **client** uses the same library to validate se
 control topic. The **function** compiles and caches the same expression for O(1) per-message
 evaluation.
 
+## Kafka client library — `FilterableKafkaConsumers`
+
+The `selector-filter-client-kafka` module wraps a real
+`org.apache.kafka.clients.consumer.KafkaConsumer` pointed at a **KoP**-enabled Pulsar broker so
+Kafka apps can subscribe to filtered output topics. The returned consumer implements both the
+Kafka `Consumer<K, V>` interface and `FilterControl` — same dynamic-selector API as the Pulsar
+SDK, accessed by cast.
+
+```xml
+<dependency>
+    <groupId>io.streamnative</groupId>
+    <artifactId>selector-filter-client-kafka</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+</dependency>
+```
+
+### Deployment requirements
+
+| Requirement | Why |
+|---|---|
+| Broker has KoP enabled with `messagingProtocols=kafka` | so Kafka clients can connect at all |
+| **`kafkaEntryFormat=pulsar_non_batched`** | the only setting where a native Pulsar producer (what the filter function writes with) produces messages that Kafka consumers can read. Validated end-to-end against KoP 4.2.0.6 in `KoPOutputFormatSpikeIT`. |
+| `Session.privateTopicTenant` / `privateTopicNamespace` match KoP's `kafkaTenant`/`kafkaNamespace` | so the per-consumer private output Pulsar topic is visible as a Kafka topic. v1 derives the Kafka name as the **last segment** of the private Pulsar FQN — e.g. `persistent://public/default/filtered-<uuid>` → `filtered-<uuid>`. |
+
+The previously documented KoP 4.2.0.6 `pulsar_non_batched` framing bug is **asymmetric**: it only
+affects the *input* direction (Kafka producer → Pulsar function-as-consumer), not the *output*
+direction this SDK uses (Pulsar producer → Kafka consumer). Kafka producers feeding the function
+should use a Pulsar producer or wait for a KoP version that fixes the input-direction framing.
+
+### Basic usage
+
+```java
+try (Session session = Session.builder()
+        .serviceUrl("pulsar://broker:6650")
+        .adminUrl("http://broker:8080")
+        .controlTopic("persistent://public/default/queries")
+        .privateTopicTenant("public")
+        .privateTopicNamespace("default")          // must match KoP's kafkaNamespace tail
+        .build()) {
+
+    Properties kafkaProps = new Properties();
+    kafkaProps.put(BOOTSTRAP_SERVERS_CONFIG, "broker:9094");      // KoP listener
+    kafkaProps.put(GROUP_ID_CONFIG, "my-group");
+    kafkaProps.put(AUTO_OFFSET_RESET_CONFIG, "earliest");
+    kafkaProps.put(KEY_DESERIALIZER_CLASS_CONFIG,
+            StringDeserializer.class.getName());
+    kafkaProps.put(VALUE_DESERIALIZER_CLASS_CONFIG,
+            ByteArrayDeserializer.class.getName());
+
+    try (Consumer<String, byte[]> consumer = FilterableKafkaConsumers
+            .<String, byte[]>newConsumer(session, kafkaProps)
+            .topic("persistent://public/in/trades")    // PULSAR source topic
+            .selector("region = 'US'")
+            .subscribe()) {
+
+        ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(5));
+        for (ConsumerRecord<String, byte[]> r : records) {
+            Header region = r.headers().lastHeader("region");
+            // ... function's forwardSourceMessageProperty surfaces here as a Kafka header
+        }
+        consumer.commitSync();
+
+        // Dynamic ops via FilterControl cast — same as Pulsar SDK
+        ((FilterControl) consumer).setSelector("region IN ('US','UK')");
+    }
+}
+```
+
+### Frozen subscription
+
+The Kafka `Consumer<K, V>` returned from `subscribe()` enforces that its filtered subscription is
+fixed at build time. The following throw `UnsupportedOperationException`:
+
+- `subscribe(Collection<String>)` / `subscribe(Collection, ConsumerRebalanceListener)`
+- `subscribe(Pattern)` / `subscribe(Pattern, ConsumerRebalanceListener)`
+- `assign(Collection<TopicPartition>)`
+- `unsubscribe()`
+
+To change what's being consumed, either call `setSelector(...)` (hot-reload — same queryId, new
+filter rule) or close this consumer and build a new one. Everything else on the `Consumer`
+interface — `poll`, `commitSync`/`Async`, `seek`, `pause`/`resume`, `position`, `committed`,
+`partitionsFor`, etc. — delegates straight through to the underlying real KafkaConsumer.
+
+### Property → header round-trip
+
+The filter function forwards Pulsar user properties (`forwardSourceMessageProperty=true`) to its
+output topic. With `kafkaEntryFormat=pulsar_non_batched`, KoP surfaces those Pulsar properties as
+Kafka headers on the consumer side. Concretely: a producer message with
+`property("region", "US")` arrives at the Kafka consumer as a header `region=US` (bytes
+`[0x55, 0x53]`). Validated end-to-end in `KafkaConsumerKoPIT`.
+
 ### Key-only fast path
 
 When a query's selector references only the `__key__` binding (e.g. `__key__ IN ('AAPL','MSFT')`),
@@ -456,13 +547,20 @@ function/                                     -- the broker-side Function (NAR)
 client/                                       -- Session-style client library (JAR)
   pom.xml
   src/main/java/io/streamnative/filter/client/
-    Session.java
+    Session.java                              -- shared context + public registerPrivateQuery API
     SessionBuilder.java
-    FilterableConsumerBuilder.java
+    PrivateQuery.java                         -- value object passed between Session and SDKs
+    FilterableConsumerBuilder.java            -- Pulsar-native consumer builder
     FilteringPulsarConsumer.java              -- Consumer<byte[]> + FilterControl wrapper
     FilterControl.java                        -- dynamic-selector cast interface
     PrivateTopicPolicy.java
     Selectors.java                            -- compose + validate selector syntax
+client-kafka/                                 -- Kafka-flavoured client library (JAR)
+  pom.xml
+  src/main/java/io/streamnative/filter/client/kafka/
+    FilterableKafkaConsumers.java             -- static factory entry point
+    FilterableKafkaConsumerBuilder.java       -- fluent Kafka consumer builder
+    FilteringKafkaConsumer.java               -- Consumer<K,V> + FilterControl wrapper
 ```
 
 ## References

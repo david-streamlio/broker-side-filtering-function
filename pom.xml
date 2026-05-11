@@ -16,6 +16,7 @@
         <module>common</module>
         <module>function</module>
         <module>client</module>
+        <module>client-kafka</module>
     </modules>
 
     <properties>
@@ -26,6 +27,7 @@
 
         <pulsar.version>4.0.10</pulsar.version>
         <pulsar-jms.version>9.0.1</pulsar-jms.version>
+        <kafka-clients.version>3.6.1</kafka-clients.version>
         <jackson.version>2.18.2</jackson.version>
         <slf4j.version>2.0.16</slf4j.version>
 
@@ -46,6 +48,17 @@
                 <groupId>io.streamnative</groupId>
                 <artifactId>selector-filter-common</artifactId>
                 <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.streamnative</groupId>
+                <artifactId>selector-filter-client</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.kafka</groupId>
+                <artifactId>kafka-clients</artifactId>
+                <version>${kafka-clients.version}</version>
             </dependency>
 
             <dependency>

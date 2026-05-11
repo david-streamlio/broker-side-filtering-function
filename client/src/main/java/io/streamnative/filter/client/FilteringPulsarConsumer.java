@@ -21,36 +21,25 @@ import java.util.function.Function;
  * Wraps a real Pulsar {@link Consumer} subscribed to a private filtered topic, and adds
  * {@link FilterControl} so callers can swap the active selector after construction.
  *
- * <p>All {@link Consumer} methods delegate to the underlying consumer. {@link #close()} additionally
- * tombstones the query on the control topic and (per policy) deletes the private output topic.
+ * <p>All {@link Consumer} methods delegate to the underlying consumer. {@link #close()}
+ * additionally retracts the registered query (and, per policy, deletes the private output topic).
  */
 final class FilteringPulsarConsumer implements Consumer<byte[]>, FilterControl {
 
     private static final Logger LOG = LoggerFactory.getLogger(FilteringPulsarConsumer.class);
 
     private final Session session;
+    private final PrivateQuery query;
     private final Consumer<byte[]> delegate;
-    private final String queryId;
-    private final String privateTopic;
-    private final List<String> sourceTopics;
-    private final String topicConstraint;
     private volatile String userSelector;
     private volatile boolean closed;
 
-    FilteringPulsarConsumer(Session session,
-                            Consumer<byte[]> delegate,
-                            String queryId,
-                            String privateTopic,
-                            List<String> sourceTopics,
-                            String topicConstraint,
-                            String userSelector) {
-        this.session         = session;
-        this.delegate        = delegate;
-        this.queryId         = queryId;
-        this.privateTopic    = privateTopic;
-        this.sourceTopics    = List.copyOf(sourceTopics);
-        this.topicConstraint = topicConstraint;
-        this.userSelector    = userSelector;
+    FilteringPulsarConsumer(Session session, PrivateQuery query, Consumer<byte[]> delegate,
+                            String initialUserSelector) {
+        this.session      = session;
+        this.query        = query;
+        this.delegate     = delegate;
+        this.userSelector = initialUserSelector;
     }
 
     // ------------------------------------------------------------------ FilterControl
@@ -60,11 +49,8 @@ final class FilteringPulsarConsumer implements Consumer<byte[]>, FilterControl {
         if (closed) {
             throw new IllegalStateException("Consumer is closed");
         }
-        Selectors.validate(selector);
-        String composed = Selectors.combine(topicConstraint, selector);
-        session.republishQuery(queryId, composed, privateTopic);
+        session.updatePrivateQuery(query, selector);
         this.userSelector = (selector == null || selector.isBlank()) ? null : selector;
-        LOG.info("Updated selector queryId={} selector=[{}]", queryId, composed);
     }
 
     @Override
@@ -74,17 +60,17 @@ final class FilteringPulsarConsumer implements Consumer<byte[]>, FilterControl {
 
     @Override
     public String queryId() {
-        return queryId;
+        return query.queryId();
     }
 
     @Override
     public List<String> sourceTopics() {
-        return sourceTopics;
+        return query.sourceTopics();
     }
 
     @Override
     public String privateTopic() {
-        return privateTopic;
+        return query.privateTopic();
     }
 
     // ------------------------------------------------------------------ Consumer — lifecycle
@@ -98,10 +84,10 @@ final class FilteringPulsarConsumer implements Consumer<byte[]>, FilterControl {
             delegate.close();
         } catch (PulsarClientException e) {
             closeError = e;
-            LOG.warn("Failed to close underlying consumer for queryId={}: {}", queryId, e.getMessage());
+            LOG.warn("Failed to close underlying consumer for queryId={}: {}", query.queryId(), e.getMessage());
         }
-        // Always retract + (per policy) delete the private topic, even if delegate.close() failed.
-        session.retractAndCleanup(queryId, privateTopic);
+        // Always retract + (per policy) delete, even if delegate.close() failed.
+        session.retirePrivateQuery(query);
         if (closeError != null) {
             throw closeError;
         }
@@ -114,7 +100,7 @@ final class FilteringPulsarConsumer implements Consumer<byte[]>, FilterControl {
             closed = true;
         }
         return delegate.closeAsync()
-                .whenComplete((v, t) -> session.retractAndCleanup(queryId, privateTopic));
+                .whenComplete((v, t) -> session.retirePrivateQuery(query));
     }
 
     // ------------------------------------------------------------------ Consumer — identity / state

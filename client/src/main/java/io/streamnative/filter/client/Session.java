@@ -28,33 +28,18 @@ import java.util.concurrent.TimeUnit;
  * handles, the control-topic producer, and the {@link PrivateTopicPolicy} applied to per-consumer
  * private output topics.
  *
- * <p>Use {@link #builder()} to construct an instance, then {@link #newConsumer()} to build a
- * filtered consumer:
+ * <p>Two consumer-construction paths use this session:
+ * <ul>
+ *   <li>The Pulsar-native path: {@link #newConsumer()} returns a builder whose
+ *       {@code subscribe()} hands back a standard {@code Consumer<byte[]>} that also implements
+ *       {@link FilterControl}.</li>
+ *   <li>The Kafka path (in the {@code selector-filter-client-kafka} module): uses the public
+ *       registration API — {@link #registerPrivateQuery}, {@link #updatePrivateQuery}, and
+ *       {@link #retirePrivateQuery} — to drive its own real {@code KafkaConsumer} pointed at a
+ *       KoP-enabled broker.</li>
+ * </ul>
  *
- * <pre>{@code
- * try (Session session = Session.builder()
- *         .serviceUrl("pulsar://broker:6650")
- *         .adminUrl("http://broker:8080")
- *         .controlTopic("persistent://public/control/queries")
- *         .build()) {
- *
- *     Consumer<byte[]> c = session.newConsumer()
- *             .topic("persistent://public/quotes/trades")
- *             .selector("region = 'US'")
- *             .subscribe();
- *
- *     // Standard Pulsar Consumer API:
- *     Message<byte[]> msg = c.receive();
- *     c.acknowledge(msg);
- *
- *     // Dynamic selector ops via FilterControl cast:
- *     ((FilterControl) c).setSelector("region IN ('US','UK')");
- *
- *     c.close();
- * }
- * }</pre>
- *
- * <p>Sessions are thread-safe: multiple {@link #newConsumer()} chains may run concurrently.
+ * <p>Sessions are thread-safe: multiple consumer constructions may run concurrently.
  * {@link #close()} closes all resources owned by this session including any Pulsar handles it
  * constructed. Open consumers should be closed before the session.
  */
@@ -104,8 +89,8 @@ public final class Session implements Closeable {
     }
 
     /**
-     * Start building a filtered consumer. Configure topic(s), selector, and optional subscription
-     * settings, then call {@link FilterableConsumerBuilder#subscribe()}.
+     * Start building a Pulsar-native filtered consumer. Configure topic(s), selector, and
+     * optional subscription settings, then call {@link FilterableConsumerBuilder#subscribe()}.
      */
     public FilterableConsumerBuilder newConsumer() {
         return new FilterableConsumerBuilder(this);
@@ -113,6 +98,12 @@ public final class Session implements Closeable {
 
     public String getControlTopic()                   { return controlTopic; }
     public PrivateTopicPolicy getPrivateTopicPolicy() { return privateTopicPolicy; }
+
+    /** Pulsar tenant under which private output topics are created. */
+    public String getPrivateTopicTenant()             { return privateTopicTenant; }
+
+    /** Pulsar namespace under which private output topics are created. */
+    public String getPrivateTopicNamespace()          { return privateTopicNamespace; }
 
     /**
      * Used by tests; in production the function picks up control-topic updates in sub-second time
@@ -139,75 +130,114 @@ public final class Session implements Closeable {
         }
     }
 
-    // ---------------------------------------------------------------- Builder/wrapper internals
+    // =============================================================================
+    // Public registration API — used by Pulsar SDK internally AND by the Kafka SDK
+    // =============================================================================
 
     /**
-     * Called from {@link FilterableConsumerBuilder#subscribe()}. Generates a queryId, creates the
-     * private output topic, publishes the registration, and subscribes the underlying consumer.
+     * Register a filtered query with the broker-side function. Generates a fresh {@code queryId},
+     * creates and configures the private output topic, validates the user selector, and publishes
+     * the {@link QueryMessage} to the control topic.
+     *
+     * <p>Callers (per-transport consumer builders) take the returned {@link PrivateQuery} and
+     * attach their own consumer to {@link PrivateQuery#privateTopic()}. On failure of that next
+     * step they should call {@link #retirePrivateQuery(PrivateQuery)} to clean up.
+     *
+     * @throws IllegalArgumentException if {@code sourceTopics} is empty or {@code userSelector}
+     *                                  is non-blank but malformed.
+     * @throws PulsarClientException    on control-topic publish failure.
+     */
+    public PrivateQuery registerPrivateQuery(List<String> sourceTopics, String userSelector)
+            throws PulsarClientException {
+        if (sourceTopics == null || sourceTopics.isEmpty()) {
+            throw new IllegalArgumentException("At least one source topic is required");
+        }
+        Selectors.validate(userSelector);
+
+        String queryId         = UUID.randomUUID().toString();
+        String privateTopic    = String.format("persistent://%s/%s/filtered-%s",
+                privateTopicTenant, privateTopicNamespace, queryId);
+        String topicConstraint = Selectors.topicIn(sourceTopics);
+        String composedSelector = Selectors.combine(topicConstraint, userSelector);
+
+        createAndConfigurePrivateTopic(privateTopic);
+        publishQuery(queryId, composedSelector, privateTopic);
+
+        LOG.info("Registered query queryId={} private={} selector=[{}]",
+                queryId, privateTopic, composedSelector);
+        return new PrivateQuery(queryId, privateTopic, sourceTopics, topicConstraint);
+    }
+
+    /**
+     * Replace the active user-side selector on an existing query. Validates the new expression,
+     * composes it with the original topic constraint, and republishes the {@link QueryMessage} on
+     * the same {@code queryId} key — the function hot-reloads its compiled expression in place.
+     *
+     * @throws IllegalArgumentException if {@code newUserSelector} is non-blank but malformed.
+     * @throws PulsarClientException    on control-topic publish failure.
+     */
+    public void updatePrivateQuery(PrivateQuery pq, String newUserSelector) throws PulsarClientException {
+        Selectors.validate(newUserSelector);
+        String composed = Selectors.combine(pq.topicConstraint(), newUserSelector);
+        publishQuery(pq.queryId(), composed, pq.privateTopic());
+        LOG.info("Updated query queryId={} selector=[{}]", pq.queryId(), composed);
+    }
+
+    /**
+     * Retract a previously-registered query. Publishes a tombstone to the control topic and (per
+     * the configured {@link PrivateTopicPolicy}) deletes the private output topic. Best-effort —
+     * does not throw; log-only on errors.
+     */
+    public void retirePrivateQuery(PrivateQuery pq) {
+        try {
+            controlProducer.newMessage().key(pq.queryId()).value(null).send();
+            LOG.info("Retracted query queryId={}", pq.queryId());
+        } catch (PulsarClientException e) {
+            LOG.warn("Failed to retract queryId={}: {}", pq.queryId(), e.getMessage());
+        }
+        if (privateTopicPolicy.isDeleteOnClose()) {
+            safeDeletePrivateTopic(pq.privateTopic());
+        }
+    }
+
+    // =============================================================================
+    // Pulsar-SDK internal — uses the public registration API + native Pulsar subscribe
+    // =============================================================================
+
+    /**
+     * Called from {@link FilterableConsumerBuilder#subscribe()}. Registers the query and
+     * attaches a native Pulsar consumer to the private topic. Cleans up the registration on
+     * Pulsar-subscribe failure.
      */
     Consumer<byte[]> subscribeFiltered(List<String> sourceTopics,
                                        String userSelector,
                                        String subscriptionName,
                                        SubscriptionType subscriptionType,
                                        SubscriptionInitialPosition initialPosition) throws PulsarClientException {
-        String queryId      = UUID.randomUUID().toString();
-        String privateTopic = String.format("persistent://%s/%s/filtered-%s",
-                privateTopicTenant, privateTopicNamespace, queryId);
-        String topicConstraint = Selectors.topicIn(sourceTopics);
-        String composedSelector = Selectors.combine(topicConstraint, userSelector);
+        PrivateQuery pq = registerPrivateQuery(sourceTopics, userSelector);
         String resolvedSubName = (subscriptionName == null || subscriptionName.isBlank())
                 ? "session-" + UUID.randomUUID()
                 : subscriptionName;
-
         try {
-            createAndConfigurePrivateTopic(privateTopic);
-            publishQuery(queryId, composedSelector, privateTopic);
-
             Consumer<byte[]> underlying = pulsarClient.newConsumer(Schema.BYTES)
-                    .topic(privateTopic)
+                    .topic(pq.privateTopic())
                     .subscriptionName(resolvedSubName)
                     .subscriptionType(subscriptionType)
                     .subscriptionInitialPosition(initialPosition)
                     .subscribe();
-
             String storedUserSelector = (userSelector == null || userSelector.isBlank()) ? null : userSelector;
-            LOG.info("Created filtered consumer queryId={} private={} selector=[{}]",
-                    queryId, privateTopic, composedSelector);
-            return new FilteringPulsarConsumer(this, underlying, queryId, privateTopic,
-                    sourceTopics, topicConstraint, storedUserSelector);
+            return new FilteringPulsarConsumer(this, pq, underlying, storedUserSelector);
         } catch (RuntimeException | PulsarClientException e) {
-            safeRetract(queryId);
-            safeDeletePrivateTopic(privateTopic);
+            retirePrivateQuery(pq);
             throw e instanceof PulsarClientException
                     ? (PulsarClientException) e
                     : PulsarClientException.unwrap(e);
         }
     }
 
-    /**
-     * Called from {@link FilteringPulsarConsumer#setSelector(String)}. Republishes the
-     * {@link QueryMessage} on the same key, causing the function to hot-reload the compiled
-     * selector for {@code queryId}.
-     */
-    void republishQuery(String queryId, String composedSelector, String outputTopic) throws PulsarClientException {
-        publishQuery(queryId, composedSelector, outputTopic);
-    }
-
-    /**
-     * Called from {@link FilteringPulsarConsumer#close()}. Tombstones the query and (per policy)
-     * deletes the private topic.
-     */
-    void retractAndCleanup(String queryId, String privateTopic) {
-        try {
-            controlProducer.newMessage().key(queryId).value(null).send();
-            LOG.info("Retracted query queryId={}", queryId);
-        } catch (PulsarClientException e) {
-            LOG.warn("Failed to retract queryId={}: {}", queryId, e.getMessage());
-        }
-        if (privateTopicPolicy.isDeleteOnClose()) {
-            safeDeletePrivateTopic(privateTopic);
-        }
-    }
+    // =============================================================================
+    // Internal helpers
+    // =============================================================================
 
     private void createAndConfigurePrivateTopic(String privateTopic) {
         if (pulsarAdmin == null || !privateTopicPolicy.isApplyPerTopicPolicies()) {
@@ -256,14 +286,6 @@ public final class Session implements Closeable {
             throw new IllegalStateException("Failed to serialize QueryMessage", e);
         }
         controlProducer.newMessage().key(queryId).value(payload).send();
-    }
-
-    private void safeRetract(String queryId) {
-        try {
-            controlProducer.newMessage().key(queryId).value(null).send();
-        } catch (Throwable t) {
-            LOG.warn("Cleanup retract failed for queryId={}: {}", queryId, t.getMessage());
-        }
     }
 
     private void safeDeletePrivateTopic(String privateTopic) {

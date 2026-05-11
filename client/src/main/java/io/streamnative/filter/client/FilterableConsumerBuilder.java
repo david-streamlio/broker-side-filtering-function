@@ -104,7 +104,6 @@ public final class FilterableConsumerBuilder {
         if (sourceTopics.isEmpty()) {
             throw new IllegalStateException("At least one source topic is required");
         }
-        Selectors.validate(selector);
         return session.subscribeFiltered(
                 List.copyOf(sourceTopics),
                 selector,
