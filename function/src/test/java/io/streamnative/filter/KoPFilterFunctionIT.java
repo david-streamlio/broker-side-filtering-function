@@ -116,6 +116,9 @@ class KoPFilterFunctionIT {
                 .withEnv("PULSAR_PREFIX_kafkaEntryFormat", kafkaEntryFormat)
                 .withEnv("PULSAR_PREFIX_allowAutoTopicCreation", "true")
                 .withEnv("PULSAR_PREFIX_allowAutoTopicCreationType", "non-partitioned")
+                // Run function in the broker JVM so its stdout streams through our log consumer.
+                .withEnv("PULSAR_PREFIX_functionRuntimeFactoryClassName",
+                        "org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory")
                 .withEnv("PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled", "false")
                 // Functions worker MUST stay enabled — we deploy the filter NAR via the admin
                 // API. -nss disables stream storage (not needed).
