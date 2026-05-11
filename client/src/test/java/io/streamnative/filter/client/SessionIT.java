@@ -158,11 +158,21 @@ class SessionIT {
             // Closing the consumer (via try-with-resources at the end) will retract + delete.
             consumer.close();
 
-            // After close: the private topic should be deleted.
-            Thread.sleep(2000);
-            assertThat(admin.topics().getList("public/default"))
-                    .as("private topic should be cleaned up on close")
-                    .doesNotContain(privateTopic);
+            // After close: poll for up to 15 seconds for the private topic to disappear from
+            // the namespace listing. The delete is async on the broker side; the topic-list
+            // metadata catches up shortly after.
+            long deadline = System.currentTimeMillis() + 15_000L;
+            boolean cleaned = false;
+            while (System.currentTimeMillis() < deadline) {
+                if (!admin.topics().getList("public/default").contains(privateTopic)) {
+                    cleaned = true;
+                    break;
+                }
+                Thread.sleep(500);
+            }
+            assertThat(cleaned)
+                    .as("private topic %s should be cleaned up on close", privateTopic)
+                    .isTrue();
         }
     }
 
