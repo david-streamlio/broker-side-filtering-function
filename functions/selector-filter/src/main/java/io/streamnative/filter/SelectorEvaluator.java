@@ -52,7 +52,13 @@ public final class SelectorEvaluator {
         try {
             return support.matches(bindings::lookup);
         } catch (JMSException | RuntimeException e) {
-            LOG.warn("Selector evaluation failed for expression [{}]: {}", expression, e.toString());
+            // Logged at DEBUG, not WARN: per-message failures on a single bad selector would
+            // otherwise flood logs. The "nothing matched" outcome is already visible via the
+            // filter.messages.dropped metric; enable DEBUG on this logger when diagnosing why
+            // a specific selector never produces output.
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Selector evaluation failed for expression [{}]: {}", expression, e.toString());
+            }
             return false;
         }
     }
