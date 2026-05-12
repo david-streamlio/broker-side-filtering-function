@@ -8,7 +8,10 @@ import io.streamnative.filter.common.ClientType;
 import io.streamnative.filter.common.FilterRequest;
 
 import java.time.Instant;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * One entry in the orchestrator's input-topic registry TableView. Keyed by the input topic FQN
@@ -17,6 +20,14 @@ import java.util.Objects;
  * <p>Recording {@code keyDeserializer} / {@code valueDeserializer} lets the orchestrator detect
  * schema mismatches across registrations on the same input topic; see {@link #check(FilterRequest)}
  * for the compatibility matrix.
+ *
+ * <p>{@code activeQueryIds} tracks which queryIds currently hold this filter alive. Idle GC reads
+ * three states:
+ * <ul>
+ *   <li>{@code null} — pre-GC-awareness entry (v1 deployments upgrading). Sweeper skips.</li>
+ *   <li>empty set + {@code idleSince != null} — eligible for GC at {@code idleSince + ttl}.</li>
+ *   <li>non-empty — in use.</li>
+ * </ul>
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -28,6 +39,8 @@ final class RegistryEntry {
     private final String valueDeserializer;
     private final ClientType clientType;
     private final String createdAt;
+    private final Set<String> activeQueryIds;
+    private final String idleSince;
 
     @JsonCreator
     RegistryEntry(@JsonProperty("controlTopic") String controlTopic,
@@ -35,20 +48,34 @@ final class RegistryEntry {
                   @JsonProperty("keyDeserializer") String keyDeserializer,
                   @JsonProperty("valueDeserializer") String valueDeserializer,
                   @JsonProperty("clientType") ClientType clientType,
-                  @JsonProperty("createdAt") String createdAt) {
+                  @JsonProperty("createdAt") String createdAt,
+                  @JsonProperty("activeQueryIds") Set<String> activeQueryIds,
+                  @JsonProperty("idleSince") String idleSince) {
         this.controlTopic       = Objects.requireNonNull(controlTopic, "controlTopic");
         this.filterFunctionName = Objects.requireNonNull(filterFunctionName, "filterFunctionName");
         this.keyDeserializer    = keyDeserializer;
         this.valueDeserializer  = valueDeserializer;
         this.clientType         = clientType;
         this.createdAt          = createdAt;
+        this.activeQueryIds     = activeQueryIds == null
+                ? null
+                : Collections.unmodifiableSet(new LinkedHashSet<>(activeQueryIds));
+        this.idleSince          = idleSince;
+    }
+
+    /** Legacy 6-arg constructor — used by callers that don't yet write activeQueryIds. */
+    RegistryEntry(String controlTopic, String filterFunctionName,
+                  String keyDeserializer, String valueDeserializer,
+                  ClientType clientType, String createdAt) {
+        this(controlTopic, filterFunctionName, keyDeserializer, valueDeserializer,
+                clientType, createdAt, null, null);
     }
 
     static RegistryEntry newEntry(String controlTopic, String filterFunctionName,
                                   FilterRequest req) {
         return new RegistryEntry(controlTopic, filterFunctionName,
                 req.getKeyDeserializer(), req.getValueDeserializer(), req.getClientType(),
-                Instant.now().toString());
+                Instant.now().toString(), null, null);
     }
 
     public String getControlTopic()                  { return controlTopic; }
@@ -57,6 +84,8 @@ final class RegistryEntry {
     public String getValueDeserializer()             { return valueDeserializer; }
     public ClientType getClientType()                { return clientType; }
     public String getCreatedAt()                     { return createdAt; }
+    public Set<String> getActiveQueryIds()           { return activeQueryIds; }
+    public String getIdleSince()                     { return idleSince; }
 
     /**
      * Compatibility matrix for serializer fields, applied per-field:
@@ -88,7 +117,8 @@ final class RegistryEntry {
     /**
      * Apply the null→X upgrades described in {@link #check(FilterRequest)}. Existing non-null
      * fields are preserved. Caller is responsible for writing the merged entry back to the
-     * registry store.
+     * registry store. activeQueryIds / idleSince are carried through unchanged — use
+     * {@link #withQueryId(String)} and {@link #withoutQueryId(String, Instant)} for those.
      */
     RegistryEntry mergedWith(FilterRequest req) {
         return new RegistryEntry(
@@ -97,7 +127,40 @@ final class RegistryEntry {
                 keyDeserializer == null ? req.getKeyDeserializer() : keyDeserializer,
                 valueDeserializer == null ? req.getValueDeserializer() : valueDeserializer,
                 clientType == null ? req.getClientType() : clientType,
-                createdAt);
+                createdAt,
+                activeQueryIds,
+                idleSince);
+    }
+
+    /**
+     * Return a copy with {@code queryId} added to {@code activeQueryIds}. Clears {@code idleSince}
+     * (the filter is no longer idle). If {@code activeQueryIds} was null (pre-GC-awareness entry),
+     * this initializes it to a 1-element set, so the entry becomes GC-eligible after subsequent
+     * UNREGISTERs.
+     */
+    RegistryEntry withQueryId(String queryId) {
+        Set<String> next = new LinkedHashSet<>();
+        if (activeQueryIds != null) next.addAll(activeQueryIds);
+        next.add(queryId);
+        return new RegistryEntry(controlTopic, filterFunctionName,
+                keyDeserializer, valueDeserializer, clientType, createdAt,
+                next, null);
+    }
+
+    /**
+     * Return a copy with {@code queryId} removed from {@code activeQueryIds}. If the set becomes
+     * empty, {@code idleSince} is set to {@code now} so the sweeper can start the TTL clock.
+     * If {@code activeQueryIds} is null this returns the entry unchanged (no-op for pre-GC entries).
+     * Removing a queryId not in the set is a silent no-op (idempotent).
+     */
+    RegistryEntry withoutQueryId(String queryId, Instant now) {
+        if (activeQueryIds == null) return this;
+        Set<String> next = new LinkedHashSet<>(activeQueryIds);
+        next.remove(queryId);
+        String nextIdleSince = next.isEmpty() ? now.toString() : null;
+        return new RegistryEntry(controlTopic, filterFunctionName,
+                keyDeserializer, valueDeserializer, clientType, createdAt,
+                next, nextIdleSince);
     }
 
     private enum Mismatch { NONE, UPGRADE, REJECT }
@@ -118,13 +181,15 @@ final class RegistryEntry {
                 && Objects.equals(keyDeserializer, that.keyDeserializer)
                 && Objects.equals(valueDeserializer, that.valueDeserializer)
                 && clientType == that.clientType
-                && Objects.equals(createdAt, that.createdAt);
+                && Objects.equals(createdAt, that.createdAt)
+                && Objects.equals(activeQueryIds, that.activeQueryIds)
+                && Objects.equals(idleSince, that.idleSince);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(controlTopic, filterFunctionName, keyDeserializer,
-                valueDeserializer, clientType, createdAt);
+                valueDeserializer, clientType, createdAt, activeQueryIds, idleSince);
     }
 
     @Override
@@ -134,7 +199,9 @@ final class RegistryEntry {
                 + "', keyDeserializer='" + keyDeserializer
                 + "', valueDeserializer='" + valueDeserializer
                 + "', clientType=" + clientType
-                + ", createdAt='" + createdAt + "'}";
+                + ", createdAt='" + createdAt
+                + "', activeQueryIds=" + activeQueryIds
+                + ", idleSince='" + idleSince + "'}";
     }
 
     /** Tri-state result from {@link RegistryEntry#check(FilterRequest)}. */
