@@ -9,6 +9,9 @@ import org.apache.pulsar.client.api.TableView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
+import java.util.function.BiConsumer;
+
 /**
  * Facade over the orchestrator's state TableView. The state topic carries two logical keyspaces
  * distinguished by key prefix:
@@ -57,6 +60,22 @@ final class RegistryStore {
 
     void removeInputTopicEntry(String inputTopicOrPattern) throws PulsarClientException {
         producer.newMessage().key(TOPIC_KEY_PREFIX + inputTopicOrPattern).value(null).send();
+    }
+
+    /**
+     * Iterate every {@code t:}-prefixed entry currently in the TableView, decoding each into a
+     * {@link RegistryEntry}. Used by the idle-filter sweeper to take a per-tick snapshot of
+     * candidate GC targets. The TableView's own {@code entrySet()} is a live view, so callers
+     * should not assume the iteration is a transactional snapshot — concurrent writes during
+     * iteration are normal and handled by the sweeper's per-candidate recency re-read.
+     */
+    void forEachInputTopicEntry(BiConsumer<String, RegistryEntry> consumer) {
+        for (Map.Entry<String, byte[]> e : view.entrySet()) {
+            if (!e.getKey().startsWith(TOPIC_KEY_PREFIX)) continue;
+            String key = e.getKey().substring(TOPIC_KEY_PREFIX.length());
+            RegistryEntry entry = decode(e.getValue(), RegistryEntry.class);
+            consumer.accept(key, entry);
+        }
     }
 
     // ---------- q:<queryId> keyspace ----------

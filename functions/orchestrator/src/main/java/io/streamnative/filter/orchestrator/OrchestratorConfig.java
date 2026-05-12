@@ -44,6 +44,15 @@ final class OrchestratorConfig {
     /** Compaction threshold (bytes) for per-function control topics + registry-state topic. */
     static final String KEY_COMPACTION_THRESHOLD      = "compaction-threshold-bytes";
 
+    /** Master switch for idle-filter GC. When false, no sweeper is started. */
+    static final String KEY_IDLE_GC_ENABLED           = "idle-gc-enabled";
+
+    /** Continuous-idle time before a filter becomes deletion-eligible. */
+    static final String KEY_IDLE_GC_TTL_SECONDS       = "idle-gc-ttl-seconds";
+
+    /** How often the sweeper evaluates t: entries. */
+    static final String KEY_IDLE_GC_SWEEP_INTERVAL    = "idle-gc-sweep-interval-seconds";
+
     private final String stateTopic;
     private final String functionPackageUrl;
     private final String functionTenant;
@@ -54,22 +63,30 @@ final class OrchestratorConfig {
     private final boolean applyCompaction;
     private final long compactionThresholdBytes;
     private final String pulsarAdminUrl;
+    private final boolean idleGcEnabled;
+    private final long idleGcTtlSeconds;
+    private final long idleGcSweepIntervalSeconds;
 
     private OrchestratorConfig(String stateTopic, String functionPackageUrl,
                                String functionTenant, String functionNamespace,
                                String controlTopicTenant, String controlTopicNamespace,
                                int functionParallelism, boolean applyCompaction,
-                               long compactionThresholdBytes, String pulsarAdminUrl) {
-        this.stateTopic               = stateTopic;
-        this.functionPackageUrl       = functionPackageUrl;
-        this.functionTenant           = functionTenant;
-        this.functionNamespace        = functionNamespace;
-        this.controlTopicTenant       = controlTopicTenant;
-        this.controlTopicNamespace    = controlTopicNamespace;
-        this.functionParallelism      = functionParallelism;
-        this.applyCompaction          = applyCompaction;
-        this.compactionThresholdBytes = compactionThresholdBytes;
-        this.pulsarAdminUrl           = pulsarAdminUrl;
+                               long compactionThresholdBytes, String pulsarAdminUrl,
+                               boolean idleGcEnabled, long idleGcTtlSeconds,
+                               long idleGcSweepIntervalSeconds) {
+        this.stateTopic                  = stateTopic;
+        this.functionPackageUrl          = functionPackageUrl;
+        this.functionTenant              = functionTenant;
+        this.functionNamespace           = functionNamespace;
+        this.controlTopicTenant          = controlTopicTenant;
+        this.controlTopicNamespace       = controlTopicNamespace;
+        this.functionParallelism         = functionParallelism;
+        this.applyCompaction             = applyCompaction;
+        this.compactionThresholdBytes    = compactionThresholdBytes;
+        this.pulsarAdminUrl              = pulsarAdminUrl;
+        this.idleGcEnabled               = idleGcEnabled;
+        this.idleGcTtlSeconds            = idleGcTtlSeconds;
+        this.idleGcSweepIntervalSeconds  = idleGcSweepIntervalSeconds;
     }
 
     static OrchestratorConfig fromContext(Context ctx) {
@@ -83,16 +100,32 @@ final class OrchestratorConfig {
         boolean compaction   = optionalBoolean(ctx, KEY_APPLY_COMPACTION, true);
         long threshold       = optionalLong(ctx, KEY_COMPACTION_THRESHOLD, 10L * 1024 * 1024); // 10 MB
         String adminUrl      = requireString(ctx, KEY_PULSAR_ADMIN_URL);
+        boolean gcEnabled    = optionalBoolean(ctx, KEY_IDLE_GC_ENABLED, false);
+        long gcTtl           = optionalLong(ctx, KEY_IDLE_GC_TTL_SECONDS, 300L);
+        long gcInterval      = optionalLong(ctx, KEY_IDLE_GC_SWEEP_INTERVAL, 30L);
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
-                ctrlTenant, ctrlNamespace, parallelism, compaction, threshold, adminUrl);
+                ctrlTenant, ctrlNamespace, parallelism, compaction, threshold, adminUrl,
+                gcEnabled, gcTtl, gcInterval);
     }
 
-    /** Package-private factory for tests. */
+    /** Package-private factory for tests — GC disabled by default. */
     static OrchestratorConfig forTesting(String stateTopic, String packageUrl,
                                          String fnTenant, String fnNamespace) {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
-                "http://localhost:8080");
+                "http://localhost:8080",
+                false, 300L, 30L);
+    }
+
+    /** Test factory exposing GC knobs — used by IdleFilterSweeper tests. */
+    static OrchestratorConfig forTestingWithGc(String stateTopic, String packageUrl,
+                                               String fnTenant, String fnNamespace,
+                                               boolean gcEnabled, long gcTtlSeconds,
+                                               long gcSweepIntervalSeconds) {
+        return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
+                fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
+                "http://localhost:8080",
+                gcEnabled, gcTtlSeconds, gcSweepIntervalSeconds);
     }
 
     public String stateTopic()                  { return stateTopic; }
@@ -105,6 +138,9 @@ final class OrchestratorConfig {
     public boolean applyCompaction()            { return applyCompaction; }
     public long compactionThresholdBytes()      { return compactionThresholdBytes; }
     public String pulsarAdminUrl()              { return pulsarAdminUrl; }
+    public boolean idleGcEnabled()              { return idleGcEnabled; }
+    public long idleGcTtlSeconds()              { return idleGcTtlSeconds; }
+    public long idleGcSweepIntervalSeconds()    { return idleGcSweepIntervalSeconds; }
 
     private static String requireString(Context ctx, String key) {
         Object raw = ctx.getUserConfigValue(key).orElse(null);
@@ -155,6 +191,9 @@ final class OrchestratorConfig {
         return functionParallelism == that.functionParallelism
                 && applyCompaction == that.applyCompaction
                 && compactionThresholdBytes == that.compactionThresholdBytes
+                && idleGcEnabled == that.idleGcEnabled
+                && idleGcTtlSeconds == that.idleGcTtlSeconds
+                && idleGcSweepIntervalSeconds == that.idleGcSweepIntervalSeconds
                 && Objects.equals(stateTopic, that.stateTopic)
                 && Objects.equals(functionPackageUrl, that.functionPackageUrl)
                 && Objects.equals(functionTenant, that.functionTenant)
@@ -168,6 +207,7 @@ final class OrchestratorConfig {
     public int hashCode() {
         return Objects.hash(stateTopic, functionPackageUrl, functionTenant, functionNamespace,
                 controlTopicTenant, controlTopicNamespace, functionParallelism,
-                applyCompaction, compactionThresholdBytes, pulsarAdminUrl);
+                applyCompaction, compactionThresholdBytes, pulsarAdminUrl,
+                idleGcEnabled, idleGcTtlSeconds, idleGcSweepIntervalSeconds);
     }
 }
