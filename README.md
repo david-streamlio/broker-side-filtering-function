@@ -337,7 +337,8 @@ The `perf/` module hosts ShadowTraffic-driven load tests. They are **off by defa
 suite takes 20–30 minutes and depends on a paid ShadowTraffic license.
 
 ```bash
-# Phase-2 smoke test (1K records through KoP) — requires SHADOWTRAFFIC_LICENSE_* env vars.
+# Phase-2 smoke (1K records through KoP) + Phase-3 throughput bench. Both require
+# all six SHADOWTRAFFIC_LICENSE_* env vars.
 export SHADOWTRAFFIC_LICENSE_ID=...
 export SHADOWTRAFFIC_LICENSE_EMAIL=...
 export SHADOWTRAFFIC_LICENSE_ORGANIZATION=...
@@ -346,12 +347,22 @@ export SHADOWTRAFFIC_LICENSE_EXPIRATION=...
 export SHADOWTRAFFIC_LICENSE_SIGNATURE=...
 
 mvn -Pperf -pl perf verify
+
+# Phase-3 tunables (system properties):
+mvn -Pperf -pl perf verify \
+  -Dperf.duration=300 \
+  -Dperf.targetRate=50000 \
+  -Dperf.matchSelector="region = 'US'"
 ```
+
+`FilterThroughputBench` writes its result as JSON to
+`perf/target/reports/FilterThroughputBench-<git-sha>.json` — schema documented in
+`tasks/todo-perf-shadowtraffic.md`.
 
 Without the license env vars, JUnit skips the perf ITs cleanly via
 `@EnabledIfEnvironmentVariable`, so unmodified CI runs continue to pass. See
-`tasks/todo-perf-shadowtraffic.md` for the full backlog (additional benchmark scenarios,
-CI integration, regression-chart plumbing).
+`tasks/todo-perf-shadowtraffic.md` for the remaining backlog (selector-scaling and
+heartbeat benchmarks, CI integration, regression-chart plumbing).
 
 The function NAR appears at
 `functions/selector-filter/target/selector-filter-function-${VERSION}.nar` and is the artifact

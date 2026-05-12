@@ -20,8 +20,9 @@ TestContainers can manage. It generates configurable streams (Kafka, Pulsar,
 etc.) at controllable rates, so we can drive deterministic load against a
 running broker + filter function and measure.
 
-This was a **backlog plan**. Phases 1-2 are landed on branch `feat/perf-tests`;
-Phases 3-7 remain backlog.
+This was a **backlog plan**. Phases 1-3 are landed (`feat/perf-tests` merged
+to main as `688a775`; Phase 3 on branch `feat/perf-throughput`); Phases 4-7
+remain backlog.
 
 ## Goals
 
@@ -89,7 +90,7 @@ perf/                                              -- new Maven module
 |---|---|---|---|
 | 1 | Module scaffolding | DONE | New `perf/` Maven module, parent POM update, surefire/failsafe configured with the `perf` profile so it is OFF by default. |
 | 2 | ShadowTraffic container wiring | DONE (code only — not yet exercised against a real license) | `PerfHarnessIT.java` base + `PerfSmokeIT`: KoP-enabled Pulsar container + ShadowTraffic container on a shared Docker network, license env vars read from environment, fast-fail if absent, `@EnabledIfEnvironmentVariable` so the suite skips cleanly without a license. Smoke test: generate 1K records, assert a probe Pulsar consumer reads them back. |
-| 3 | First scenario — throughput | TODO | `FilterThroughputBench`: 5-minute sustained run at a configurable target rate. Measures: actual achieved rate, output-topic rate, latency percentiles (via brokerEntryMetadataInterceptor + a probe consumer that timestamps receive). Emit results as a JSON file under `perf/target/reports/`. |
+| 3 | First scenario — throughput | DONE (code only — not yet exercised against a real license) | `FilterThroughputBench`: 5-minute sustained run at a configurable target rate. Measures: output rate, latency percentiles via probe-side `now - msg.getPublishTime()` (broker fanout + probe consumption, not full pipeline — see R5 caveat in implementation notes). Emits `BenchmarkResult` JSON under `perf/target/reports/<bench>-<git-sha>.json`. Tunables: `-Dperf.duration`, `-Dperf.targetRate`, `-Dperf.matchSelector`. |
 | 4 | Scenario — selector scaling | TODO | `SelectorScalingBench`: spin up N active queries (via the orchestrator path) on one filter function. Measure throughput as N grows. Confirms the O(N) selector-eval observation in the README. |
 | 5 | Scenario — heartbeat overhead | TODO | `OrchestratorHeartbeatBench`: simulate K Sessions each sending HEARTBEATs at the default 30s interval. Measure orchestrator queue depth + processing latency on its input topic. Validate the R1 risk note in `tasks/todo-sdk-heartbeat.md`. |
 | 6 | CI integration | TODO | Tag-triggered GitHub Actions workflow that runs `mvn -Pperf verify`. Results uploaded as a workflow artifact. NOT on every PR — wall time is 20-30 min. |
@@ -202,10 +203,68 @@ NOT verified (no license available at landing time):
   itself is validated by `KoPFilterFunctionIT`; the new piece is the
   ShadowTraffic-side Kafka connection over the shared Docker network.
 
-Phase-3 entry points:
+## Phase 3 implementation notes
 
-- New IT next to `PerfSmokeIT` extending `PerfHarnessIT`.
-- New config under `src/test/resources/shadowtraffic/` (e.g.
-  `trades-50k-per-sec.json`).
-- Output JSON written to `perf/target/reports/<benchmark>-<git-sha>.json`
-  per the schema in the "Result schema" section above.
+Landed:
+
+- `perf/pom.xml` — added reactor-ordering NAR deps on
+  `selector-filter-function` + `selector-filter-orchestrator` (so the perf
+  reactor builds the function NARs first), HdrHistogram, and a failsafe
+  `<includes>` for `**/*Bench.java`.
+- `perf/src/test/java/io/streamnative/filter/perf/PerfHarnessIT.java` —
+  added `findFilterNar()`, `findOrchestratorNar()`, `uploadFilterPackage()`,
+  `deployWithLeaderRetry()`, `waitForFunctionRunning()` (lifted from
+  `OrchestratorFunctionIT`).
+- `perf/src/test/java/io/streamnative/filter/perf/BenchmarkResult.java` —
+  JSON-serialisable POJO matching the schema in the "Result schema"
+  section; writes to `perf/target/reports/<bench>-<git-sha>.json`. Best-
+  effort `git rev-parse --short HEAD` for the SHA field.
+- `perf/src/test/java/io/streamnative/filter/perf/FilterThroughputBench.java`
+  — end-to-end bench: KoP broker + orchestrator + spawned filter; SDK
+  REGISTER with selector `region = 'US'` (matches 1/4 of records); starts
+  ShadowTraffic *after* the filter is RUNNING so no records are dropped
+  pre-subscription. Records latency to HdrHistogram (60s range, 3 sig
+  digits), then emits the result JSON.
+- `perf/src/test/resources/shadowtraffic/trades-throughput.json` —
+  generator template with `${bootstrap}` / `${topic}` / `${records}` /
+  `${throttle_ms}` placeholders.
+
+Verified locally:
+
+- `mvn -pl perf -am clean test-compile` builds the function NARs and
+  compiles the perf module (4 test sources).
+- `mvn -pl perf -Pperf verify` without license env vars discovers both
+  `PerfSmokeIT` and `FilterThroughputBench`, skips both via
+  `@EnabledIfEnvironmentVariable`, exits 0.
+
+NOT verified (same caveats as Phase 2; no license available at landing):
+
+- That the orchestrator's full deploy path works in this slightly different
+  testcontainer topology (image is `streamnative/sn-platform:4.2.0.6`
+  rather than `apachepulsar/pulsar:4.0.10`). KoP setup mirrors
+  `KoPFilterFunctionIT`; orchestrator deploy mirrors `OrchestratorFunctionIT`.
+- Actual throughput numbers under load. The plan briefing's 50K msg/s target
+  is offered load; real runs will surface achievable rate.
+- That HdrHistogram's 60s range covers worst-case latencies on a stressed
+  broker. If clipped, range needs bumping.
+
+Known limitations / R5 caveat:
+
+- `achieved_rate` is currently inferred from `output_rate × 4` (one of four
+  uniformly-distributed regions matches the selector). For a real input-rate
+  observation, a future phase should scrape ShadowTraffic's metrics endpoint
+  on port 9400.
+- Latency measurement is `now_ms - msg.getPublishTime()`, where the publish
+  time is when the **filter** forwarded to the output topic. That captures
+  broker fanout + probe consumption, not the full input → filter pipeline.
+  Full end-to-end requires a correlation id embedded in the payload, which
+  was rejected for v1 to keep clocks in one JVM per R5.
+
+Phase 4-5 entry points:
+
+- New `SelectorScalingBench`, `OrchestratorHeartbeatBench` next to
+  `FilterThroughputBench` extending `PerfHarnessIT`.
+- For Phase 4 (selector scaling), use the same harness but issue N
+  `REGISTER` calls via N `Session.newConsumer()` invocations before
+  starting ShadowTraffic. The single spawned filter will evaluate N
+  selectors per record — measure throughput as N grows.
