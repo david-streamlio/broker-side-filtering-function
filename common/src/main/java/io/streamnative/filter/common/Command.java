@@ -15,10 +15,17 @@ package io.streamnative.filter.common;
  *   <li>{@link #UNREGISTER} — emitted by consumer close() or SDK delete-selector. Orchestrator
  *       tombstones the queryId on every per-function control topic the registration was fanned
  *       out to. Idempotent on unknown queryId (silent success).</li>
+ *   <li>{@link #HEARTBEAT} — emitted periodically by an SDK Session for all of its live
+ *       queryIds. The body's {@code queryIds} list is authoritative; the message key is
+ *       arbitrary. Orchestrator stamps {@code lastSeen} on each named QueryEntry; the sweeper
+ *       synthesizes UNREGISTER for any queryId whose {@code lastSeen} is older than
+ *       {@code heartbeat-max-stale-seconds}. Unknown queryIds in the list are silently ignored
+ *       (probably already-tombstoned by a prior UNREGISTER).</li>
  * </ul>
  */
 public enum Command {
     REGISTER,
     MODIFY,
-    UNREGISTER
+    UNREGISTER,
+    HEARTBEAT
 }

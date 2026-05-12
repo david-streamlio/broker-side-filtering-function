@@ -2,15 +2,15 @@
     "$schema": "http://json-schema.org/draft-07/schema#",
     "$id": "https://github.com/david-streamlio/broker-side-filtering-function/blob/main/protocol/filter-request.schema.json",
     "title": "FilterRequest",
-    "description": "SDK→Orchestrator wire format. Published to the orchestrator's input topic; key = queryId (UUIDv4 string). The orchestrator translates each FilterRequest into a per-filter-function QueryMessage (see query-message.schema.json) on the corresponding per-function control topic. Three commands: REGISTER (first-time, from SDK subscribe()), MODIFY (selector replacement, from setSelector/add-update methods), UNREGISTER (retract, from consumer close() or delete-selector). The orchestrator treats UNREGISTER on unknown queryId as idempotent (silent success). REGISTER on existing queryId is idempotent only if all fields match (broker redelivery); mismatched fields are rejected.",
+    "description": "SDK→Orchestrator wire format. Published to the orchestrator's input topic; for REGISTER/MODIFY/UNREGISTER the message key is the queryId (UUIDv4 string). For HEARTBEAT the message key is arbitrary — the body's queryIds list is authoritative. The orchestrator translates each FilterRequest into a per-filter-function QueryMessage (see query-message.schema.json) on the corresponding per-function control topic. Four commands: REGISTER (first-time, from SDK subscribe()), MODIFY (selector replacement, from setSelector/add-update methods), UNREGISTER (retract, from consumer close() or delete-selector), HEARTBEAT (periodic liveness signal from SDK Session, covering all of its live queryIds in a single message). The orchestrator treats UNREGISTER on unknown queryId as idempotent (silent success). REGISTER on existing queryId is idempotent only if all fields match (broker redelivery); mismatched fields are rejected. HEARTBEAT touches the lastSeen timestamp on each named QueryEntry; unknown queryIds are silently ignored.",
     "type": "object",
     "additionalProperties": false,
     "required": ["command"],
     "properties": {
         "command": {
             "type": "string",
-            "enum": ["REGISTER", "MODIFY", "UNREGISTER"],
-            "description": "Lifecycle command. REGISTER spawns or reuses a per-input-topic filter function and registers the query. MODIFY replaces the selector on an existing queryId. UNREGISTER retracts the query and tombstones it on every per-function control topic where it was published."
+            "enum": ["REGISTER", "MODIFY", "UNREGISTER", "HEARTBEAT"],
+            "description": "Lifecycle command. REGISTER spawns or reuses a per-input-topic filter function and registers the query. MODIFY replaces the selector on an existing queryId. UNREGISTER retracts the query and tombstones it on every per-function control topic where it was published. HEARTBEAT refreshes the lastSeen timestamp on each queryId in the body's queryIds list."
         },
         "inputTopics": {
             "type": ["array", "null"],
@@ -48,6 +48,12 @@
             "type": ["string", "null"],
             "enum": ["KAFKA", "PULSAR", null],
             "description": "Indicates the SDK family producing the request. Required on REGISTER. Recorded in the registry entry. v1 has no per-clientType behavior; reserved for future routing decisions (e.g., output-topic placement for Kafka clients needing KoP-mapped namespaces)."
+        },
+        "queryIds": {
+            "type": ["array", "null"],
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1,
+            "description": "Required on HEARTBEAT — the list of queryIds the publishing Session still considers live. The orchestrator stamps lastSeen on each named QueryEntry; unknown queryIds are silently ignored (probably already-tombstoned by a prior UNREGISTER). Null/absent on REGISTER/MODIFY/UNREGISTER."
         }
     },
     "examples": [
@@ -73,6 +79,13 @@
         },
         {
             "command": "UNREGISTER"
+        },
+        {
+            "command": "HEARTBEAT",
+            "queryIds": [
+                "c4f9e7b1-d2a3-4f6e-9b1a-1234567890ab",
+                "0e7b1c4a-9b1a-4f6e-d2a3-7890abcdef12"
+            ]
         }
     ]
 }

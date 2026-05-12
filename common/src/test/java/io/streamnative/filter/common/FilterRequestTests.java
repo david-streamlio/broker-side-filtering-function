@@ -119,7 +119,7 @@ class FilterRequestTests {
     @Test
     void registerWithoutInputsOrPatternThrows() {
         FilterRequest req = new FilterRequest(Command.REGISTER, null, null,
-                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR);
+                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("inputTopics")
@@ -130,7 +130,7 @@ class FilterRequestTests {
     void registerWithBothInputsAndPatternThrows() {
         FilterRequest req = new FilterRequest(Command.REGISTER,
                 List.of("persistent://t/n/a"), "persistent://t/n/.*",
-                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR);
+                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("exactly one");
@@ -139,14 +139,14 @@ class FilterRequestTests {
     @Test
     void registerWithEmptyInputsListThrows() {
         FilterRequest req = new FilterRequest(Command.REGISTER, List.of(), null,
-                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR);
+                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR, null);
         assertThatThrownBy(req::validate).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void registerWithBlankInputTopicThrows() {
         FilterRequest req = new FilterRequest(Command.REGISTER, List.of("   "), null,
-                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR);
+                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("blank");
@@ -210,7 +210,7 @@ class FilterRequestTests {
     @Test
     void modifyWithoutSelectorThrows() {
         FilterRequest req = new FilterRequest(Command.MODIFY, null, null, null,
-                null, null, null, null);
+                null, null, null, null, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("selector");
@@ -238,7 +238,7 @@ class FilterRequestTests {
                 null,
                 "persistent://t/n/out",          // extraneous on MODIFY
                 "x = 1",
-                "K", "V", ClientType.KAFKA);
+                "K", "V", ClientType.KAFKA, null);
         req.validate(); // no throw
     }
 
@@ -253,7 +253,7 @@ class FilterRequestTests {
     void unregisterIgnoresExtraneousFields() {
         FilterRequest req = new FilterRequest(Command.UNREGISTER,
                 List.of("persistent://t/n/x"), null,
-                "persistent://t/n/out", "x = 1", "K", "V", ClientType.PULSAR);
+                "persistent://t/n/out", "x = 1", "K", "V", ClientType.PULSAR, null);
         req.validate(); // no throw — UNREGISTER tolerates everything
     }
 
@@ -261,9 +261,69 @@ class FilterRequestTests {
 
     @Test
     void nullCommandThrows() {
-        FilterRequest req = new FilterRequest(null, null, null, null, null, null, null, null);
+        FilterRequest req = new FilterRequest(null, null, null, null, null, null, null, null, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("command");
+    }
+
+    // ---------------------------------------------------------------- validation (HEARTBEAT)
+
+    @Test
+    void heartbeatHappyPathPasses() {
+        FilterRequest.heartbeat(List.of("uuid-1", "uuid-2")).validate();
+    }
+
+    @Test
+    void heartbeatWithNullQueryIdsThrows() {
+        FilterRequest req = new FilterRequest(Command.HEARTBEAT, null, null, null, null,
+                null, null, null, null);
+        assertThatThrownBy(req::validate)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("queryIds");
+    }
+
+    @Test
+    void heartbeatWithEmptyQueryIdsThrows() {
+        FilterRequest req = FilterRequest.heartbeat(List.of());
+        assertThatThrownBy(req::validate)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("queryIds");
+    }
+
+    @Test
+    void heartbeatWithBlankQueryIdThrows() {
+        FilterRequest req = FilterRequest.heartbeat(List.of("uuid-1", "   "));
+        assertThatThrownBy(req::validate)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("blank");
+    }
+
+    @Test
+    void heartbeatSerdeRoundTrip() throws Exception {
+        com.fasterxml.jackson.databind.ObjectMapper mapper =
+                new com.fasterxml.jackson.databind.ObjectMapper();
+        FilterRequest req = FilterRequest.heartbeat(List.of("a", "b", "c"));
+        byte[] bytes = mapper.writeValueAsBytes(req);
+        FilterRequest parsed = mapper.readValue(bytes, FilterRequest.class);
+        assertThat(parsed.getCommand()).isEqualTo(Command.HEARTBEAT);
+        assertThat(parsed.getQueryIds()).containsExactly("a", "b", "c");
+        assertThat(parsed).isEqualTo(req);
+    }
+
+    @Test
+    void heartbeatSerdeOmitsAbsentFields() throws Exception {
+        com.fasterxml.jackson.databind.ObjectMapper mapper =
+                new com.fasterxml.jackson.databind.ObjectMapper();
+        String json = mapper.writeValueAsString(FilterRequest.heartbeat(List.of("a")));
+        // HEARTBEAT does not carry input/output/selector fields; the @JsonInclude(NON_NULL) on
+        // FilterRequest must drop them.
+        assertThat(json).doesNotContain("inputTopics")
+                        .doesNotContain("topicsPattern")
+                        .doesNotContain("outputTopic")
+                        .doesNotContain("selector")
+                        .doesNotContain("keyDeserializer")
+                        .doesNotContain("valueDeserializer")
+                        .doesNotContain("clientType");
     }
 }

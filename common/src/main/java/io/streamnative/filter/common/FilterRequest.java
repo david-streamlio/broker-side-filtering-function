@@ -32,6 +32,7 @@ public final class FilterRequest {
     private final String keyDeserializer;
     private final String valueDeserializer;
     private final ClientType clientType;
+    private final List<String> queryIds;
 
     @JsonCreator
     public FilterRequest(@JsonProperty("command") Command command,
@@ -41,7 +42,8 @@ public final class FilterRequest {
                          @JsonProperty("selector") String selector,
                          @JsonProperty("keyDeserializer") String keyDeserializer,
                          @JsonProperty("valueDeserializer") String valueDeserializer,
-                         @JsonProperty("clientType") ClientType clientType) {
+                         @JsonProperty("clientType") ClientType clientType,
+                         @JsonProperty("queryIds") List<String> queryIds) {
         this.command           = command;
         this.inputTopics       = inputTopics == null ? null : List.copyOf(inputTopics);
         this.topicsPattern     = topicsPattern;
@@ -50,6 +52,7 @@ public final class FilterRequest {
         this.keyDeserializer   = keyDeserializer;
         this.valueDeserializer = valueDeserializer;
         this.clientType        = clientType;
+        this.queryIds          = queryIds == null ? null : List.copyOf(queryIds);
     }
 
     // ---------- factory helpers (typed per command — simpler call sites in SDK) ----------
@@ -60,7 +63,7 @@ public final class FilterRequest {
                                          ClientType clientType) {
         return new FilterRequest(Command.REGISTER,
                 Collections.singletonList(inputTopic), null,
-                outputTopic, selector, keyDeserializer, valueDeserializer, clientType);
+                outputTopic, selector, keyDeserializer, valueDeserializer, clientType, null);
     }
 
     /** Build a REGISTER request for multiple input topics. */
@@ -69,7 +72,7 @@ public final class FilterRequest {
                                          ClientType clientType) {
         return new FilterRequest(Command.REGISTER,
                 inputTopics, null,
-                outputTopic, selector, keyDeserializer, valueDeserializer, clientType);
+                outputTopic, selector, keyDeserializer, valueDeserializer, clientType, null);
     }
 
     /** Build a REGISTER request matching a regex pattern. */
@@ -78,17 +81,27 @@ public final class FilterRequest {
                                                 ClientType clientType) {
         return new FilterRequest(Command.REGISTER,
                 null, topicsPattern,
-                outputTopic, selector, keyDeserializer, valueDeserializer, clientType);
+                outputTopic, selector, keyDeserializer, valueDeserializer, clientType, null);
     }
 
     /** Build a MODIFY request replacing the selector on an existing queryId. */
     public static FilterRequest modify(String newSelector) {
-        return new FilterRequest(Command.MODIFY, null, null, null, newSelector, null, null, null);
+        return new FilterRequest(Command.MODIFY, null, null, null, newSelector, null, null, null, null);
     }
 
     /** Build an UNREGISTER request retracting an existing queryId. */
     public static FilterRequest unregister() {
-        return new FilterRequest(Command.UNREGISTER, null, null, null, null, null, null, null);
+        return new FilterRequest(Command.UNREGISTER, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Build a HEARTBEAT request for the given queryIds. One Session publishes one HEARTBEAT per
+     * heartbeat tick containing all of its live queryIds, so the orchestrator can refresh their
+     * {@code lastSeen} timestamps in a single message.
+     */
+    public static FilterRequest heartbeat(List<String> queryIds) {
+        return new FilterRequest(Command.HEARTBEAT, null, null, null, null, null, null, null,
+                queryIds);
     }
 
     // ---------- getters ----------
@@ -101,6 +114,7 @@ public final class FilterRequest {
     public String getKeyDeserializer()    { return keyDeserializer; }
     public String getValueDeserializer()  { return valueDeserializer; }
     public ClientType getClientType()     { return clientType; }
+    public List<String> getQueryIds()     { return queryIds; }
 
     // ---------- validation ----------
 
@@ -117,6 +131,7 @@ public final class FilterRequest {
             case REGISTER -> validateRegister();
             case MODIFY   -> validateModify();
             case UNREGISTER -> validateUnregister();
+            case HEARTBEAT -> validateHeartbeat();
         }
     }
 
@@ -156,6 +171,17 @@ public final class FilterRequest {
         // No required fields. Extra fields are tolerated (ignored downstream).
     }
 
+    private void validateHeartbeat() {
+        if (queryIds == null || queryIds.isEmpty()) {
+            throw new IllegalArgumentException("HEARTBEAT requires a non-empty queryIds list");
+        }
+        for (String id : queryIds) {
+            if (id == null || id.isBlank()) {
+                throw new IllegalArgumentException("HEARTBEAT queryIds contains a null/blank entry");
+            }
+        }
+    }
+
     // ---------- equality / debug ----------
 
     @Override
@@ -168,13 +194,14 @@ public final class FilterRequest {
                 && Objects.equals(selector, that.selector)
                 && Objects.equals(keyDeserializer, that.keyDeserializer)
                 && Objects.equals(valueDeserializer, that.valueDeserializer)
-                && clientType == that.clientType;
+                && clientType == that.clientType
+                && Objects.equals(queryIds, that.queryIds);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(command, inputTopics, topicsPattern, outputTopic, selector,
-                keyDeserializer, valueDeserializer, clientType);
+                keyDeserializer, valueDeserializer, clientType, queryIds);
     }
 
     @Override
@@ -187,6 +214,7 @@ public final class FilterRequest {
                 + ", keyDeserializer='" + keyDeserializer + '\''
                 + ", valueDeserializer='" + valueDeserializer + '\''
                 + ", clientType=" + clientType
+                + ", queryIds=" + queryIds
                 + '}';
     }
 }
