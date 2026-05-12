@@ -1,0 +1,32 @@
+# StreamNative Cloud deployment — copy to terraform.tfvars and fill in.
+
+# ----- SN Cloud connection -----
+# Find admin + service URLs in the SN Cloud console under your instance -> cluster details,
+# or via `snctl get clusters -o yaml`.
+streamnative_admin_url    = "https://pulsar-admin-XXXX.streamnative.cloud"
+streamnative_service_url  = "pulsar+ssl://pulsar-broker-XXXX.streamnative.cloud:6651"
+
+# Generate via `snctl auth login` and inspect the printed credentials, or via the SN Cloud
+# console -> service accounts. Set this through TF_VAR_streamnative_admin_token in env to
+# keep it out of state files committed to git.
+# streamnative_admin_token  = "ey..."
+
+# ----- Topology -----
+tenant                = "my-tenant"          # SN Cloud usually pre-creates the tenant
+namespace             = "filters"            # MUST match the broker's kafkaNamespace for cross-format
+create_namespace      = false                # SN Cloud requires manual namespace creation via console
+replication_clusters  = ["use1-prod"]        # Your SN Cloud cluster name
+
+# ----- Function -----
+# Paths relative to this directory (deploy/terraform/sn-cloud/) — or absolute paths.
+orchestrator_nar_path = "../../../functions/orchestrator/target/selector-filter-orchestrator-1.0.0-SNAPSHOT.nar"
+filter_nar_path       = "../../../functions/selector-filter/target/selector-filter-function-1.0.0-SNAPSHOT.nar"
+
+# Bump when you re-publish a new filter NAR build.
+filter_package_version = "1.0.0"
+
+# Optional: turn on idle-filter GC. Default off; recommend leaving off until you've
+# validated the heartbeat detection in your environment.
+# idle_gc_enabled             = true
+# idle_gc_ttl_seconds         = 300
+# heartbeat_max_stale_seconds = 90

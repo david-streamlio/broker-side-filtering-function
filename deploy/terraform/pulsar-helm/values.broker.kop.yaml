@@ -1,0 +1,62 @@
+# KoP (Kafka-on-Pulsar) broker config snippet for the apachepulsar/pulsar Helm chart.
+# Merge with: helm upgrade <release> apachepulsar/pulsar -f values.broker.kop.yaml [other -f files]
+#
+# These settings enable cross-format on the orchestrator's control topic: a Pulsar
+# producer AND a Kafka producer (via KoP) can both publish to the same Pulsar topic,
+# and the orchestrator function consumes from it uniformly via the Pulsar API.
+#
+# Mirrors the broker config in:
+#   sdk/java/kafka/src/test/java/io/streamnative/filter/client/kafka/KafkaConsumerKoPIT.java
+#
+# IMPORTANT: kafkaNamespace MUST match the tenant/namespace the orchestrator's control
+# topic lives in. The Terraform wrapper passes its `tenant` and `namespace` variables —
+# set ${KAFKA_NAMESPACE} below to "${var.tenant}/${var.namespace}" (e.g., "public/filters").
+#
+# The advertised host depends on your cluster topology. For a kind cluster with a
+# NodePort or LoadBalancer, set the externally-reachable host. For in-cluster-only
+# clients, broker headless service DNS is fine.
+
+broker:
+  configData:
+    # ---- KoP protocol handler ----
+    # Enable the Kafka protocol handler alongside the native Pulsar protocol.
+    messagingProtocols: "kafka"
+    # The Pulsar broker image MUST include the KoP NAR under protocols/ — apachepulsar
+    # /pulsar:4.x does NOT bundle it. For a vanilla Apache Pulsar Helm release you need
+    # streamnative/sn-platform images OR sideload the KoP plugin into the broker image.
+    # For SN-platform-style images, no extra action needed.
+
+    # ---- Kafka listeners ----
+    kafkaListeners: "PLAINTEXT://0.0.0.0:9092"
+    # MUST be reachable by external Kafka clients. For dev: localhost; for k8s, the
+    # service hostname / LoadBalancer IP.
+    kafkaAdvertisedListeners: "PLAINTEXT://${KOP_ADVERTISED_HOST}:9092"
+
+    # ---- Namespace alignment ----
+    # MUST match the Pulsar namespace the orchestrator's control topic lives in. If you
+    # configured the Terraform wrapper with tenant=public, namespace=filters, set this
+    # to "public/filters".
+    kafkaNamespace: "${KAFKA_NAMESPACE}"
+
+    # ---- Entry format ----
+    # pulsar_non_batched is the ONLY format where a native Pulsar producer's messages
+    # are readable by Kafka clients on the same topic. We validated this in
+    # KafkaConsumerKoPIT — under any other format, cross-format read fails silently.
+    kafkaEntryFormat: "pulsar_non_batched"
+
+    # Transaction coordinator off — not needed for SDK control-plane messages and adds
+    # broker startup overhead.
+    kafkaTransactionCoordinatorEnabled: "false"
+
+    # ---- Broker entry metadata ----
+    # AppendIndexMetadataInterceptor is required so KoP can produce a stable Kafka
+    # offset for each Pulsar message. Without it, Kafka consumers see broken offsets.
+    brokerEntryMetadataInterceptors: "org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
+
+    # ---- Topic auto-creation ----
+    # Spawned filter functions and SDK private output topics rely on this.
+    allowAutoTopicCreation: "true"
+    allowAutoTopicCreationType: "non-partitioned"
+    # Topics on KoP-mapped namespaces are not eagerly deleted by the inactive-topic
+    # reaper because SDK clients close + reopen frequently.
+    brokerDeleteInactiveTopicsEnabled: "false"
