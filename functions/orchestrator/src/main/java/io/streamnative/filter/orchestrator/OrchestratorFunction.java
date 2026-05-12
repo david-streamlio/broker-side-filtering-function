@@ -17,6 +17,8 @@ import org.apache.pulsar.functions.api.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -58,6 +60,8 @@ public class OrchestratorFunction implements Function<byte[], Void> {
     private ConcurrentMap<String, Producer<byte[]>> controlProducers;
     private Producer<byte[]> stateProducer;
     private TableView<byte[]> stateView;
+    /** Source of {@link Instant}s for GC bookkeeping (idleSince). Overridable for tests. */
+    private Clock clock = Clock.systemUTC();
 
     /** Constructor for Pulsar runtime. */
     public OrchestratorFunction() {}
@@ -66,11 +70,20 @@ public class OrchestratorFunction implements Function<byte[], Void> {
     OrchestratorFunction(OrchestratorConfig config, RegistryStore registry,
                          FilterFunctionSpawner spawner, PulsarClient pulsarClient,
                          ConcurrentMap<String, Producer<byte[]>> controlProducers) {
+        this(config, registry, spawner, pulsarClient, controlProducers, Clock.systemUTC());
+    }
+
+    /** Test seam with a fixed clock — drives the idleSince timestamp on UNREGISTER. */
+    OrchestratorFunction(OrchestratorConfig config, RegistryStore registry,
+                         FilterFunctionSpawner spawner, PulsarClient pulsarClient,
+                         ConcurrentMap<String, Producer<byte[]>> controlProducers,
+                         Clock clock) {
         this.config           = config;
         this.registry         = registry;
         this.spawner          = spawner;
         this.pulsarClient     = pulsarClient;
         this.controlProducers = controlProducers;
+        this.clock            = clock;
     }
 
     @Override
@@ -181,34 +194,41 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         }
 
         // Commit pass: ensure each input topic has a registered filter function. Track the
-        // per-function control topics this queryId is being published to.
+        // per-function control topics this queryId is being published to, in parallel with the
+        // registry keys (used by UNREGISTER to do O(1) lookups into the t: entries for GC
+        // bookkeeping).
         List<String> publishedControlTopics = new ArrayList<>(registryKeys.size());
+        List<String> publishedRegistryKeys  = new ArrayList<>(registryKeys.size());
         for (String key : registryKeys) {
             RegistryEntry existing = registry.getInputTopicEntry(key);
             RegistryEntry entry;
             if (existing == null) {
                 entry = spawner.spawn(key, req, config);
-                registry.putInputTopicEntry(key, entry);
                 ctx.recordMetric("orchestrator.functions.spawned", 1);
                 LOG.info("Spawned filter function for registry key=[{}] name={} controlTopic={}",
                         key, entry.getFilterFunctionName(), entry.getControlTopic());
             } else {
                 ctx.recordMetric("orchestrator.functions.reused", 1);
                 if (existing.check(req).needsUpgrade()) {
-                    RegistryEntry merged = existing.mergedWith(req);
-                    registry.putInputTopicEntry(key, merged);
-                    entry = merged;
+                    entry = existing.mergedWith(req);
                     LOG.info("Upgraded registry entry for key=[{}] with new serializers", key);
                 } else {
                     entry = existing;
                 }
             }
+            // Track this queryId on the entry so idle-GC can decide later when ALL queryIds have
+            // UNREGISTERed. Set semantics: re-REGISTER of the same queryId is a no-op.
+            entry = entry.withQueryId(queryId);
+            registry.putInputTopicEntry(key, entry);
+
             publishQuery(entry.getControlTopic(), queryId, normalizedSelector(req.getSelector()),
                     req.getOutputTopic());
             publishedControlTopics.add(entry.getControlTopic());
+            publishedRegistryKeys.add(key);
         }
 
-        registry.putQueryEntry(queryId, new QueryEntry(req.getOutputTopic(), publishedControlTopics));
+        registry.putQueryEntry(queryId, new QueryEntry(
+                req.getOutputTopic(), publishedControlTopics, publishedRegistryKeys));
         ctx.recordMetric("orchestrator.requests.accepted", 1);
         LOG.info("REGISTER queryId={} outputTopic={} controlTopics={}",
                 queryId, req.getOutputTopic(), publishedControlTopics);
@@ -249,6 +269,26 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             Producer<byte[]> p = controlProducerFor(controlTopic);
             p.newMessage().key(queryId).value(null).send();
         }
+
+        // Decrement activeQueryIds on the corresponding t: entries so idle-GC can decide later.
+        // Legacy QueryEntries (registryKeys == null) skip this — those filters won't be
+        // GC-eligible, but that's strictly better than today's no-GC behavior.
+        if (q.getRegistryKeys() != null) {
+            Instant now = Instant.now(clock);
+            for (String key : q.getRegistryKeys()) {
+                RegistryEntry t = registry.getInputTopicEntry(key);
+                if (t == null) continue;
+                RegistryEntry updated = t.withoutQueryId(queryId, now);
+                if (updated != t) {
+                    registry.putInputTopicEntry(key, updated);
+                }
+            }
+        } else {
+            LOG.debug("UNREGISTER queryId={} has legacy QueryEntry without registryKeys; "
+                    + "activeQueryIds bookkeeping skipped (filter will not be GC-eligible)",
+                    queryId);
+        }
+
         registry.removeQueryEntry(queryId);
         ctx.recordMetric("orchestrator.tombstones.fanout", q.getControlTopics().size());
         ctx.recordMetric("orchestrator.requests.accepted", 1);

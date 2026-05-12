@@ -466,4 +466,207 @@ class OrchestratorFunctionTests {
         verify(spawner, never()).spawn(any(), any(), any());
         assertThat(controlPublishes).isEmpty();
     }
+
+    // ---------------------------------------------------------------- GC bookkeeping (Phase 2)
+
+    private RegistryEntry readRegistryEntry(String registryKey) throws Exception {
+        byte[] raw = tableStorage.get(RegistryStore.TOPIC_KEY_PREFIX + registryKey);
+        return raw == null ? null : MAPPER.readValue(raw, RegistryEntry.class);
+    }
+
+    private QueryEntry readQueryEntry(String queryId) throws Exception {
+        byte[] raw = tableStorage.get(RegistryStore.QUERY_KEY_PREFIX + queryId);
+        return raw == null ? null : MAPPER.readValue(raw, QueryEntry.class);
+    }
+
+    @Test
+    void registerRecordsQueryIdInActiveQueryIdsOnSpawn() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        FilterRequest req = FilterRequest.register(
+                "persistent://public/in/trades",
+                "persistent://public/filtered/filtered-abc",
+                "region = 'US'", null, null, ClientType.PULSAR);
+
+        RegistryEntry spawned = new RegistryEntry(
+                "persistent://public/filtered/ctrl-x", "selector-filter-x",
+                null, null, ClientType.PULSAR, Instant.now().toString());
+        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        stubControlProducer(spawned.getControlTopic());
+
+        orchestrator.process(serialize(req), contextFor(queryId));
+
+        RegistryEntry stored = readRegistryEntry("persistent://public/in/trades");
+        assertThat(stored.getActiveQueryIds()).containsExactly(queryId);
+        assertThat(stored.getIdleSince()).isNull();
+    }
+
+    @Test
+    void registerRecordsParallelRegistryKeysOnQueryEntry() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        FilterRequest req = FilterRequest.register(
+                List.of("persistent://public/in/a", "persistent://public/in/b"),
+                "persistent://public/filtered/filtered-multi",
+                "region = 'US'", null, null, ClientType.PULSAR);
+
+        RegistryEntry entryA = new RegistryEntry(
+                "persistent://public/filtered/ctrl-a", "selector-filter-a",
+                null, null, ClientType.PULSAR, Instant.now().toString());
+        RegistryEntry entryB = new RegistryEntry(
+                "persistent://public/filtered/ctrl-b", "selector-filter-b",
+                null, null, ClientType.PULSAR, Instant.now().toString());
+        when(spawner.spawn("persistent://public/in/a", req, config)).thenReturn(entryA);
+        when(spawner.spawn("persistent://public/in/b", req, config)).thenReturn(entryB);
+        stubControlProducer(entryA.getControlTopic());
+        stubControlProducer(entryB.getControlTopic());
+
+        orchestrator.process(serialize(req), contextFor(queryId));
+
+        QueryEntry q = readQueryEntry(queryId);
+        // Parallel arrays: registryKeys[i] is the t: key whose entry owns controlTopics[i].
+        assertThat(q.getRegistryKeys()).hasSize(2);
+        assertThat(q.getControlTopics()).hasSize(2);
+        for (int i = 0; i < q.getRegistryKeys().size(); i++) {
+            assertThat(q.getControlTopics().get(i))
+                    .startsWith("persistent://public/filtered/ctrl-");
+        }
+    }
+
+    @Test
+    void registerOnReusedEntryAddsQueryIdToActiveSet() throws Exception {
+        // Pre-seed an entry from a previous REGISTER (queryId q-prior already in the set).
+        RegistryEntry existing = new RegistryEntry(
+                "persistent://public/filtered/ctrl-x", "selector-filter-x",
+                null, null, ClientType.PULSAR, "2026-05-10T00:00:00Z")
+                .withQueryId("q-prior");
+        seedRegistryEntry("persistent://public/in/trades", existing);
+        stubControlProducer(existing.getControlTopic());
+
+        String queryId = UUID.randomUUID().toString();
+        FilterRequest req = FilterRequest.register(
+                "persistent://public/in/trades",
+                "persistent://public/filtered/filtered-new",
+                "x = 1", null, null, ClientType.PULSAR);
+        orchestrator.process(serialize(req), contextFor(queryId));
+
+        RegistryEntry stored = readRegistryEntry("persistent://public/in/trades");
+        assertThat(stored.getActiveQueryIds()).containsExactlyInAnyOrder("q-prior", queryId);
+    }
+
+    @Test
+    void unregisterRemovesQueryIdFromActiveSet() throws Exception {
+        // Seed: one t: entry with two queryIds active.
+        String controlTopic = "persistent://public/filtered/ctrl-x";
+        RegistryEntry seeded = new RegistryEntry(
+                controlTopic, "selector-filter-x",
+                null, null, ClientType.PULSAR, "2026-05-10T00:00:00Z")
+                .withQueryId("q-survivor")
+                .withQueryId("q-leaving");
+        seedRegistryEntry("persistent://public/in/trades", seeded);
+
+        // Seed q: entry for q-leaving with the new registryKeys field.
+        seedQueryEntry("q-leaving", new QueryEntry(
+                "persistent://public/filtered/filtered-x",
+                List.of(controlTopic),
+                List.of("persistent://public/in/trades")));
+        stubControlProducer(controlTopic);
+
+        orchestrator.process(serialize(FilterRequest.unregister()), contextFor("q-leaving"));
+
+        RegistryEntry afterUnregister = readRegistryEntry("persistent://public/in/trades");
+        assertThat(afterUnregister.getActiveQueryIds()).containsExactly("q-survivor");
+        assertThat(afterUnregister.getIdleSince()).isNull(); // still active
+    }
+
+    @Test
+    void unregisterEmptiesActiveSetAndStampsIdleSince() throws Exception {
+        java.time.Clock fixed = java.time.Clock.fixed(
+                Instant.parse("2026-05-12T20:00:00Z"), java.time.ZoneOffset.UTC);
+        RegistryStore registry = new RegistryStore(stateView, stateProducer);
+        orchestrator = new OrchestratorFunction(config, registry, spawner, pulsarClient,
+                controlProducers, fixed);
+
+        String controlTopic = "persistent://public/filtered/ctrl-x";
+        RegistryEntry seeded = new RegistryEntry(
+                controlTopic, "selector-filter-x",
+                null, null, ClientType.PULSAR, "2026-05-10T00:00:00Z")
+                .withQueryId("q-1");
+        seedRegistryEntry("persistent://public/in/trades", seeded);
+        seedQueryEntry("q-1", new QueryEntry(
+                "persistent://public/filtered/filtered-x",
+                List.of(controlTopic),
+                List.of("persistent://public/in/trades")));
+        stubControlProducer(controlTopic);
+
+        orchestrator.process(serialize(FilterRequest.unregister()), contextFor("q-1"));
+
+        RegistryEntry after = readRegistryEntry("persistent://public/in/trades");
+        assertThat(after.getActiveQueryIds()).isEmpty();
+        assertThat(after.getIdleSince()).isEqualTo("2026-05-12T20:00:00Z");
+    }
+
+    @Test
+    void unregisterOnLegacyQueryEntrySkipsBookkeeping() throws Exception {
+        // Seed a t: entry that DOES have GC bookkeeping (activeQueryIds = {q-1}).
+        String controlTopic = "persistent://public/filtered/ctrl-x";
+        RegistryEntry seeded = new RegistryEntry(
+                controlTopic, "selector-filter-x",
+                null, null, ClientType.PULSAR, "2026-05-10T00:00:00Z")
+                .withQueryId("q-1");
+        seedRegistryEntry("persistent://public/in/trades", seeded);
+
+        // Seed a LEGACY q: entry (no registryKeys field) — v1-era state.
+        seedQueryEntry("q-1", new QueryEntry(
+                "persistent://public/filtered/filtered-x",
+                List.of(controlTopic)));  // legacy 2-arg constructor
+        stubControlProducer(controlTopic);
+
+        orchestrator.process(serialize(FilterRequest.unregister()), contextFor("q-1"));
+
+        // Tombstone WAS published (existing behavior unchanged).
+        List<KV> pubs = controlPublishes.get(controlTopic);
+        assertThat(pubs).hasSize(1);
+        assertThat(pubs.get(0).value()).isNull();
+
+        // But t: entry's activeQueryIds is UNCHANGED — bookkeeping was skipped.
+        // (This filter just won't be GC-eligible until churned.)
+        RegistryEntry after = readRegistryEntry("persistent://public/in/trades");
+        assertThat(after.getActiveQueryIds()).containsExactly("q-1");
+    }
+
+    @Test
+    void multiInputUnregisterDecrementsEachRegistryEntry() throws Exception {
+        java.time.Clock fixed = java.time.Clock.fixed(
+                Instant.parse("2026-05-12T21:30:00Z"), java.time.ZoneOffset.UTC);
+        RegistryStore registry = new RegistryStore(stateView, stateProducer);
+        orchestrator = new OrchestratorFunction(config, registry, spawner, pulsarClient,
+                controlProducers, fixed);
+
+        String ctrlA = "persistent://public/filtered/ctrl-a";
+        String ctrlB = "persistent://public/filtered/ctrl-b";
+
+        RegistryEntry entryA = new RegistryEntry(ctrlA, "selector-filter-a",
+                null, null, ClientType.PULSAR, "2026-05-10T00:00:00Z")
+                .withQueryId("q-1");
+        RegistryEntry entryB = new RegistryEntry(ctrlB, "selector-filter-b",
+                null, null, ClientType.PULSAR, "2026-05-10T00:00:00Z")
+                .withQueryId("q-1");
+        seedRegistryEntry("persistent://public/in/a", entryA);
+        seedRegistryEntry("persistent://public/in/b", entryB);
+        seedQueryEntry("q-1", new QueryEntry(
+                "persistent://public/filtered/filtered-multi",
+                List.of(ctrlA, ctrlB),
+                List.of("persistent://public/in/a", "persistent://public/in/b")));
+        stubControlProducer(ctrlA);
+        stubControlProducer(ctrlB);
+
+        orchestrator.process(serialize(FilterRequest.unregister()), contextFor("q-1"));
+
+        // Both entries lost the queryId and became idle at the same instant.
+        RegistryEntry afterA = readRegistryEntry("persistent://public/in/a");
+        RegistryEntry afterB = readRegistryEntry("persistent://public/in/b");
+        assertThat(afterA.getActiveQueryIds()).isEmpty();
+        assertThat(afterA.getIdleSince()).isEqualTo("2026-05-12T21:30:00Z");
+        assertThat(afterB.getActiveQueryIds()).isEmpty();
+        assertThat(afterB.getIdleSince()).isEqualTo("2026-05-12T21:30:00Z");
+    }
 }
