@@ -233,6 +233,21 @@ on demand. Operators deploy the orchestrator once; SDKs do the rest. The legacy 
 mode (deploy the filter NAR yourself, point a pre-existing SDK at its control topic) still works
 but is no longer how new clusters should be set up.
 
+### Infrastructure-as-Code
+
+The recommended path is the Terraform wrappers under [`deploy/`](deploy/). Two targets ship:
+
+- **StreamNative Cloud** — managed; bring your own Kafka-enabled instance. See
+  [`deploy/terraform/sn-cloud/README.md`](deploy/terraform/sn-cloud/README.md).
+- **Pulsar Helm chart on Kubernetes** — self-hosted; includes a KoP broker-values snippet for
+  cross-format. See [`deploy/terraform/pulsar-helm/README.md`](deploy/terraform/pulsar-helm/README.md).
+
+Both compose the same shared modules in [`deploy/terraform/modules/`](deploy/terraform/modules/) —
+operators with bespoke deployment pipelines can use the modules directly.
+
+The manual `pulsar-admin` steps below remain accurate for ad-hoc setups, debugging, and operators
+who do not use Terraform.
+
 ### Orchestrator-managed deployment (recommended)
 
 1. **Pre-create the SDK input + orchestrator state topics:**

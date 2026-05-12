@@ -1,0 +1,28 @@
+# Self-hosted Pulsar Helm deployment — copy to terraform.tfvars and fill in.
+# Run AFTER you have a Pulsar Helm release reachable from this host.
+
+# ----- Pulsar connection -----
+# For k8s in-cluster: http://<release>-broker.<release-namespace>.svc.cluster.local:8080
+# For port-forwarded: http://localhost:8080
+pulsar_admin_url   = "http://localhost:8080"
+
+# Empty when your Helm release runs with auth disabled (typical for dev).
+# pulsar_admin_token = "eyJ..."
+
+# Helm chart's cluster name. Default 'pulsar' matches apachepulsar/pulsar-helm-chart.
+cluster_name = "pulsar"
+
+# ----- Topology -----
+tenant           = "public"
+namespace        = "filters"          # MUST match kafkaNamespace in values.broker.kop.yaml
+create_namespace = true
+
+# ----- Function -----
+orchestrator_nar_path = "../../../functions/orchestrator/target/selector-filter-orchestrator-1.0.0-SNAPSHOT.nar"
+filter_nar_path       = "../../../functions/selector-filter/target/selector-filter-function-1.0.0-SNAPSHOT.nar"
+filter_package_version = "1.0.0"
+
+# Optional GC knobs.
+# idle_gc_enabled             = true
+# idle_gc_ttl_seconds         = 300
+# heartbeat_max_stale_seconds = 90
