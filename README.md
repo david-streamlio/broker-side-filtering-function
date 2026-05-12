@@ -293,6 +293,7 @@ for a fully-annotated sample. Key `userConfig` knobs:
 | `idle-gc-enabled`          | no | Master switch for idle-filter GC. When `true`, the orchestrator runs a background sweeper that deletes filter functions whose queryIds have all UNREGISTERed for at least `idle-gc-ttl-seconds`. Default `false` (opt-in). See [Idle filter GC](#idle-filter-gc) below. |
 | `idle-gc-ttl-seconds`      | no | Continuous-idle time before a filter function becomes deletion-eligible. Default 300 (5 minutes). Only applies when `idle-gc-enabled=true`. |
 | `idle-gc-sweep-interval-seconds` | no | How often the sweeper evaluates registry entries. Default 30 seconds. Only applies when `idle-gc-enabled=true`. |
+| `heartbeat-max-stale-seconds` | no | Maximum allowed gap between SDK heartbeats before the orchestrator synthesizes an UNREGISTER for a queryId. Default 90 (three missed heartbeats at the SDK default 30-second interval). Only applies when `idle-gc-enabled=true`. See [Dead-consumer detection](#dead-consumer-detection) below. |
 
 ### Deployment prerequisites
 
@@ -688,14 +689,49 @@ on — it also needs `delete` permission on the per-function control topics unde
 `WARN deleteFunction ... failed: Forbidden` in the orchestrator logs and the `t:` entry will
 survive across sweep ticks.
 
-**Limits of v1 GC.** The sweeper only detects "all queryIds explicitly UNREGISTERed." It does
-**not** detect SDK consumers that died without calling `close()` — those queryIds remain in
-`activeQueryIds` indefinitely and pin the filter alive. Closing this gap requires a heartbeat
-mechanism on the SDK→orchestrator channel; that is planned for a future release.
-
 **Tuning.** Default `ttl=300s, sweep=30s` is conservative — a consumer that disconnects and
 reconnects within 5 minutes does not lose its filter function. Tighter settings (e.g. `ttl=60s,
 sweep=10s`) reclaim resources faster at the cost of churn on transient disconnects.
+
+### Dead-consumer detection
+
+Idle GC by itself only reclaims filter functions whose queryIds were *cleanly* UNREGISTERed
+(consumer called `close()`). Consumers that crashed, were killed, or otherwise terminated without
+clean shutdown leave their queryIds in `activeQueryIds` forever, pinning the filter alive.
+
+The SDK closes this gap with periodic **HEARTBEAT** messages. Each `Session` runs a daemon
+scheduler that publishes one `HEARTBEAT` message every `heartbeatIntervalSeconds` (default 30s),
+listing every queryId that Session currently owns. The orchestrator stamps `lastSeen` on each
+named QueryEntry; the sweeper synthesizes an UNREGISTER for any queryId whose `lastSeen` is
+older than `heartbeat-max-stale-seconds` (default 90s, three missed heartbeats at the SDK
+default).
+
+**Total time from consumer death to filter deletion** is
+`heartbeat-max-stale-seconds + idle-gc-ttl-seconds + sweep slack`. Defaults give roughly
+6.5 minutes; tighter settings (`max-stale=15s`, `ttl=5s`, `sweep=2s`) reclaim in under 30s — at
+the cost of declaring dead any consumer that experiences ≥3 consecutive publish failures within
+the staleness window.
+
+**SDK configuration.** Heartbeats are on by default. To opt out, build the Session with
+`.disableHeartbeat()`:
+
+```java
+Session session = Session.builder()
+    .pulsarClient(client)
+    .controlTopic("persistent://public/filters/filter-requests")
+    .heartbeatIntervalSeconds(30)   // default; or .disableHeartbeat() to turn off
+    .build();
+```
+
+The heartbeat scheduler is a single daemon thread per Session, named
+`selector-filter-heartbeat-<sessionId>`. It costs roughly one Pulsar message every
+`heartbeatIntervalSeconds` regardless of how many consumers the Session owns.
+
+**Limits.** Heartbeats are not a liveness assertion that the consumer is *processing messages* —
+only that its process is running and the Pulsar producer is healthy. A consumer that is
+heartbeating but stuck in a deadlocked message handler will NOT trigger dead-consumer detection.
+Application-level heartbeats (e.g., a separate health endpoint, or a custom probe consumer on the
+filtered output topic) cover that gap.
 
 ## Project layout
 

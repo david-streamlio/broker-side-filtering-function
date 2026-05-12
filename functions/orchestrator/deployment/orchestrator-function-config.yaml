@@ -62,6 +62,21 @@ userConfig:
   # idle-gc-enabled: false                       # default: false (opt-in)
   # idle-gc-ttl-seconds: 300                     # default: 300 (5 minutes)
   # idle-gc-sweep-interval-seconds: 30           # default: 30
+
+  # ----------------------------------------------------------------------------
+  # Dead-consumer detection via SDK heartbeats
+  # ----------------------------------------------------------------------------
+  # When idle-gc is enabled, the orchestrator also uses heartbeat staleness to declare
+  # queryIds dead and synthesize UNREGISTERs for them. The SDK Session publishes one
+  # HEARTBEAT message every Session.builder().heartbeatIntervalSeconds() (default 30s)
+  # listing all of its live queryIds. A queryId whose lastSeen is older than
+  # heartbeat-max-stale-seconds gets a synthesized UNREGISTER, which empties activeQueryIds
+  # on the corresponding t: entry and lets the idle-gc pass reclaim the filter.
+  #
+  # Total time from consumer death to filter deletion = max-stale + idle-gc-ttl + sweep slack.
+  # Default (90 + 300 + ~10) ~= 6.5 minutes.
+  #
+  # heartbeat-max-stale-seconds: 90              # default: 90 (3 missed @ SDK default 30s)
 resources:
   cpu: 1.0
   ram: 1073741824   # 1GB
