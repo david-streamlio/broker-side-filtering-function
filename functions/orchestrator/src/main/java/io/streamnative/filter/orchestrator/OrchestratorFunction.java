@@ -64,6 +64,19 @@ public class OrchestratorFunction implements Function<byte[], Void> {
     private Clock clock = Clock.systemUTC();
     /** Background sweeper. {@code null} when {@code idle-gc-enabled = false}. */
     private IdleFilterSweeper idleFilterSweeper;
+    /**
+     * Most recent per-invocation {@link Context} seen by {@link #process(byte[], Context)}. Read
+     * from the sweeper scheduler thread to call {@code recordMetric}. {@code volatile} for the
+     * cross-thread publish — sweeper thread reads what process() last wrote. Null until the first
+     * process() invocation; sweeper metric callbacks are no-ops during that window (no traffic,
+     * nothing useful to record anyway).
+     *
+     * <p>Per the Phase 2 design note: Pulsar's {@code Context} is per-invocation in spec but in
+     * practice associated with the function instance; recording against it off-thread is expected
+     * to work. Phase 4 IT confirms this on a live broker; if it does not, the documented fallback
+     * is to accumulate counters in volatile fields and flush them from the next process() call.
+     */
+    private volatile Context lastCtx;
 
     /** Constructor for Pulsar runtime. */
     public OrchestratorFunction() {}
@@ -116,7 +129,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
 
         if (config.idleGcEnabled()) {
             this.idleFilterSweeper = new IdleFilterSweeper(registry, ownedAdmin, config, clock,
-                    this::evictControlProducer, this::performUnregister);
+                    this::evictControlProducer, this::performUnregister, this::recordSweeperMetric);
             this.idleFilterSweeper.start();
         }
 
@@ -134,6 +147,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
 
     @Override
     public Void process(byte[] payload, Context ctx) throws Exception {
+        this.lastCtx = ctx;
         ctx.recordMetric("orchestrator.requests.received", 1);
 
         if (payload == null || payload.length == 0) {
@@ -403,6 +417,26 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             try { p.close(); } catch (Exception e) {
                 LOG.warn("Close control producer for {} during GC: {}", controlTopic, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Sweeper-side metric callback. The sweeper invokes this from its scheduler thread; we route
+     * through the most recently seen process()-time {@link Context}. Before the first process()
+     * call (cold start, no traffic yet), {@code lastCtx} is null and the call is dropped — there
+     * is nothing to record against and no traffic for an operator to be looking at anyway.
+     *
+     * <p>Package-private so unit tests can exercise the callback's contract directly without
+     * spinning a full {@link IdleFilterSweeper} tick.
+     */
+    void recordSweeperMetric(String name, Double value) {
+        Context c = this.lastCtx;
+        if (c == null) return;
+        try {
+            c.recordMetric(name, value);
+        } catch (Exception e) {
+            // Never propagate from a metric callback — losing a counter must not poison a sweep.
+            LOG.debug("recordMetric({}, {}) from sweeper thread threw: {}", name, value, e.getMessage());
         }
     }
 
