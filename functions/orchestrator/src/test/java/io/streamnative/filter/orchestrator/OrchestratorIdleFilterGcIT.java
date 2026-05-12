@@ -407,21 +407,25 @@ class OrchestratorIdleFilterGcIT {
     }
 
     /**
-     * Sum a userMetric across all instances of the orchestrator function. Pulsar's function-worker
-     * stats endpoint exposes everything recorded via {@code ctx.recordMetric(...)} under
-     * {@link FunctionInstanceStats#getMetrics()}{@code .getUserMetrics()}, keyed by the exact
-     * string passed to {@code recordMetric} (dots preserved). Returns 0.0 if the metric was never
-     * recorded on any instance, or if the stats fetch fails (typically just before the function
-     * worker has had time to flush instance stats — the caller is expected to poll).
+     * Sum the running counter for a userMetric across all instances of the orchestrator function.
+     *
+     * <p>Pulsar's function-worker renders every {@code ctx.recordMetric(name, value)} call as a
+     * summary statistic — the {@code userMetrics} map exposes keys like
+     * {@code user_metric_<name>_sum}, {@code _count}, {@code _0.5}, {@code _0.9}, {@code _0.99},
+     * {@code _0.999}. The {@code _sum} variant is the sum of all values recorded, which is the
+     * counter semantics we want. Returns 0.0 if the metric was never recorded or if the stats
+     * fetch fails (typically just before the function worker has flushed instance stats — the
+     * caller is expected to poll).
      */
     private double getOrchestratorUserMetric(String name) {
+        String pulsarKey = "user_metric_" + name + "_sum";
         try {
             FunctionStats stats = admin.functions().getFunctionStats(FN_TENANT, FN_NAMESPACE, ORCH_NAME);
             double total = 0.0;
             for (FunctionInstanceStats inst : stats.getInstances()) {
                 Map<String, Double> userMetrics = inst.getMetrics().getUserMetrics();
                 if (userMetrics != null) {
-                    Double v = userMetrics.get(name);
+                    Double v = userMetrics.get(pulsarKey);
                     if (v != null) total += v;
                 }
             }
@@ -456,9 +460,27 @@ class OrchestratorIdleFilterGcIT {
             }
             Thread.sleep(500);
         }
+        // Dump every userMetric we can see, plus the function-instance counters that prove
+        // process() ran at all. If even the process-thread metrics are absent here, the
+        // function-worker's metricsCollectionInterval hasnt fired yet and the test needs a
+        // longer timeout. If those are present but ours are not, the recordMetric path is broken.
+        StringBuilder dump = new StringBuilder("userMetrics seen:\n");
+        try {
+            FunctionStats stats = admin.functions().getFunctionStats(FN_TENANT, FN_NAMESPACE, ORCH_NAME);
+            dump.append("  receivedTotal=").append(stats.getReceivedTotal())
+                .append(" processedSuccessfullyTotal=").append(stats.getProcessedSuccessfullyTotal())
+                .append('\n');
+            for (FunctionInstanceStats inst : stats.getInstances()) {
+                Map<String, Double> userMetrics = inst.getMetrics().getUserMetrics();
+                dump.append("  instance ").append(inst.getInstanceId()).append(" userMetrics=")
+                    .append(userMetrics).append('\n');
+            }
+        } catch (Exception e) {
+            dump.append("  failed to fetch diagnostics: ").append(e.getMessage());
+        }
         throw new AssertionError(String.format(
-                "metric %s did not grow by at least %s within %d ms; baseline=%s last=%s",
-                name, minDelta, timeoutMs, baseline, last));
+                "metric %s did not grow by at least %s within %d ms; baseline=%s last=%s\n%s",
+                name, minDelta, timeoutMs, baseline, last, dump));
     }
 
     /**
