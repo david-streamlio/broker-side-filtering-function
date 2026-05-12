@@ -1,24 +1,94 @@
 # Selector Filter Function for Apache Pulsar
 
-A generic [Pulsar Function](https://pulsar.apache.org/docs/functions-overview/) that consumes raw
-`byte[]` messages from one or more topics, evaluates a set of JMS selector expressions against each
-message's **key**, **source topic**, and **user properties**, and routes matches to per-query output
-topics.
+Broker-side message filtering for Apache Pulsar. SDK clients ask for "filtered output of topic X
+where this JMS selector matches" and get back a real Pulsar/Kafka consumer subscribed to a private
+output topic carrying only matching records. A pair of Pulsar functions makes this work without
+clients knowing anything about the wiring:
 
-It is a generalization of single-purpose filter functions that hardcode the filter shape. Queries
-are added, updated, and retracted at runtime via a dedicated **control topic** — no redeploy is
-required to change which messages get routed where.
+- **`selector-filter`** — a generic [Pulsar Function](https://pulsar.apache.org/docs/functions-overview/)
+  that consumes raw `byte[]` messages, evaluates JMS-selector expressions against each message's
+  **key**, **source topic**, and **user properties**, and routes matches to per-query output
+  topics.
+- **`orchestrator`** — a Pulsar function that listens on the SDK-facing control topic, maintains a
+  per-input-topic registry of running filter-function instances, spawns new filter functions on
+  demand, and routes per-query control messages to the appropriate filter instance. Detects schema
+  mismatches across registrations on the same input topic and rejects them.
 
-## How it works
+The pair gives operators **one deployable orchestrator** that auto-provisions per-input-topic
+filter functions as SDK clients subscribe — no manual function-per-topic deployment.
 
-1. The function subscribes to one or more **input topics** (explicit list or `topicsPattern`).
-2. It builds a `TableView<byte[]>` over a single **control topic**. Each compacted record on the
-   control topic is a JSON `QueryMessage` keyed by query id.
+> **Pre-1.0 — clean break.** The orchestrator is required in this version. The previous
+> SDK-publishes-directly-to-filter-function flow has been removed: SDK clients now publish
+> `FilterRequest` records to the orchestrator's input topic, and the orchestrator is the only
+> thing that publishes `QueryMessage` records to filter functions. The legacy direct-deploy
+> YAMLs under `functions/selector-filter/deployment/` are kept for reference but are not how
+> SDK-driven workloads are deployed.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                                  SDK clients                                    │
+│         (Pulsar SDK / Kafka SDK over KoP / Python / C++ — future)               │
+│                                                                                 │
+│      session.newConsumer().topic(...).selector(...).subscribe()                 │
+└──────────────────────────────────────┬──────────────────────────────────────────┘
+                                       │  FilterRequest{command:REGISTER|MODIFY|UNREGISTER, ...}
+                                       │  key = queryId
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│        SDK → Orchestrator topic   (e.g. persistent://public/filters/             │
+│                                          filter-requests)                       │
+└──────────────────────────────────────┬──────────────────────────────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  Orchestrator function (this repo's functions/orchestrator)                     │
+│   - Looks up input topic in the per-input-topic registry (TableView-backed)     │
+│   - Spawns a new selector-filter function instance for unknown input topics     │
+│   - Rejects schema mismatches on existing input topics                          │
+│   - Publishes per-query QueryMessage to the matching filter's control topic     │
+└─────────┬───────────────────────────────────────────────────────────────────────┘
+          │  spawn via admin.functions().createFunctionWithUrl()
+          │  QueryMessage{name, selector, outputTopic} → per-function control topic
+          ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  selector-filter function instance(s)  — one per input topic                    │
+│   - Reads its control topic via TableView; one entry per active query           │
+│   - For each input record, evaluates every active query's selector              │
+│   - Forwards matches to that query's outputTopic (the SDK's private topic)      │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## How it works (selector-filter, per-instance)
+
+1. Each spawned `selector-filter` instance subscribes to one **input topic** (or one
+   `topicsPattern`).
+2. It builds a `TableView<byte[]>` over its **per-instance control topic**. Each compacted
+   record on the control topic is a JSON `QueryMessage` keyed by query id.
 3. For every input message, the function evaluates **every active query's selector** against the
    message. Each match results in an asynchronous send to that query's `outputTopic`. The payload
    bytes are forwarded verbatim, along with all user properties and the original key.
 4. The function uses `processingGuarantees: MANUAL`. The source record is acked only after every
    fan-out send succeeds; a single send failure causes `record.fail()` and the broker redelivers.
+
+## How it works (orchestrator)
+
+1. Orchestrator subscribes to its single **SDK-facing input topic** (the one
+   `Session.controlTopic(...)` points at).
+2. Maintains a `TableView<byte[]>` on a **state topic** with two keyspaces:
+   - `t:<inputTopicFqnOrPattern>` → `RegistryEntry` recording the per-instance control topic
+     and serializer FQNs (for schema-mismatch detection).
+   - `q:<queryId>` → `QueryEntry` recording the SDK's outputTopic and the list of per-function
+     control topics this queryId was fanned out to.
+3. On `FilterRequest{command:REGISTER, ...}`: looks up `t:<inputTopic>`. If absent, spawns a new
+   `selector-filter` function via `admin.functions().createFunctionWithUrl(...)` referencing a
+   pre-uploaded Pulsar package (operator-configured `function-package-url`). If present + serializer
+   match, reuses. If present + serializer mismatch, rejects.
+4. On `MODIFY`: republishes the QueryMessage on the same queryId across every per-function control
+   topic the original REGISTER fanned out to — filter functions hot-reload via TableView.
+5. On `UNREGISTER`: publishes tombstones (null body) on every per-function control topic the
+   queryId was registered on. Idempotent on unknown queryIds.
 
 ## Selector language
 
@@ -158,45 +228,86 @@ producer.newMessage().key("us-large-cap-trades").value(null).send();
 
 ## Deployment
 
-Two sample configurations are provided in `deployment/`.
+Production deployment uses the **orchestrator** to auto-spawn per-input-topic filter functions
+on demand. Operators deploy the orchestrator once; SDKs do the rest. The legacy direct-deploy
+mode (deploy the filter NAR yourself, point a pre-existing SDK at its control topic) still works
+but is no longer how new clusters should be set up.
 
-### Explicit input topics
+### Orchestrator-managed deployment (recommended)
 
-```bash
-pulsar-admin functions create \
-  --function-config-file deployment/selector-filter-function-config.yaml \
-  --jar target/selector-filter-function-1.0.0-SNAPSHOT.nar
-```
+1. **Pre-create the SDK input + orchestrator state topics:**
 
-### Pattern-based input topic discovery
+   ```bash
+   pulsar-admin topics create persistent://public/filters/filter-requests
+   pulsar-admin topics create persistent://public/filters/orchestrator-state
+   pulsar-admin topicPolicies set-retention persistent://public/filters/filter-requests --size -1 --time -1
+   ```
 
-```bash
-pulsar-admin functions create \
-  --function-config-file deployment/selector-filter-function-config-pattern.yaml \
-  --jar target/selector-filter-function-1.0.0-SNAPSHOT.nar
-```
+2. **Upload the selector-filter NAR as a Pulsar package** — the orchestrator will reference
+   this package URL when spawning filter functions:
 
-### Configuration reference
+   ```bash
+   pulsar-admin packages upload \
+     function://public/filters/selector-filter@1.0 \
+     --path functions/selector-filter/target/selector-filter-function-1.0.0-SNAPSHOT.nar \
+     --description "selector-filter NAR"
+   ```
 
-| Setting | Purpose |
-|---|---|
-| `inputs` *or* `topicsPattern` | What topics to filter. Standard Pulsar Function config. |
-| `userConfig.control-topic` | **Required.** Topic that carries the active query set. |
-| `processingGuarantees: MANUAL` | The function explicitly acks/fails each record. |
-| `retainKeyOrdering: true` | Preserve per-key ordering across the function boundary. |
-| `forwardSourceMessageProperty: true` | User properties are propagated to outputs. |
-| `cleanupSubscription: true` | Function's subscription is deleted on function-delete. |
+3. **Deploy the orchestrator function:**
 
-### Control-topic setup
+   ```bash
+   pulsar-admin functions create \
+     --function-config-file functions/orchestrator/deployment/orchestrator-function-config.yaml \
+     --jar functions/orchestrator/target/selector-filter-orchestrator-1.0.0-SNAPSHOT.nar
+   ```
 
-The control topic should be **non-partitioned and compacted** so the `TableView` stays small and
-the function does not replay full history on restart.
+4. **Configure the SDK** to publish to the orchestrator's input topic:
 
-```bash
-pulsar-admin topics create persistent://public/control/queries
-pulsar-admin topics set-compaction-threshold persistent://public/control/queries -t 10K
-pulsar-admin topicPolicies set-retention persistent://public/control/queries --size -1 --time -1
-```
+   ```java
+   Session session = Session.builder()
+       .controlTopic("persistent://public/filters/filter-requests")
+       ...
+   ```
+
+The orchestrator handles the rest — it spawns one `selector-filter` function instance per unique
+input topic that any SDK client subscribes to. Filter functions stay running across SDK
+disconnects; idle reclamation is a v2 follow-up.
+
+### Orchestrator configuration reference
+
+See [`functions/orchestrator/deployment/orchestrator-function-config.yaml`](functions/orchestrator/deployment/orchestrator-function-config.yaml)
+for a fully-annotated sample. Key `userConfig` knobs:
+
+| Key | Required | Purpose |
+|---|---|---|
+| `state-topic`            | **yes** | Compacted topic backing the orchestrator's per-input-topic + per-queryId registry. |
+| `function-package-url`   | **yes** | Pulsar package URL of the pre-uploaded selector-filter NAR (`function://tenant/ns/name@version`). |
+| `function-tenant`        | **yes** | Tenant under which spawned filter functions are deployed. |
+| `function-namespace`     | **yes** | Namespace for spawned filter functions. |
+| `pulsar-admin-url`       | **yes** | Pulsar HTTP admin URL the orchestrator uses to spawn functions (`http://broker:8080`). Required because `ctx.getPulsarAdmin()` isn't available in lightweight worker configs. |
+| `function-control-topic-tenant`    | no | Tenant for per-filter-function control topics (defaults to `function-tenant`). |
+| `function-control-topic-namespace` | no | Namespace for per-filter-function control topics (defaults to `function-namespace`). |
+| `function-parallelism`     | no | Parallelism applied to each spawned filter function. Default 1. |
+| `apply-compaction`         | no | Whether the orchestrator programmatically sets `compactionThreshold` on each per-function control topic. Default `true`. |
+| `compaction-threshold-bytes` | no | Compaction threshold to apply when `apply-compaction=true`. Default 10 MB. |
+
+### Deployment prerequisites
+
+- **Orchestrator parallelism MUST be 1** in v1. Multiple instances race on spawn decisions for
+  the same input topic. v2 will support sharding via leader election or KeyShared partitioning.
+- **The orchestrator's runtime identity needs functions admin** on the configured
+  `function-tenant`/`function-namespace` so it can call `admin.functions().createFunctionWithUrl(...)`.
+  In production with auth enabled, attach a service-account role with at least `functions` admin.
+- **Function worker configuration**: the orchestrator constructs its own `PulsarAdmin` from
+  `pulsar-admin-url` and does not depend on `ctx.getPulsarAdmin()`. No special worker config needed.
+
+### Legacy direct-deploy mode
+
+Operators who prefer to deploy filter functions manually (one per input topic, no orchestrator)
+can still do so — the filter function is unchanged. See
+[`functions/selector-filter/deployment/`](functions/selector-filter/deployment/) for the legacy
+config samples. The SDK in this version requires the orchestrator, however; using direct-deploy
+mode means writing your own `QueryMessage` producer instead of using `Session`.
 
 ## Building
 
@@ -534,10 +645,14 @@ with different control topics.
 ```
 pom.xml                                       -- Java reactor parent (lists leaf modules)
 protocol/                                     -- cross-language wire contracts
-  query-message.schema.json                   -- JSON Schema for the control-topic record
-common/                                       -- Java shared types (used by function + JVM SDKs)
+  query-message.schema.json                   -- JSON Schema for orchestrator → filter wire
+  filter-request.schema.json                  -- JSON Schema for SDK → orchestrator wire
+common/                                       -- Java shared types (used by functions + JVM SDKs)
   src/main/java/io/streamnative/filter/common/
-    QueryMessage.java                         -- Java impl of protocol/query-message.schema.json
+    QueryMessage.java                         -- internal orchestrator → filter QueryMessage
+    FilterRequest.java                        -- SDK → orchestrator FilterRequest
+    Command.java                              -- REGISTER | MODIFY | UNREGISTER
+    ClientType.java                           -- KAFKA | PULSAR
 functions/                                    -- Pulsar function deployment artifacts (NARs)
   selector-filter/                            -- the broker-side filter function NAR
     pom.xml
@@ -549,7 +664,19 @@ functions/                                    -- Pulsar function deployment arti
       TopicNames.java
     src/main/resources/META-INF/services/pulsar-io.yaml
     src/main/docker/Dockerfile
-    deployment/
+    deployment/                               -- legacy direct-deploy YAMLs
+  orchestrator/                               -- per-input-topic spawner + control-plane router
+    pom.xml
+    src/main/java/io/streamnative/filter/orchestrator/
+      OrchestratorFunction.java               -- the function (REGISTER/MODIFY/UNREGISTER routing)
+      OrchestratorConfig.java                 -- userConfig parser (state-topic, package-url, ...)
+      RegistryEntry.java                      -- per-input-topic state + compatibility matrix
+      QueryEntry.java                         -- per-queryId fan-out index
+      RegistryStore.java                      -- TableView facade (t:/q: keyspaces)
+      FilterFunctionSpawner.java              -- spawn strategy interface
+      DefaultFilterFunctionSpawner.java       -- admin.functions().createFunctionWithUrl()
+      TopicKeySanitizer.java                  -- stable function-name + control-topic generation
+    deployment/orchestrator-function-config.yaml
 sdk/                                          -- client SDKs across all languages
   java/
     pulsar/                                   -- Pulsar-native SDK (JAR)

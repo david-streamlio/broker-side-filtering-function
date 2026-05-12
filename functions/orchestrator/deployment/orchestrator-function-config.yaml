@@ -1,0 +1,51 @@
+tenant: public
+namespace: filters
+name: selector-filter-orchestrator
+className: io.streamnative.filter.orchestrator.OrchestratorFunction
+inputs:
+  # The topic SDK clients publish their FilterRequests to. Configure your SDKs to point at this
+  # same topic via Session.builder().controlTopic(...).
+  - persistent://public/filters/filter-requests
+processingGuarantees: ATLEAST_ONCE
+parallelism: 1   # MUST be 1 — multiple orchestrator instances would race on spawn decisions.
+userConfig:
+  # Registry TableView state topic — orchestrator persists per-input-topic filter function
+  # metadata and per-queryId fan-out indexes here. Should be compacted (orchestrator sets the
+  # compactionThreshold at startup automatically when apply-compaction is true).
+  state-topic: persistent://public/filters/orchestrator-state
+
+  # Pulsar package URL for the selector-filter NAR. Upload once at deploy time:
+  #   pulsar-admin packages upload \
+  #       function://public/filters/selector-filter@1.0 \
+  #       --path /path/to/selector-filter-function-VERSION.nar \
+  #       --description "selector filter"
+  function-package-url: function://public/filters/selector-filter@1.0
+
+  # Tenant/namespace under which spawned filter functions are deployed. The orchestrator's
+  # principal MUST have functions admin on this namespace.
+  function-tenant: public
+  function-namespace: filters
+
+  # Tenant/namespace for the per-filter-function control topics. Defaults to function-tenant
+  # / function-namespace if omitted.
+  # function-control-topic-tenant: public
+  # function-control-topic-namespace: filters
+
+  # Parallelism applied to each spawned filter function (NOT the orchestrator's parallelism).
+  function-parallelism: 1
+
+  # Apply per-topic compactionThreshold on the registry state topic + each per-function control
+  # topic. Required for bounded TableView replay on restart. Set to false only if the
+  # orchestrator's principal lacks topic-policies admin and you've configured compaction at
+  # namespace level instead.
+  apply-compaction: true
+  compaction-threshold-bytes: 10485760  # 10 MB
+
+  # Pulsar HTTP admin URL the orchestrator uses to spawn filter functions (via
+  # admin.functions().createFunctionWithUrl). Required — ctx.getPulsarAdmin() is only
+  # available when the function worker is configured with pulsarFunctionsCluster, which many
+  # deployments don't enable by default.
+  pulsar-admin-url: http://broker:8080
+resources:
+  cpu: 1.0
+  ram: 1073741824   # 1GB
