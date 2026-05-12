@@ -1,15 +1,22 @@
 package io.streamnative.filter.perf;
 
+import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.client.admin.PulsarAdminException;
+import org.apache.pulsar.common.functions.FunctionConfig;
+import org.apache.pulsar.common.policies.data.FunctionStatus;
+import org.apache.pulsar.packages.management.core.common.PackageMetadata;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -174,5 +181,106 @@ abstract class PerfHarnessIT {
         m.put("topic", topic);
         m.put("records", Integer.toString(records));
         return m;
+    }
+
+    // ---------------------------------------------------------------- NAR locators
+
+    /**
+     * Resolves the selector-filter NAR built into a sibling module. Mirrors {@code
+     * OrchestratorFunctionIT#findFilterNar()} but anchored to the perf module's working dir.
+     * Maven reactor ordering (the {@code <type>nar</type>} test deps in {@code perf/pom.xml})
+     * ensures the NAR exists by the time the perf module's tests run.
+     */
+    static Path findFilterNar() {
+        Path target = Paths.get(System.getProperty("user.dir"), "..", "functions",
+                "selector-filter", "target").normalize();
+        File[] files = target.toFile().listFiles((dir, n) ->
+                n.startsWith("selector-filter-function-") && n.endsWith(".nar"));
+        if (files == null || files.length == 0) {
+            throw new IllegalStateException(
+                    "Filter NAR not found in " + target + ". Run 'mvn -pl functions/selector-filter "
+                            + "-am package -DskipTests' (or 'mvn -B verify' at the reactor root) first.");
+        }
+        return files[0].toPath();
+    }
+
+    /** Resolves the orchestrator NAR — mirror of {@link #findFilterNar()}. */
+    static Path findOrchestratorNar() {
+        Path target = Paths.get(System.getProperty("user.dir"), "..", "functions",
+                "orchestrator", "target").normalize();
+        File[] files = target.toFile().listFiles((dir, n) ->
+                n.startsWith("selector-filter-orchestrator-") && n.endsWith(".nar"));
+        if (files == null || files.length == 0) {
+            throw new IllegalStateException(
+                    "Orchestrator NAR not found in " + target + ". Run 'mvn -pl functions/orchestrator "
+                            + "-am package -DskipTests' (or 'mvn -B verify' at the reactor root) first.");
+        }
+        return files[0].toPath();
+    }
+
+    // ---------------------------------------------------------------- Function deployment
+
+    /**
+     * Uploads the filter NAR as a Pulsar package at the given URL. Mirrors the pattern from
+     * {@code OrchestratorFunctionIT#setup()}.
+     */
+    static void uploadFilterPackage(PulsarAdmin admin, Path nar, String packageUrl) throws PulsarAdminException {
+        PackageMetadata pkg = PackageMetadata.builder()
+                .description("selector-filter NAR for perf benchmark")
+                .contact("perf@localhost")
+                .build();
+        admin.packages().upload(pkg, packageUrl, nar.toString());
+    }
+
+    /**
+     * Creates a function via admin, retrying on transient leader-not-ready errors. Mirrors
+     * {@code OrchestratorFunctionIT#deployWithLeaderRetry}.
+     */
+    static void deployWithLeaderRetry(PulsarAdmin admin, FunctionConfig config, String narPath,
+                                      String tenant, String ns, String name) throws Exception {
+        String packageUrl = "function://" + tenant + "/" + ns + "/" + name + "@0";
+        long deadline = System.currentTimeMillis() + 90_000L;
+        Exception last = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                admin.functions().createFunction(config, narPath);
+                return;
+            } catch (PulsarAdminException e) {
+                last = e;
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")
+                        || msg.contains("already exists")) {
+                    try {
+                        admin.packages().delete(packageUrl);
+                    } catch (Exception ignored) {}
+                    Thread.sleep(1_000);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw new IllegalStateException("Function deploy timed out waiting for leader readiness: " + name, last);
+    }
+
+    /**
+     * Polls until a function reports all instances RUNNING, or times out. Mirrors
+     * {@code OrchestratorFunctionIT#waitForFunctionRunning}.
+     */
+    static void waitForFunctionRunning(PulsarAdmin admin, String tenant, String ns,
+                                       String name, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                FunctionStatus status = admin.functions().getFunctionStatus(tenant, ns, name);
+                if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) {
+                    return;
+                }
+            } catch (Exception ignored) {
+                // function may not exist yet; retry
+            }
+            Thread.sleep(500);
+        }
+        throw new IllegalStateException(
+                "Function did not reach RUNNING within " + timeoutMs + " ms: " + name);
     }
 }

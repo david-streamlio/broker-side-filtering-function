@@ -28,6 +28,7 @@
         -->
         <skipTests>false</skipTests>
         <skipITs>true</skipITs>
+        <hdrhistogram.version>2.2.2</hdrhistogram.version>
     </properties>
 
     <dependencies>
@@ -40,6 +41,26 @@
         <dependency>
             <groupId>io.streamnative</groupId>
             <artifactId>selector-filter-client</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+          Reactor-ordering deps: ensure the function NARs are built before the perf module
+          attempts to load them from disk. The artifacts ride into the test classpath as
+          .nar archives — harmless, since the harness loads them via filesystem paths.
+        -->
+        <dependency>
+            <groupId>io.streamnative</groupId>
+            <artifactId>selector-filter-function</artifactId>
+            <version>${project.version}</version>
+            <type>nar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.streamnative</groupId>
+            <artifactId>selector-filter-orchestrator</artifactId>
+            <version>${project.version}</version>
+            <type>nar</type>
             <scope>test</scope>
         </dependency>
 
@@ -61,6 +82,12 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.hdrhistogram</groupId>
+            <artifactId>HdrHistogram</artifactId>
+            <version>${hdrhistogram.version}</version>
             <scope>test</scope>
         </dependency>
 
@@ -101,6 +128,17 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <!--
+                      Pick up both *IT and *Bench class names. Benchmark classes use the Bench
+                      suffix per the plan (FilterThroughputBench, SelectorScalingBench,
+                      OrchestratorHeartbeatBench); without this they would be silently skipped.
+                    -->
+                    <includes>
+                        <include>**/*IT.java</include>
+                        <include>**/*Bench.java</include>
+                    </includes>
+                </configuration>
             </plugin>
         </plugins>
     </build>
