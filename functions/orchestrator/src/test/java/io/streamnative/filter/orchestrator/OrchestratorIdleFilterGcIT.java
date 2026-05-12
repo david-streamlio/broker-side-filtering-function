@@ -1,7 +1,9 @@
 package io.streamnative.filter.orchestrator;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.client.PrivateTopicPolicy;
 import io.streamnative.filter.client.Session;
+import io.streamnative.filter.common.FilterRequest;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Consumer;
@@ -11,6 +13,8 @@ import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.common.functions.FunctionConfig;
+import org.apache.pulsar.common.policies.data.FunctionInstanceStats;
+import org.apache.pulsar.common.policies.data.FunctionStats;
 import org.apache.pulsar.common.policies.data.FunctionStatus;
 import org.apache.pulsar.packages.management.core.common.PackageMetadata;
 import org.junit.jupiter.api.AfterAll;
@@ -85,11 +89,21 @@ class OrchestratorIdleFilterGcIT {
             .withFunctionsWorker()
             .withStartupTimeout(java.time.Duration.ofMinutes(3));
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private PulsarClient client;
     private PulsarAdmin admin;
     private Producer<byte[]> producerGc;
     private Producer<byte[]> producerRevived;
     private Producer<byte[]> producerDead;
+    /**
+     * Producer for the orchestrator's input topic. Used by {@link #awaitMetricDelta} to publish
+     * no-op HEARTBEATs after the Session under test has closed — that drives process() invocations
+     * which drain the deferred sweeper-metrics map (R1 fallback path). Without this, post-GC
+     * metric assertions would time out since no one else publishes to the orchestrator after the
+     * Session closes.
+     */
+    private Producer<byte[]> orchestratorDrainProducer;
 
     @BeforeAll
     void setup() throws Exception {
@@ -144,6 +158,7 @@ class OrchestratorIdleFilterGcIT {
         producerGc      = client.newProducer(Schema.BYTES).topic(INPUT_GC).create();
         producerRevived = client.newProducer(Schema.BYTES).topic(INPUT_REVIVED).create();
         producerDead    = client.newProducer(Schema.BYTES).topic(INPUT_DEAD).create();
+        orchestratorDrainProducer = client.newProducer(Schema.BYTES).topic(SDK_INPUT_TOPIC).create();
     }
 
     @AfterAll
@@ -151,6 +166,7 @@ class OrchestratorIdleFilterGcIT {
         if (producerGc != null) producerGc.close();
         if (producerRevived != null) producerRevived.close();
         if (producerDead != null) producerDead.close();
+        if (orchestratorDrainProducer != null) orchestratorDrainProducer.close();
         if (client != null) client.close();
         if (admin != null) admin.close();
     }
@@ -185,6 +201,11 @@ class OrchestratorIdleFilterGcIT {
         String expectedFilterFn  = "selector-filter-" + TopicKeySanitizer.forInputTopic(INPUT_GC);
         String expectedCtrlTopic = "persistent://" + FN_TENANT + "/" + FN_NAMESPACE
                 + "/ctrl-" + TopicKeySanitizer.forInputTopic(INPUT_GC);
+
+        // Snapshot the sweeper metrics so we can assert deltas — PER_CLASS lifecycle means tests
+        // share an orchestrator instance, and metric counters carry across tests.
+        double baselineEvaluated = getOrchestratorUserMetric("orchestrator.gc.candidates_evaluated");
+        double baselineDeleted   = getOrchestratorUserMetric("orchestrator.gc.functions_deleted");
 
         // Phase 1: REGISTER + drive a message so we know the filter is genuinely alive.
         try (Session session = newSession();
@@ -224,11 +245,20 @@ class OrchestratorIdleFilterGcIT {
         }
         assertThat(functionGone).as("idle filter function should be GCed after TTL").isTrue();
         assertThat(topicGone).as("control topic should be GCed after TTL").isTrue();
+
+        // R1 verification: the sweeper records via OrchestratorFunction.recordSweeperMetric which
+        // accumulates into a pending map; the next process() invocation flushes to ctx.recordMetric
+        // on the correct thread. If the wiring breaks, deltas stay at 0.
+        awaitMetricDelta("orchestrator.gc.candidates_evaluated", baselineEvaluated, 1.0, 15_000);
+        awaitMetricDelta("orchestrator.gc.functions_deleted",    baselineDeleted,   1.0, 15_000);
     }
 
     @Test
     void recentReRegisterPreventsGc() throws Exception {
         String expectedFilterFn = "selector-filter-" + TopicKeySanitizer.forInputTopic(INPUT_REVIVED);
+
+        double baselineEvaluated = getOrchestratorUserMetric("orchestrator.gc.candidates_evaluated");
+        double baselineDeleted   = getOrchestratorUserMetric("orchestrator.gc.functions_deleted");
 
         // Phase 1: REGISTER, then close (UNREGISTER). Filter goes idle.
         try (Session firstSession = newSession();
@@ -266,6 +296,19 @@ class OrchestratorIdleFilterGcIT {
             assertThat(m).isNotNull();
             assertThat(new String(m.getData(), StandardCharsets.UTF_8)).isEqualTo("uk-revived");
             secondConsumer.acknowledge(m);
+
+            // Metric assertions while filter is still active:
+            // - candidates_evaluated grew: the sweeper definitely ran (multiple ticks during the
+            //   TTL+sweep wait), and the messages we sent to handleHeartbeat / handleRegister gave
+            //   process() multiple opportunities to flush the pending map.
+            // - functions_deleted did NOT grow: re-REGISTER reset idleSince so no GC happened.
+            //   Tests run sequentially under PER_CLASS so no other test could delete a filter
+            //   inside this window.
+            awaitMetricDelta("orchestrator.gc.candidates_evaluated", baselineEvaluated, 1.0, 15_000);
+            double deletedNow = getOrchestratorUserMetric("orchestrator.gc.functions_deleted");
+            assertThat(deletedNow - baselineDeleted)
+                    .as("re-REGISTER inside the TTL window must not trigger GC")
+                    .isEqualTo(0.0);
         }
     }
 
@@ -274,6 +317,9 @@ class OrchestratorIdleFilterGcIT {
         String expectedFilterFn  = "selector-filter-" + TopicKeySanitizer.forInputTopic(INPUT_DEAD);
         String expectedCtrlTopic = "persistent://" + FN_TENANT + "/" + FN_NAMESPACE
                 + "/ctrl-" + TopicKeySanitizer.forInputTopic(INPUT_DEAD);
+
+        double baselineSynthesized = getOrchestratorUserMetric("orchestrator.heartbeats.synthesized");
+        double baselineDeleted     = getOrchestratorUserMetric("orchestrator.gc.functions_deleted");
 
         // Build a doomed PulsarClient that we will hard-close to simulate an SDK crash. Its
         // Session never gets close() called, so no clean UNREGISTER is published; instead the
@@ -323,6 +369,13 @@ class OrchestratorIdleFilterGcIT {
                 "filter function should be GCed after heartbeat staleness + idle TTL").isTrue();
         assertThat(topicGone).as(
                 "control topic should be GCed after heartbeat staleness + idle TTL").isTrue();
+
+        // R1 verification on the heartbeat path: the synthesize-unregister metric fires on the
+        // sweep tick that detected the stale q: entry, and the gc.functions_deleted metric fires
+        // on the later sweep tick that GCed the now-idle t: entry. Both surface via the
+        // deferred-flush path on the next process() call.
+        awaitMetricDelta("orchestrator.heartbeats.synthesized", baselineSynthesized, 1.0, 15_000);
+        awaitMetricDelta("orchestrator.gc.functions_deleted",   baselineDeleted,     1.0, 15_000);
     }
 
     // ---------------------------------------------------------------- helpers (mirrored from OrchestratorFunctionIT)
@@ -351,6 +404,103 @@ class OrchestratorIdleFilterGcIT {
             }
         }
         throw new IllegalStateException("Function deploy timed out waiting for leader readiness: " + name, last);
+    }
+
+    /**
+     * Sum the running counter for a userMetric across all instances of the orchestrator function.
+     *
+     * <p>Pulsar's function-worker renders every {@code ctx.recordMetric(name, value)} call as a
+     * summary statistic — the {@code userMetrics} map exposes keys like
+     * {@code user_metric_<name>_sum}, {@code _count}, {@code _0.5}, {@code _0.9}, {@code _0.99},
+     * {@code _0.999}. The {@code _sum} variant is the sum of all values recorded, which is the
+     * counter semantics we want. Returns 0.0 if the metric was never recorded or if the stats
+     * fetch fails (typically just before the function worker has flushed instance stats — the
+     * caller is expected to poll).
+     */
+    private double getOrchestratorUserMetric(String name) {
+        String pulsarKey = "user_metric_" + name + "_sum";
+        try {
+            FunctionStats stats = admin.functions().getFunctionStats(FN_TENANT, FN_NAMESPACE, ORCH_NAME);
+            double total = 0.0;
+            for (FunctionInstanceStats inst : stats.getInstances()) {
+                Map<String, Double> userMetrics = inst.getMetrics().getUserMetrics();
+                if (userMetrics != null) {
+                    Double v = userMetrics.get(pulsarKey);
+                    if (v != null) total += v;
+                }
+            }
+            return total;
+        } catch (Exception e) {
+            return 0.0;
+        }
+    }
+
+    /**
+     * Poll until {@code getOrchestratorUserMetric(name) - baseline >= minDelta}, or fail. Used at
+     * the tail of each test to confirm sweeper metrics actually surfaced via the deferred-flush
+     * path through {@code OrchestratorFunction.process()} — this is the R1 verification promised
+     * by tasks/todo-sweeper-observability.md.
+     *
+     * <p>Drives a no-op HEARTBEAT into the orchestrator every 2s so process() runs and drains the
+     * pending sweeper-metrics map. Without this, the closed-Session tests would hang: the sweeper
+     * tick that incremented the counter happens on the scheduler thread, but
+     * {@code ctx.recordMetric} only sticks when called from the process loop (R1).
+     */
+    private void awaitMetricDelta(String name, double baseline, double minDelta, long timeoutMs)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        long lastDrain = 0L;
+        double last = 0.0;
+        while (System.currentTimeMillis() < deadline) {
+            last = getOrchestratorUserMetric(name);
+            if (last - baseline >= minDelta) return;
+            if (System.currentTimeMillis() - lastDrain > 2_000) {
+                publishNoOpHeartbeat();
+                lastDrain = System.currentTimeMillis();
+            }
+            Thread.sleep(500);
+        }
+        // Dump every userMetric we can see, plus the function-instance counters that prove
+        // process() ran at all. If even the process-thread metrics are absent here, the
+        // function-worker's metricsCollectionInterval hasnt fired yet and the test needs a
+        // longer timeout. If those are present but ours are not, the recordMetric path is broken.
+        StringBuilder dump = new StringBuilder("userMetrics seen:\n");
+        try {
+            FunctionStats stats = admin.functions().getFunctionStats(FN_TENANT, FN_NAMESPACE, ORCH_NAME);
+            dump.append("  receivedTotal=").append(stats.getReceivedTotal())
+                .append(" processedSuccessfullyTotal=").append(stats.getProcessedSuccessfullyTotal())
+                .append('\n');
+            for (FunctionInstanceStats inst : stats.getInstances()) {
+                Map<String, Double> userMetrics = inst.getMetrics().getUserMetrics();
+                dump.append("  instance ").append(inst.getInstanceId()).append(" userMetrics=")
+                    .append(userMetrics).append('\n');
+            }
+        } catch (Exception e) {
+            dump.append("  failed to fetch diagnostics: ").append(e.getMessage());
+        }
+        throw new AssertionError(String.format(
+                "metric %s did not grow by at least %s within %d ms; baseline=%s last=%s\n%s",
+                name, minDelta, timeoutMs, baseline, last, dump));
+    }
+
+    /**
+     * Publish a HEARTBEAT with a single unknown queryId. handleHeartbeat treats unknown queryIds
+     * as a silent no-op (counted under {@code orchestrator.heartbeats.unknown}), but the act of
+     * invoking process() drains pending sweeper metrics through the proper thread.
+     */
+    private void publishNoOpHeartbeat() {
+        try {
+            byte[] payload = MAPPER.writeValueAsBytes(
+                    FilterRequest.heartbeat(List.of("metric-drain-" + System.nanoTime())));
+            orchestratorDrainProducer.newMessage()
+                    .key("drain")
+                    .value(payload)
+                    .send();
+        } catch (Exception e) {
+            // Swallow — the next iteration of awaitMetricDelta will retry; if drains keep failing
+            // the deadline check will surface a meaningful assertion failure.
+            LOG.debug("no-op HEARTBEAT publish failed: {}", e.getMessage());
+        }
     }
 
     private static void waitForFunctionRunning(PulsarAdmin admin, String tenant, String ns,

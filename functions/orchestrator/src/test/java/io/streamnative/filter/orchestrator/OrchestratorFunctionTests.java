@@ -812,56 +812,82 @@ class OrchestratorFunctionTests {
         assertThat(afterB.getIdleSince()).isEqualTo("2026-05-12T21:30:00Z");
     }
 
-    // ---------------------------------------------------------------- Sweeper metric callback wiring
+    // ---------------------------------------------------------------- Sweeper metric callback wiring (deferred-flush)
 
     @Test
-    void recordSweeperMetricIsNoOpBeforeFirstProcessInvocation() {
-        // Cold-start path: the sweeper scheduler can fire before any traffic arrives. The callback
-        // must drop silently rather than NPE.
+    void recordSweeperMetricBeforeProcessAccumulatesQuietly() {
+        // Cold-start: the sweeper scheduler can fire before any traffic arrives. Counters land in
+        // the pending map; the next process() invocation flushes them. Reaching this line is
+        // the assertion (no exception).
         orchestrator.recordSweeperMetric("orchestrator.gc.candidates_evaluated", 1.0);
-        // No assertion on a mock — the contract is "does not throw". Reaching this line is the
-        // assertion.
+        orchestrator.recordSweeperMetric("orchestrator.gc.functions_deleted", 1.0);
     }
 
     @Test
-    void recordSweeperMetricRoutesToMostRecentProcessContext() throws Exception {
-        // Two HEARTBEATs back-to-back with distinct Context mocks. Only the *most recent* context
-        // should see the sweeper-emitted metric call.
+    void nextProcessInvocationFlushesPendingSweeperMetrics() throws Exception {
+        orchestrator.recordSweeperMetric("orchestrator.gc.functions_deleted", 1.0);
+        orchestrator.recordSweeperMetric("orchestrator.gc.candidates_evaluated", 3.0);
+
+        Context ctx = contextFor("q-anything");
+        orchestrator.process(serialize(FilterRequest.heartbeat(List.of("q-unknown-1"))), ctx);
+
+        verify(ctx).recordMetric("orchestrator.gc.functions_deleted", 1.0);
+        verify(ctx).recordMetric("orchestrator.gc.candidates_evaluated", 3.0);
+    }
+
+    @Test
+    void pendingSweeperMetricsAreDrainedOncePerProcess() throws Exception {
+        orchestrator.recordSweeperMetric("orchestrator.gc.functions_deleted", 1.0);
+
         Context ctx1 = contextFor("q-anything");
         Context ctx2 = contextFor("q-anything");
-
-        // HEARTBEAT requires a non-empty queryIds list; the queryId is unknown, which is a no-op
-        // path in handleHeartbeat — exactly what we want as a context-only flush.
         byte[] hb = serialize(FilterRequest.heartbeat(List.of("q-unknown-1")));
+
         orchestrator.process(hb, ctx1);
         orchestrator.process(hb, ctx2);
 
-        orchestrator.recordSweeperMetric("orchestrator.gc.functions_deleted", 1.0);
-
-        verify(ctx2).recordMetric("orchestrator.gc.functions_deleted", 1.0);
-        verify(ctx1, never()).recordMetric(eq("orchestrator.gc.functions_deleted"), any(Double.class));
+        // First process() consumed the pending counter; second sees an empty map.
+        verify(ctx1).recordMetric("orchestrator.gc.functions_deleted", 1.0);
+        verify(ctx2, never()).recordMetric(eq("orchestrator.gc.functions_deleted"), any(Double.class));
     }
 
     @Test
-    void recordSweeperMetricSwallowsExceptionFromContext() throws Exception {
+    void multipleSweeperMetricCallsBeforeFlushAccumulateAsSum() throws Exception {
+        orchestrator.recordSweeperMetric("orchestrator.gc.candidates_evaluated", 1.0);
+        orchestrator.recordSweeperMetric("orchestrator.gc.candidates_evaluated", 1.0);
+        orchestrator.recordSweeperMetric("orchestrator.gc.candidates_evaluated", 3.0);
+
         Context ctx = contextFor("q-anything");
-        org.mockito.Mockito.doThrow(new RuntimeException("ctx already closed"))
+        orchestrator.process(serialize(FilterRequest.heartbeat(List.of("q-unknown-1"))), ctx);
+
+        // Three sweep ticks worth of increments arrive on the next process() as a single summed
+        // record — Pulsar's per-instance metric counter sums values across recordMetric calls
+        // anyway, so 1+1+3=5 in one call is equivalent to three separate calls.
+        verify(ctx).recordMetric("orchestrator.gc.candidates_evaluated", 5.0);
+    }
+
+    @Test
+    void flushSwallowsExceptionFromOneRecordMetricCall() throws Exception {
+        Context ctx = contextFor("q-anything");
+        org.mockito.Mockito.doThrow(new RuntimeException("simulated"))
                 .when(ctx).recordMetric(eq("orchestrator.gc.errors"), any(Double.class));
 
+        orchestrator.recordSweeperMetric("orchestrator.gc.errors", 1.0);
+        orchestrator.recordSweeperMetric("orchestrator.gc.functions_deleted", 2.0);
+
+        // process() must complete normally even though one recordMetric call throws — losing a
+        // single counter must not poison a sweep cycle.
         orchestrator.process(serialize(FilterRequest.heartbeat(List.of("q-unknown-1"))), ctx);
 
-        // The contract: must not propagate — losing a counter must not poison a sweep tick.
-        orchestrator.recordSweeperMetric("orchestrator.gc.errors", 1.0);
+        // The non-failing counter still landed.
+        verify(ctx).recordMetric("orchestrator.gc.functions_deleted", 2.0);
     }
 
     @Test
-    void recordSweeperMetricEmitsAllSevenCanonicalNames() throws Exception {
-        Context ctx = contextFor("q-anything");
-        orchestrator.process(serialize(FilterRequest.heartbeat(List.of("q-unknown-1"))), ctx);
-
+    void canonicalMetricNamesRoundTripThroughDeferredFlush() throws Exception {
         // The exact public surface of metric names is locked by the todo and consumed by
-        // dashboards. Drive every one of the seven through the callback and assert that the
-        // strings reaching Context.recordMetric match — guards against any future rename.
+        // dashboards. Drive every one of the seven through the callback, flush once, and assert
+        // that each string reaches Context.recordMetric — guards against any future rename.
         List<String> canonical = List.of(
                 "orchestrator.gc.candidates_evaluated",
                 "orchestrator.gc.functions_deleted",
@@ -872,6 +898,12 @@ class OrchestratorFunctionTests {
                 "orchestrator.heartbeats.errors");
         for (String name : canonical) {
             orchestrator.recordSweeperMetric(name, 1.0);
+        }
+
+        Context ctx = contextFor("q-anything");
+        orchestrator.process(serialize(FilterRequest.heartbeat(List.of("q-unknown-1"))), ctx);
+
+        for (String name : canonical) {
             verify(ctx).recordMetric(name, 1.0);
         }
     }

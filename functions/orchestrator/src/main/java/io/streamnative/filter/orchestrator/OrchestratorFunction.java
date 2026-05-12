@@ -65,18 +65,19 @@ public class OrchestratorFunction implements Function<byte[], Void> {
     /** Background sweeper. {@code null} when {@code idle-gc-enabled = false}. */
     private IdleFilterSweeper idleFilterSweeper;
     /**
-     * Most recent per-invocation {@link Context} seen by {@link #process(byte[], Context)}. Read
-     * from the sweeper scheduler thread to call {@code recordMetric}. {@code volatile} for the
-     * cross-thread publish — sweeper thread reads what process() last wrote. Null until the first
-     * process() invocation; sweeper metric callbacks are no-ops during that window (no traffic,
-     * nothing useful to record anyway).
+     * Sweeper-emitted counters waiting to be flushed into the next process()-time {@link Context}.
+     * Calls to {@code Context.recordMetric} from threads other than the function's process loop
+     * are silently dropped by Pulsar's function-instance stats endpoint — verified empirically by
+     * the Phase 4 live IT before this fallback existed (all sweeper counters stayed at 0.0). So
+     * the sweeper scheduler thread now writes into this map, and the next process() invocation
+     * drains the accumulated counters into {@code ctx.recordMetric} on the correct thread.
      *
-     * <p>Per the Phase 2 design note: Pulsar's {@code Context} is per-invocation in spec but in
-     * practice associated with the function instance; recording against it off-thread is expected
-     * to work. Phase 4 IT confirms this on a live broker; if it does not, the documented fallback
-     * is to accumulate counters in volatile fields and flush them from the next process() call.
+     * <p>Cost: one ConcurrentHashMap merge per sweeper-stat increment + one drain per process()
+     * call. Bounded size — at most seven keys (the canonical sweeper metric names from
+     * {@link IdleFilterSweeper}). Values are doubles summed across sweep ticks since the last
+     * flush.
      */
-    private volatile Context lastCtx;
+    private final ConcurrentMap<String, Double> pendingSweeperMetrics = new ConcurrentHashMap<>();
 
     /** Constructor for Pulsar runtime. */
     public OrchestratorFunction() {}
@@ -147,7 +148,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
 
     @Override
     public Void process(byte[] payload, Context ctx) throws Exception {
-        this.lastCtx = ctx;
+        flushPendingSweeperMetrics(ctx);
         ctx.recordMetric("orchestrator.requests.received", 1);
 
         if (payload == null || payload.length == 0) {
@@ -421,22 +422,38 @@ public class OrchestratorFunction implements Function<byte[], Void> {
     }
 
     /**
-     * Sweeper-side metric callback. The sweeper invokes this from its scheduler thread; we route
-     * through the most recently seen process()-time {@link Context}. Before the first process()
-     * call (cold start, no traffic yet), {@code lastCtx} is null and the call is dropped — there
-     * is nothing to record against and no traffic for an operator to be looking at anyway.
+     * Sweeper-side metric callback. Invoked from the sweeper's scheduler thread; we accumulate
+     * into {@link #pendingSweeperMetrics} and let the next process() invocation flush on the
+     * function's process loop thread. Calling {@code ctx.recordMetric} directly from this thread
+     * is silently dropped by Pulsar's stats endpoint (R1, verified by Phase 4 IT).
      *
-     * <p>Package-private so unit tests can exercise the callback's contract directly without
-     * spinning a full {@link IdleFilterSweeper} tick.
+     * <p>Package-private so unit tests can exercise the callback's contract directly.
      */
     void recordSweeperMetric(String name, Double value) {
-        Context c = this.lastCtx;
-        if (c == null) return;
-        try {
-            c.recordMetric(name, value);
-        } catch (Exception e) {
-            // Never propagate from a metric callback — losing a counter must not poison a sweep.
-            LOG.debug("recordMetric({}, {}) from sweeper thread threw: {}", name, value, e.getMessage());
+        pendingSweeperMetrics.merge(name, value, Double::sum);
+    }
+
+    /**
+     * Drain {@link #pendingSweeperMetrics} into {@code ctx.recordMetric}. Called at the top of
+     * every process() — recording on the function's process loop thread is the only thread
+     * Pulsar's stats endpoint accepts updates from. Drained values are removed atomically so a
+     * concurrent sweeper increment after the drain accumulates afresh and flushes on the next
+     * process() call.
+     *
+     * <p>Defensive: any exception from a single {@code recordMetric} call is logged and the
+     * drain continues — losing one counter must not corrupt the others.
+     */
+    private void flushPendingSweeperMetrics(Context ctx) {
+        if (pendingSweeperMetrics.isEmpty()) return;
+        for (String name : pendingSweeperMetrics.keySet()) {
+            Double value = pendingSweeperMetrics.remove(name);
+            if (value == null || value == 0.0) continue;
+            try {
+                ctx.recordMetric(name, value);
+            } catch (Exception e) {
+                LOG.debug("recordMetric({}, {}) during sweeper-metric flush threw: {}",
+                        name, value, e.getMessage());
+            }
         }
     }
 
