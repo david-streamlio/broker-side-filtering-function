@@ -1,0 +1,27 @@
+{
+  "generators": [
+    {
+      "topic": "${topic}",
+      "key": { "_gen": "string", "expr": "#{Stock.symbol}" },
+      "value": {
+        "symbol":  { "_gen": "string", "expr": "#{Stock.symbol}" },
+        "region":  { "_gen": "oneOf", "choices": ["US", "DE", "UK", "JP"] },
+        "price":   { "_gen": "uniformDistribution", "bounds": [10.0, 500.0] },
+        "qty":     { "_gen": "uniformDistribution", "bounds": [1, 1000] }
+      },
+      "localConfigs": {
+        "maxEvents": ${records}
+      }
+    }
+  ],
+  "connections": {
+    "kafka": {
+      "kind": "kafka",
+      "producerConfigs": {
+        "bootstrap.servers": "${bootstrap}",
+        "key.serializer":   "org.apache.kafka.common.serialization.StringSerializer",
+        "value.serializer": "io.shadowtraffic.kafka.serdes.JsonSerializer"
+      }
+    }
+  }
+}
