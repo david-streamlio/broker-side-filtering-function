@@ -818,4 +818,66 @@ class IdleFilterSweeperTests {
         IdleFilterSweeper.SweepStats stats = sweeperAt(now).sweep();
         assertThat(stats.deleted).isEqualTo(1);
     }
+
+    // ---------------------------------------------------------------- Structured log format
+
+    /**
+     * Parses a canonical sweeper log line of the form {@code gc k1=v1 k2=v2 ...} into a
+     * field map. Asserts the {@code gc} prefix is present. Values do not contain spaces by
+     * design (function names, registry keys, and Pulsar topic URIs are all space-free), so a
+     * simple split-on-space is correct.
+     */
+    private static Map<String, String> parseGcLine(String line) {
+        String[] parts = line.split(" ");
+        assertThat(parts[0]).isEqualTo("gc");
+        Map<String, String> fields = new HashMap<>();
+        for (int i = 1; i < parts.length; i++) {
+            String[] kv = parts[i].split("=", 2);
+            assertThat(kv).hasSize(2);
+            fields.put(kv[0], kv[1]);
+        }
+        return fields;
+    }
+
+    @Test
+    void formatGcDeleteProducesCanonicalKeyValueLine() {
+        String line = IdleFilterSweeper.formatGcDelete(
+                "selector-filter-trades",
+                "persistent://public/in/trades",
+                "persistent://public/filtered/ctrl-trades",
+                "idle",
+                42L);
+
+        Map<String, String> fields = parseGcLine(line);
+        assertThat(fields)
+                .containsEntry("action", "delete")
+                .containsEntry("fn", "selector-filter-trades")
+                .containsEntry("key", "persistent://public/in/trades")
+                .containsEntry("ctrl", "persistent://public/filtered/ctrl-trades")
+                .containsEntry("reason", "idle")
+                .containsEntry("elapsed_ms", "42");
+    }
+
+    @Test
+    void formatGcSynthesizeUnregisterProducesCanonicalKeyValueLine() {
+        String line = IdleFilterSweeper.formatGcSynthesizeUnregister("q-7c4d", 17L);
+
+        Map<String, String> fields = parseGcLine(line);
+        assertThat(fields)
+                .containsEntry("action", "synthesize_unregister")
+                .containsEntry("query", "q-7c4d")
+                .containsEntry("reason", "stale_heartbeat")
+                .containsEntry("elapsed_ms", "17");
+    }
+
+    @Test
+    void formatGcDeleteEmittedReasonIsConfigurableAcrossIdleAndStaleHeartbeat() {
+        // The format string accepts either reason — proves we're not hardcoding "idle".
+        Map<String, String> idle = parseGcLine(IdleFilterSweeper.formatGcDelete(
+                "fn", "key", "ctrl", "idle", 0L));
+        Map<String, String> stale = parseGcLine(IdleFilterSweeper.formatGcDelete(
+                "fn", "key", "ctrl", "stale_heartbeat", 0L));
+        assertThat(idle).containsEntry("reason", "idle");
+        assertThat(stale).containsEntry("reason", "stale_heartbeat");
+    }
 }

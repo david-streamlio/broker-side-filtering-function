@@ -197,12 +197,19 @@ final class IdleFilterSweeper implements AutoCloseable {
                 metrics.accept(M_HEARTBEATS_SKIPPED_RECENT, 1.0);
                 continue;
             }
+            long startNanos = System.nanoTime();
             try {
                 synthesizeUnregister.accept(c.queryId, current);
+                long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
                 stats.heartbeatsSynthesized++;
                 metrics.accept(M_HEARTBEATS_SYNTHESIZED, 1.0);
                 LOG.info("Synthesized UNREGISTER for stale queryId={} (lastSeen={} now={})",
                         c.queryId, current.getLastSeen(), now);
+                // R3: structured DEBUG companion alongside the human-readable INFO above. One
+                // release after operators migrate their scrapers, the INFO line above drops.
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug(formatGcSynthesizeUnregister(c.queryId, elapsedMs));
+                }
             } catch (Exception e) {
                 LOG.warn("synthesizeUnregister failed for queryId={}: {}. Next tick will retry.",
                         c.queryId, e.getMessage());
@@ -233,6 +240,7 @@ final class IdleFilterSweeper implements AutoCloseable {
                 continue;
             }
 
+            long startNanos = System.nanoTime();
             // Function FIRST — this closes the function's consumer on the control topic, so
             // deleting the topic next won't crash a live TableView producer inside the filter.
             if (!deleteFunctionSafely(current)) {
@@ -263,13 +271,49 @@ final class IdleFilterSweeper implements AutoCloseable {
                 metrics.accept(M_GC_ERRORS, 1.0);
                 continue;
             }
+            long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
             stats.deleted++;
             metrics.accept(M_GC_FUNCTIONS_DELETED, 1.0);
             LOG.info("GCed idle filter function name={} key=[{}] controlTopic={} idleSince={}",
                     current.getFilterFunctionName(), key, current.getControlTopic(),
                     current.getIdleSince());
+            // R3: structured DEBUG companion alongside the human-readable INFO above. One
+            // release after operators migrate their scrapers, the INFO line above drops.
+            if (LOG.isDebugEnabled()) {
+                LOG.debug(formatGcDelete(current.getFilterFunctionName(), key,
+                        current.getControlTopic(), "idle", elapsedMs));
+            }
         }
         return stats;
+    }
+
+    /**
+     * Canonical structured log line for a successful idle-filter GC delete. Space-separated
+     * key=value pairs with a {@code gc} prefix; parseable by simple log scrapers without regex
+     * gymnastics. {@code reason} is one of {@code idle} (regular UNREGISTER → idle → TTL elapse)
+     * or {@code stale_heartbeat} (synthesize-unregister path → idle → TTL elapse — not yet
+     * threaded through; today this is always {@code idle}). Values do not need escaping because
+     * function names, registry keys, and Pulsar topic URIs do not contain spaces.
+     */
+    static String formatGcDelete(String fn, String key, String ctrl, String reason, long elapsedMs) {
+        return "gc action=delete"
+                + " fn=" + fn
+                + " key=" + key
+                + " ctrl=" + ctrl
+                + " reason=" + reason
+                + " elapsed_ms=" + elapsedMs;
+    }
+
+    /**
+     * Canonical structured log line for a synthesized UNREGISTER triggered by a stale heartbeat.
+     * Companion to {@link #formatGcDelete} — same {@code gc} prefix and {@code reason=...}
+     * convention so a scraper can filter by action and group by reason.
+     */
+    static String formatGcSynthesizeUnregister(String queryId, long elapsedMs) {
+        return "gc action=synthesize_unregister"
+                + " query=" + queryId
+                + " reason=stale_heartbeat"
+                + " elapsed_ms=" + elapsedMs;
     }
 
     /** Whether {@code q} has gone past its heartbeat-staleness threshold. */
