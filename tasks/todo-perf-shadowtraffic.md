@@ -20,7 +20,8 @@ TestContainers can manage. It generates configurable streams (Kafka, Pulsar,
 etc.) at controllable rates, so we can drive deterministic load against a
 running broker + filter function and measure.
 
-This is a **backlog plan**. Not started.
+This was a **backlog plan**. Phases 1-2 are landed on branch `feat/perf-tests`;
+Phases 3-7 remain backlog.
 
 ## Goals
 
@@ -84,15 +85,15 @@ perf/                                              -- new Maven module
 
 ## Phases
 
-| # | Phase | Outcome |
-|---|---|---|
-| 1 | Module scaffolding | New `perf/` Maven module, parent POM update, surefire/failsafe configured with the `perf` profile so it is OFF by default. |
-| 2 | ShadowTraffic container wiring | `PerfHarnessIT.java` extends the existing `OrchestratorFunctionIT` pattern: Pulsar container + ShadowTraffic container linked, license env vars read from environment, fast-fail if absent. Smoke test: start both, generate 1K records, assert filter consumes them. |
-| 3 | First scenario — throughput | `FilterThroughputBench`: 5-minute sustained run at a configurable target rate. Measures: actual achieved rate, output-topic rate, latency percentiles (via brokerEntryMetadataInterceptor + a probe consumer that timestamps receive). Emit results as a JSON file under `perf/target/reports/`. |
-| 4 | Scenario — selector scaling | `SelectorScalingBench`: spin up N active queries (via the orchestrator path) on one filter function. Measure throughput as N grows. Confirms the O(N) selector-eval observation in the README. |
-| 5 | Scenario — heartbeat overhead | `OrchestratorHeartbeatBench`: simulate K Sessions each sending HEARTBEATs at the default 30s interval. Measure orchestrator queue depth + processing latency on its input topic. Validate the R1 risk note in `tasks/todo-sdk-heartbeat.md`. |
-| 6 | CI integration | Tag-triggered GitHub Actions workflow that runs `mvn -Pperf verify`. Results uploaded as a workflow artifact. NOT on every PR — wall time is 20-30 min. |
-| 7 | Grafana / Datasette dashboard (optional) | Long-running regression chart fed by the per-run JSON output. Out of scope for v1 of this work. |
+| # | Phase | Status | Outcome |
+|---|---|---|---|
+| 1 | Module scaffolding | DONE | New `perf/` Maven module, parent POM update, surefire/failsafe configured with the `perf` profile so it is OFF by default. |
+| 2 | ShadowTraffic container wiring | DONE (code only — not yet exercised against a real license) | `PerfHarnessIT.java` base + `PerfSmokeIT`: KoP-enabled Pulsar container + ShadowTraffic container on a shared Docker network, license env vars read from environment, fast-fail if absent, `@EnabledIfEnvironmentVariable` so the suite skips cleanly without a license. Smoke test: generate 1K records, assert a probe Pulsar consumer reads them back. |
+| 3 | First scenario — throughput | TODO | `FilterThroughputBench`: 5-minute sustained run at a configurable target rate. Measures: actual achieved rate, output-topic rate, latency percentiles (via brokerEntryMetadataInterceptor + a probe consumer that timestamps receive). Emit results as a JSON file under `perf/target/reports/`. |
+| 4 | Scenario — selector scaling | TODO | `SelectorScalingBench`: spin up N active queries (via the orchestrator path) on one filter function. Measure throughput as N grows. Confirms the O(N) selector-eval observation in the README. |
+| 5 | Scenario — heartbeat overhead | TODO | `OrchestratorHeartbeatBench`: simulate K Sessions each sending HEARTBEATs at the default 30s interval. Measure orchestrator queue depth + processing latency on its input topic. Validate the R1 risk note in `tasks/todo-sdk-heartbeat.md`. |
+| 6 | CI integration | TODO | Tag-triggered GitHub Actions workflow that runs `mvn -Pperf verify`. Results uploaded as a workflow artifact. NOT on every PR — wall time is 20-30 min. |
+| 7 | Grafana / Datasette dashboard (optional) | TODO | Long-running regression chart fed by the per-run JSON output. Out of scope for v1 of this work. |
 
 ## Result schema (per benchmark)
 
@@ -163,3 +164,48 @@ git SHAs into a regression chart.
   time" suffers from clock-skew between containers. Use Pulsar's
   `brokerEntryMetadataInterceptor` (already enabled in some ITs) plus a
   single-process probe consumer to keep all clocks in one JVM.
+
+## Phase 1-2 implementation notes
+
+Landed:
+
+- `perf/pom.xml` — jar packaging, parent dependencyManagement, failsafe
+  off by default (`<skipITs>true</skipITs>`), `perf` profile flips it on.
+- `perf/src/test/java/io/streamnative/filter/perf/PerfHarnessIT.java` —
+  shared base with `requireLicenseEnvOrFail()`, `newPulsarKoPContainer()`,
+  `newShadowTrafficContainer()`, and a `renderConfig()` helper that does
+  `${name}` placeholder substitution on a classpath JSON template.
+- `perf/src/test/java/io/streamnative/filter/perf/PerfSmokeIT.java` —
+  Phase-2 smoke: 1K records via ShadowTraffic → KoP topic → probe
+  consumer. Gated with `@EnabledIfEnvironmentVariable` on
+  `SHADOWTRAFFIC_LICENSE_ID`.
+- `perf/src/test/resources/shadowtraffic/trades-smoke.json` —
+  generator template with `${bootstrap}` / `${topic}` / `${records}`
+  placeholders.
+- Root `README.md` — new "Performance testing" subsection under "Building".
+
+Verified locally:
+
+- `mvn -pl perf -am clean test-compile` compiles cleanly.
+- `mvn -pl perf verify` (no `-Pperf`) reports "Tests are skipped" — zero
+  PR-CI impact.
+- `mvn -pl perf -Pperf verify` without license env vars discovers the IT
+  and skips it via JUnit's `@EnabledIfEnvironmentVariable`, exiting 0.
+
+NOT verified (no license available at landing time):
+
+- That the ShadowTraffic container starts against the chosen image tag.
+- That the trades-smoke.json generator config is accepted by ShadowTraffic
+  as-is — the field shapes are based on docs.shadowtraffic.io conventions
+  but a real-license run will likely surface tweaks. See R2.
+- That records actually flow KoP → Pulsar in this exact topology. KoP
+  itself is validated by `KoPFilterFunctionIT`; the new piece is the
+  ShadowTraffic-side Kafka connection over the shared Docker network.
+
+Phase-3 entry points:
+
+- New IT next to `PerfSmokeIT` extending `PerfHarnessIT`.
+- New config under `src/test/resources/shadowtraffic/` (e.g.
+  `trades-50k-per-sec.json`).
+- Output JSON written to `perf/target/reports/<benchmark>-<git-sha>.json`
+  per the schema in the "Result schema" section above.

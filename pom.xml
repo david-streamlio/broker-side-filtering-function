@@ -18,6 +18,7 @@
         <module>functions/orchestrator</module>
         <module>sdk/java/pulsar</module>
         <module>sdk/java/kafka</module>
+        <module>perf</module>
     </modules>
 
     <properties>

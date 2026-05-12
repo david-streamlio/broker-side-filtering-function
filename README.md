@@ -331,6 +331,28 @@ mvn -B clean verify
 mvn -B clean package -Pdocker
 ```
 
+### Performance testing
+
+The `perf/` module hosts ShadowTraffic-driven load tests. They are **off by default** — the
+suite takes 20–30 minutes and depends on a paid ShadowTraffic license.
+
+```bash
+# Phase-2 smoke test (1K records through KoP) — requires SHADOWTRAFFIC_LICENSE_* env vars.
+export SHADOWTRAFFIC_LICENSE_ID=...
+export SHADOWTRAFFIC_LICENSE_EMAIL=...
+export SHADOWTRAFFIC_LICENSE_ORGANIZATION=...
+export SHADOWTRAFFIC_LICENSE_EDITION=...
+export SHADOWTRAFFIC_LICENSE_EXPIRATION=...
+export SHADOWTRAFFIC_LICENSE_SIGNATURE=...
+
+mvn -Pperf -pl perf verify
+```
+
+Without the license env vars, JUnit skips the perf ITs cleanly via
+`@EnabledIfEnvironmentVariable`, so unmodified CI runs continue to pass. See
+`tasks/todo-perf-shadowtraffic.md` for the full backlog (additional benchmark scenarios,
+CI integration, regression-chart plumbing).
+
 The function NAR appears at
 `functions/selector-filter/target/selector-filter-function-${VERSION}.nar` and is the artifact
 you register with `pulsar-admin functions create --jar`. The Pulsar client jar is at
