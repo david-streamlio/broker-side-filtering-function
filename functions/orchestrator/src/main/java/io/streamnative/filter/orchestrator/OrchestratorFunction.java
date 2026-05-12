@@ -62,6 +62,8 @@ public class OrchestratorFunction implements Function<byte[], Void> {
     private TableView<byte[]> stateView;
     /** Source of {@link Instant}s for GC bookkeeping (idleSince). Overridable for tests. */
     private Clock clock = Clock.systemUTC();
+    /** Background sweeper. {@code null} when {@code idle-gc-enabled = false}. */
+    private IdleFilterSweeper idleFilterSweeper;
 
     /** Constructor for Pulsar runtime. */
     public OrchestratorFunction() {}
@@ -112,13 +114,21 @@ public class OrchestratorFunction implements Function<byte[], Void> {
                 .build();
         this.spawner = new DefaultFilterFunctionSpawner(ownedAdmin);
 
+        if (config.idleGcEnabled()) {
+            this.idleFilterSweeper = new IdleFilterSweeper(registry, ownedAdmin, config, clock);
+            this.idleFilterSweeper.start();
+        }
+
         LOG.info("OrchestratorFunction initialized. stateTopic={}, packageUrl={}, "
                         + "fnTenant={}, fnNamespace={}, ctrlTopicTenant={}, ctrlTopicNs={}, "
-                        + "parallelism={}, applyCompaction={}",
+                        + "parallelism={}, applyCompaction={}, idleGcEnabled={}, "
+                        + "idleGcTtlSeconds={}, idleGcSweepIntervalSeconds={}",
                 config.stateTopic(), config.functionPackageUrl(),
                 config.functionTenant(), config.functionNamespace(),
                 config.controlTopicTenant(), config.controlTopicNamespace(),
-                config.functionParallelism(), config.applyCompaction());
+                config.functionParallelism(), config.applyCompaction(),
+                config.idleGcEnabled(), config.idleGcTtlSeconds(),
+                config.idleGcSweepIntervalSeconds());
     }
 
     @Override
@@ -343,6 +353,11 @@ public class OrchestratorFunction implements Function<byte[], Void> {
 
     @Override
     public void close() throws Exception {
+        // Close the sweeper FIRST so it does not race with us tearing down the admin/registry
+        // beneath it.
+        if (idleFilterSweeper != null) {
+            try { idleFilterSweeper.close(); } catch (Exception e) { LOG.warn("Close sweeper", e); }
+        }
         if (controlProducers != null) {
             for (Producer<byte[]> p : controlProducers.values()) {
                 try { p.close(); } catch (Exception e) { LOG.warn("Close control producer", e); }
