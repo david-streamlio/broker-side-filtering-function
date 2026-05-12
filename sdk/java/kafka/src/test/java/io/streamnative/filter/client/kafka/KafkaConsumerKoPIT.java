@@ -10,10 +10,14 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.common.functions.FunctionConfig;
+import org.apache.pulsar.common.policies.data.FunctionStatus;
+import org.apache.pulsar.packages.management.core.common.PackageMetadata;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.slf4j.Logger;
@@ -38,39 +42,49 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Live end-to-end IT for the Kafka SDK. Spins up {@code streamnative/sn-platform:4.2.0.6} with
- * {@code kafkaEntryFormat=pulsar_non_batched} (per the spike that validated this path), deploys
- * the filter function, drives input via a native Pulsar producer (to avoid the KoP
- * input-direction bug already documented in {@code KoPFilterFunctionIT}), and asserts that a real
- * Kafka consumer attached via this SDK reads the filtered output with payload + header round-trip
- * + dynamic-selector hot-reload working as advertised.
+ * Live end-to-end IT for the Kafka SDK over KoP. Uses {@code streamnative/sn-platform:4.2.0.6}
+ * with {@code kafkaEntryFormat=pulsar_non_batched} (per the spike that validated this path).
+ * Deploys the orchestrator, registers a filter via the Kafka SDK, drives input via a native
+ * Pulsar producer (avoiding the KoP input-direction bug documented in {@code KoPFilterFunctionIT}),
+ * and asserts the Kafka consumer reads filtered output with payload + region-header round-trip
+ * and dynamic-selector hot-reload.
  *
- * <p>Requires Docker AND a pre-built {@code function/target/selector-filter-function-*.nar} — run
- * {@code mvn -pl functions/selector-filter package} first, or {@code mvn verify} at the
- * reactor root.
+ * <p>Requires Docker AND pre-built NARs in {@code functions/selector-filter/target/} and
+ * {@code functions/orchestrator/target/} — run {@code mvn verify} at the reactor root.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-@org.junit.jupiter.api.Disabled("Phase 2: SDK now publishes FilterRequest to an orchestrator. "
-        + "Phase 6 will rewire this IT to upload the filter NAR as a Pulsar package and deploy the "
-        + "orchestrator before running.")
+@org.junit.jupiter.api.Disabled(
+        "Phase 6 partial: scaffold rewired to deploy orchestrator + upload filter NAR as package. "
+                + "On streamnative/sn-platform:4.2.0.6 with KoP, the orchestrator deploys + reaches "
+                + "RUNNING (after switching to ThreadRuntime to avoid ProcessRuntime gRPC issues), "
+                + "but the spawned filter function does not reach RUNNING within 90s. The "
+                + "equivalent SessionIT + OrchestratorFunctionIT against the vanilla apache pulsar "
+                + "image work end-to-end, so the gap is sn-platform-specific (likely a function "
+                + "deployment / package-resolution interaction with the KSN protocol handler). "
+                + "Follow-up: enable verbose logging on the spawned filter, inspect its instance "
+                + "log inside the sn-platform container, and tune deployment if needed.")
 class KafkaConsumerKoPIT {
 
     private static final Logger LOG = LoggerFactory.getLogger(KafkaConsumerKoPIT.class);
 
-    private static final String IMAGE     = "streamnative/sn-platform:4.2.0.6";
-    private static final String NAR_DEST  = "/pulsar/selector-filter-function.nar";
+    private static final String IMAGE                 = "streamnative/sn-platform:4.2.0.6";
+    private static final String FILTER_NAR_DEST       = "/pulsar/selector-filter-function.nar";
+    private static final String ORCHESTRATOR_NAR_DEST = "/pulsar/selector-filter-orchestrator.nar";
 
-    // Distinct host port from KoPFilterFunctionIT (9092) and the spike IT (9094) so the three
-    // ITs can run in parallel without binding clashes.
+    // Distinct host port from KoPFilterFunctionIT (9092) and the spike IT (9094) so the ITs can
+    // run in parallel without binding clashes.
     private static final int KAFKA_HOST_PORT = 9095;
 
-    private static final String CONTROL_TOPIC = "persistent://public/default/queries";
-    private static final String INPUT_TOPIC   = "persistent://public/default/kafka-sdk-trades";
-    private static final String FN_TENANT     = "public";
-    private static final String FN_NS         = "default";
-    private static final String FN_NAME       = "selector-filter-kafka-it";
+    private static final String FN_TENANT          = "public";
+    private static final String FN_NAMESPACE       = "default";
+    private static final String ORCH_NAME          = "selector-filter-orchestrator-kop-it";
+    private static final String FILTER_PACKAGE_URL = "function://public/default/selector-filter@1.0";
+    private static final String SDK_INPUT_TOPIC    = "persistent://public/default/kop-filter-requests";
+    private static final String ORCH_STATE_TOPIC   = "persistent://public/default/kop-orchestrator-state";
+    private static final String INPUT_TOPIC        = "persistent://public/default/kafka-sdk-trades";
 
-    private static final Path NAR = findFunctionNar();
+    private static final Path FILTER_NAR       = findFilterNar();
+    private static final Path ORCHESTRATOR_NAR = findOrchestratorNar();
 
     /** Subclass that exposes {@code addFixedExposedPort} (protected on {@link GenericContainer}). */
     private static final class FixedPortPulsarContainer extends GenericContainer<FixedPortPulsarContainer> {
@@ -86,7 +100,8 @@ class KafkaConsumerKoPIT {
         try (FixedPortPulsarContainer pulsar = new FixedPortPulsarContainer(DockerImageName.parse(IMAGE))
                 .withExposedPorts(6650, 8080)
                 .bindHostPort(KAFKA_HOST_PORT, KAFKA_HOST_PORT)
-                .withCopyFileToContainer(MountableFile.forHostPath(NAR), NAR_DEST)
+                // No NAR-into-container copies needed — admin.packages().upload() and
+                // admin.functions().createFunction(...) accept host paths and stream them up.
                 .withEnv("PULSAR_PREFIX_messagingProtocols", "kafka")
                 .withEnv("PULSAR_PREFIX_kafkaListeners",
                         "PLAINTEXT://0.0.0.0:" + KAFKA_HOST_PORT)
@@ -100,6 +115,12 @@ class KafkaConsumerKoPIT {
                 .withEnv("PULSAR_PREFIX_allowAutoTopicCreation", "true")
                 .withEnv("PULSAR_PREFIX_allowAutoTopicCreationType", "non-partitioned")
                 .withEnv("PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled", "false")
+                // Use ThreadRuntime for function instances — ProcessRuntime requires a working
+                // subprocess JVM + gRPC and has classpath surprises with our NAR (which bundles
+                // pulsar-client-admin-original). ThreadRuntime runs the function inside the
+                // broker JVM, which works reliably for our scale and keeps logs visible.
+                .withEnv("PULSAR_PREFIX_functionRuntimeFactoryClassName",
+                        "org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory")
                 .withCommand("sh", "-c",
                         "bin/apply-config-from-env.py conf/standalone.conf "
                                 + "&& bin/pulsar standalone -nss")
@@ -109,20 +130,49 @@ class KafkaConsumerKoPIT {
             pulsar.withLogConsumer(new Slf4jLogConsumer(LOG).withPrefix("pulsar-broker"));
             pulsar.start();
 
-            String httpUrl  = "http://" + pulsar.getHost() + ":" + pulsar.getMappedPort(8080);
-            String pulsarUrl = "pulsar://" + pulsar.getHost() + ":" + pulsar.getMappedPort(6650);
+            String httpUrl       = "http://" + pulsar.getHost() + ":" + pulsar.getMappedPort(8080);
+            String pulsarUrl     = "pulsar://" + pulsar.getHost() + ":" + pulsar.getMappedPort(6650);
             String kafkaBootstrap = pulsar.getHost() + ":" + KAFKA_HOST_PORT;
 
             try (PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(pulsarUrl).build();
                  PulsarAdmin pulsarAdmin   = PulsarAdmin.builder().serviceHttpUrl(httpUrl).build()) {
 
-                pulsarAdmin.topics().createNonPartitionedTopic(CONTROL_TOPIC);
+                pulsarAdmin.topics().createNonPartitionedTopic(SDK_INPUT_TOPIC);
+                pulsarAdmin.topics().createNonPartitionedTopic(ORCH_STATE_TOPIC);
                 pulsarAdmin.topics().createNonPartitionedTopic(INPUT_TOPIC);
 
-                // Deploy function with INPUT_TOPIC as input. The Kafka SDK creates its own
-                // per-consumer private output topics dynamically via Session.
-                deployFunction(pulsarAdmin);
-                waitForFunctionRunning(pulsarAdmin);
+                // Upload selector-filter as a Pulsar package.
+                PackageMetadata pkg = PackageMetadata.builder()
+                        .description("selector-filter NAR for KafkaConsumerKoPIT")
+                        .contact("ci@localhost")
+                        .build();
+                pulsarAdmin.packages().upload(pkg, FILTER_PACKAGE_URL, FILTER_NAR.toString());
+                LOG.info("Uploaded filter NAR as package {}", FILTER_PACKAGE_URL);
+
+                // Deploy orchestrator.
+                FunctionConfig orchConfig = FunctionConfig.builder()
+                        .tenant(FN_TENANT)
+                        .namespace(FN_NAMESPACE)
+                        .name(ORCH_NAME)
+                        .runtime(FunctionConfig.Runtime.JAVA)
+                        .className("io.streamnative.filter.orchestrator.OrchestratorFunction")
+                        .inputs(List.of(SDK_INPUT_TOPIC))
+                        .subscriptionPosition(SubscriptionInitialPosition.Earliest)
+                        .processingGuarantees(FunctionConfig.ProcessingGuarantees.ATLEAST_ONCE)
+                        .parallelism(1)
+                        .userConfig(Map.of(
+                                "state-topic",            ORCH_STATE_TOPIC,
+                                "function-package-url",   FILTER_PACKAGE_URL,
+                                "function-tenant",        FN_TENANT,
+                                "function-namespace",     FN_NAMESPACE,
+                                "function-parallelism",   1,
+                                "apply-compaction",       true,
+                                "pulsar-admin-url",       "http://localhost:8080"))
+                        .build();
+                deployWithLeaderRetry(pulsarAdmin, orchConfig, ORCHESTRATOR_NAR.toString(),
+                        FN_TENANT, FN_NAMESPACE, ORCH_NAME);
+                waitForFunctionRunning(pulsarAdmin, FN_TENANT, FN_NAMESPACE, ORCH_NAME, 90_000L);
+                Thread.sleep(5_000);
 
                 try (Producer<byte[]> inputProducer = pulsarClient.newProducer(Schema.BYTES)
                                 .topic(INPUT_TOPIC)
@@ -131,9 +181,9 @@ class KafkaConsumerKoPIT {
                      Session session = Session.builder()
                                 .pulsarClient(pulsarClient)
                                 .pulsarAdmin(pulsarAdmin)
-                                .controlTopic(CONTROL_TOPIC)
-                                .privateTopicTenant("public")
-                                .privateTopicNamespace("default")    // matches kafkaNamespace=public/default
+                                .controlTopic(SDK_INPUT_TOPIC)
+                                .privateTopicTenant(FN_TENANT)
+                                .privateTopicNamespace(FN_NAMESPACE)
                                 .privateTopicPolicy(PrivateTopicPolicy.builder()
                                         .messageTtlSeconds(60)
                                         .retentionTimeMinutes(1)
@@ -159,7 +209,9 @@ class KafkaConsumerKoPIT {
 
                         FilterControl fc = (FilterControl) consumer;
                         String stableQueryId = fc.queryId();
-                        Thread.sleep(3_000); // function TableView listener picks up registration
+
+                        // Wait for the spawned filter function to reach RUNNING.
+                        waitForSpawnedFilter(pulsarAdmin);
 
                         // -------- Phase 1: selector A = "region = 'US'" --------
                         inputProducer.newMessage().key("AAPL").property("region", "US")
@@ -169,7 +221,7 @@ class KafkaConsumerKoPIT {
                         inputProducer.newMessage().key("BARC").property("region", "UK")
                                 .value("uk-1".getBytes(StandardCharsets.UTF_8)).send();
 
-                        DrainResult phaseA = drainUntilCountOrTimeout(consumer, 1, 30_000L);
+                        DrainResult phaseA = drainUntilCountOrTimeout(consumer, 1, 45_000L);
                         assertThat(phaseA.payloadByKey).containsEntry("AAPL", "us-1");
                         assertThat(phaseA.payloadByKey).as("phase A: only US should match").hasSize(1);
                         assertThat(phaseA.regionByKey)
@@ -184,7 +236,7 @@ class KafkaConsumerKoPIT {
                                 .as("queryId must be stable across setSelector")
                                 .isEqualTo(stableQueryId);
                         assertThat(fc.currentSelector()).isEqualTo("region = 'UK'");
-                        Thread.sleep(3_000); // function picks up the swap
+                        Thread.sleep(5_000); // orchestrator MODIFY → filter TableView hot-reload
 
                         // -------- Phase 2: selector B = "region = 'UK'" --------
                         inputProducer.newMessage().key("MSFT").property("region", "US")
@@ -205,16 +257,13 @@ class KafkaConsumerKoPIT {
         }
     }
 
+    // ---------------------------------------------------------------- Helpers
+
     private static final class DrainResult {
         final Map<String, String> payloadByKey = new HashMap<>();
         final Map<String, String> regionByKey  = new HashMap<>();
     }
 
-    /**
-     * Polls the consumer until at least {@code targetCount} messages have been gathered, or the
-     * deadline is reached. Captures the {@code region} header per key so the IT can assert the
-     * property→header round-trip.
-     */
     private DrainResult drainUntilCountOrTimeout(Consumer<String, byte[]> consumer,
                                                  int targetCount, long timeoutMs) {
         DrainResult out = new DrainResult();
@@ -222,8 +271,6 @@ class KafkaConsumerKoPIT {
         while (out.payloadByKey.size() < targetCount && System.currentTimeMillis() < deadline) {
             ingest(consumer.poll(Duration.ofMillis(500)), out);
         }
-        // One more poll to catch any straggler — if we already hit the count, this confirms we
-        // don't pick up extras (assertion on exact size will fail loudly otherwise).
         ingest(consumer.poll(Duration.ofSeconds(2)), out);
         return out;
     }
@@ -242,39 +289,37 @@ class KafkaConsumerKoPIT {
         }
     }
 
-    private void deployFunction(PulsarAdmin admin) throws Exception {
-        FunctionConfig config = FunctionConfig.builder()
-                .tenant(FN_TENANT)
-                .namespace(FN_NS)
-                .name(FN_NAME)
-                .runtime(FunctionConfig.Runtime.JAVA)
-                .className("io.streamnative.filter.SelectorFilterFunction")
-                .inputs(List.of(INPUT_TOPIC))
-                .subscriptionPosition(org.apache.pulsar.client.api.SubscriptionInitialPosition.Earliest)
-                .processingGuarantees(FunctionConfig.ProcessingGuarantees.MANUAL)
-                .retainKeyOrdering(true)
-                .forwardSourceMessageProperty(true)
-                .cleanupSubscription(true)
-                .parallelism(1)
-                .userConfig(Map.of("control-topic", (Object) CONTROL_TOPIC))
-                .build();
-        deployWithLeaderRetry(admin, config, NAR.toString());
+    private void waitForSpawnedFilter(PulsarAdmin admin) throws Exception {
+        long deadline = System.currentTimeMillis() + 90_000L;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                List<String> functions = admin.functions().getFunctions(FN_TENANT, FN_NAMESPACE);
+                for (String name : functions) {
+                    if (name.startsWith("selector-filter-") && !name.equals(ORCH_NAME)) {
+                        FunctionStatus status = admin.functions().getFunctionStatus(FN_TENANT, FN_NAMESPACE, name);
+                        if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) {
+                            LOG.info("Spawned filter function {} is RUNNING", name);
+                            Thread.sleep(3_000); // grace for filter's TableView to load QueryMessage
+                            return;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+            Thread.sleep(500);
+        }
+        throw new IllegalStateException("No spawned filter function reached RUNNING within 90s");
     }
 
-    /**
-     * Deploys with retry on "Leader not yet ready"; deletes the stale package between attempts
-     * (a failed attempt may have uploaded the package on the way to its 503 — the next try then
-     * fails with "Package metadata already exists" otherwise).
-     */
-    private static void deployWithLeaderRetry(PulsarAdmin admin, FunctionConfig config, String pkg) throws Exception {
-        String packageUrl = "function://" + FN_TENANT + "/" + FN_NS + "/" + FN_NAME + "@0";
+    private static void deployWithLeaderRetry(PulsarAdmin admin, FunctionConfig config, String pkg,
+                                              String tenant, String ns, String name) throws Exception {
+        String packageUrl = "function://" + tenant + "/" + ns + "/" + name + "@0";
         long deadline = System.currentTimeMillis() + 90_000L;
         Exception last = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 admin.functions().createFunction(config, pkg);
                 return;
-            } catch (org.apache.pulsar.client.admin.PulsarAdminException e) {
+            } catch (PulsarAdminException e) {
                 last = e;
                 String msg = e.getMessage() == null ? "" : e.getMessage();
                 if (msg.contains("Leader not yet ready") || msg.contains("Service Unavailable")
@@ -288,35 +333,45 @@ class KafkaConsumerKoPIT {
                 throw e;
             }
         }
-        throw new IllegalStateException("Function deploy timed out waiting for leader readiness", last);
+        throw new IllegalStateException("Function deploy timed out: " + name, last);
     }
 
-    private static void waitForFunctionRunning(PulsarAdmin admin) throws Exception {
-        long deadline = System.currentTimeMillis() + 90_000L;
+    private static void waitForFunctionRunning(PulsarAdmin admin, String tenant, String ns,
+                                               String name, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             try {
-                var status = admin.functions().getFunctionStatus(FN_TENANT, FN_NS, FN_NAME);
+                FunctionStatus status = admin.functions().getFunctionStatus(tenant, ns, name);
                 if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) {
-                    LOG.info("Function {} is RUNNING", FN_NAME);
-                    Thread.sleep(5_000); // grace for initialize() to prime the TableView
+                    LOG.info("Function {}/{}/{} is RUNNING", tenant, ns, name);
                     return;
                 }
             } catch (Exception ignored) {}
             Thread.sleep(500);
         }
-        throw new IllegalStateException("Function did not reach RUNNING within 90s");
+        throw new IllegalStateException("Function did not reach RUNNING within " + timeoutMs + " ms: " + name);
     }
 
-    private static Path findFunctionNar() {
-        // Module dir is sdk/java/kafka; NAR lives at functions/selector-filter/target/.
+    private static Path findFilterNar() {
         Path target = Paths.get(System.getProperty("user.dir"),
                 "..", "..", "..", "functions", "selector-filter", "target").normalize();
-        File[] files = target.toFile().listFiles((dir, name) ->
-                name.startsWith("selector-filter-function-") && name.endsWith(".nar"));
+        File[] files = target.toFile().listFiles((dir, n) ->
+                n.startsWith("selector-filter-function-") && n.endsWith(".nar"));
         if (files == null || files.length == 0) {
             throw new IllegalStateException(
-                    "NAR not found in " + target
-                            + ". Run 'mvn -pl functions/selector-filter package' first.");
+                    "Filter NAR not found in " + target + ". Run 'mvn -pl functions/selector-filter package' first.");
+        }
+        return files[0].toPath();
+    }
+
+    private static Path findOrchestratorNar() {
+        Path target = Paths.get(System.getProperty("user.dir"),
+                "..", "..", "..", "functions", "orchestrator", "target").normalize();
+        File[] files = target.toFile().listFiles((dir, n) ->
+                n.startsWith("selector-filter-orchestrator-") && n.endsWith(".nar"));
+        if (files == null || files.length == 0) {
+            throw new IllegalStateException(
+                    "Orchestrator NAR not found in " + target + ". Run 'mvn -pl functions/orchestrator package' first.");
         }
         return files[0].toPath();
     }
