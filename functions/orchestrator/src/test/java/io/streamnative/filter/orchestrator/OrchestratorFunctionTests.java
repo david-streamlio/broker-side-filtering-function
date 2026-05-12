@@ -633,6 +633,147 @@ class OrchestratorFunctionTests {
         assertThat(after.getActiveQueryIds()).containsExactly("q-1");
     }
 
+    // ---------------------------------------------------------------- HEARTBEAT (Phase 2)
+
+    @Test
+    void registerStampsLastSeenOnQueryEntry() throws Exception {
+        java.time.Clock fixed = java.time.Clock.fixed(
+                Instant.parse("2026-05-12T22:00:00Z"), java.time.ZoneOffset.UTC);
+        RegistryStore registry = new RegistryStore(stateView, stateProducer);
+        orchestrator = new OrchestratorFunction(config, registry, spawner, pulsarClient,
+                controlProducers, fixed);
+
+        String queryId = UUID.randomUUID().toString();
+        FilterRequest req = FilterRequest.register(
+                "persistent://public/in/trades",
+                "persistent://public/filtered/filtered-abc",
+                "region = 'US'", null, null, ClientType.PULSAR);
+
+        RegistryEntry spawned = new RegistryEntry(
+                "persistent://public/filtered/ctrl-x", "selector-filter-x",
+                null, null, ClientType.PULSAR, Instant.now().toString());
+        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        stubControlProducer(spawned.getControlTopic());
+
+        orchestrator.process(serialize(req), contextFor(queryId));
+
+        QueryEntry stored = readQueryEntry(queryId);
+        assertThat(stored.getLastSeen()).isEqualTo("2026-05-12T22:00:00Z");
+    }
+
+    @Test
+    void modifyTouchesLastSeen() throws Exception {
+        java.time.Clock fixed = java.time.Clock.fixed(
+                Instant.parse("2026-05-12T22:05:00Z"), java.time.ZoneOffset.UTC);
+        RegistryStore registry = new RegistryStore(stateView, stateProducer);
+        orchestrator = new OrchestratorFunction(config, registry, spawner, pulsarClient,
+                controlProducers, fixed);
+
+        String queryId = UUID.randomUUID().toString();
+        String controlTopic = "persistent://public/filtered/ctrl-x";
+        // Seed with an OLDER lastSeen — MODIFY must overwrite it.
+        seedQueryEntry(queryId, new QueryEntry(
+                "persistent://public/filtered/filtered-abc",
+                List.of(controlTopic),
+                List.of("persistent://public/in/trades"),
+                "2026-05-12T22:00:00Z"));
+        stubControlProducer(controlTopic);
+
+        orchestrator.process(serialize(FilterRequest.modify("region IN ('US','UK')")),
+                contextFor(queryId));
+
+        QueryEntry stored = readQueryEntry(queryId);
+        assertThat(stored.getLastSeen()).isEqualTo("2026-05-12T22:05:00Z");
+    }
+
+    @Test
+    void heartbeatTouchesLastSeenOnAllNamedQueryEntries() throws Exception {
+        java.time.Clock fixed = java.time.Clock.fixed(
+                Instant.parse("2026-05-12T22:10:00Z"), java.time.ZoneOffset.UTC);
+        RegistryStore registry = new RegistryStore(stateView, stateProducer);
+        orchestrator = new OrchestratorFunction(config, registry, spawner, pulsarClient,
+                controlProducers, fixed);
+
+        // Seed three q: entries with older lastSeens.
+        seedQueryEntry("q-1", new QueryEntry(
+                "persistent://public/filtered/filtered-1",
+                List.of("persistent://public/filtered/ctrl-1"),
+                List.of("persistent://public/in/a"),
+                "2026-05-12T22:00:00Z"));
+        seedQueryEntry("q-2", new QueryEntry(
+                "persistent://public/filtered/filtered-2",
+                List.of("persistent://public/filtered/ctrl-2"),
+                List.of("persistent://public/in/b"),
+                "2026-05-12T21:59:00Z"));
+        seedQueryEntry("q-3", new QueryEntry(
+                "persistent://public/filtered/filtered-3",
+                List.of("persistent://public/filtered/ctrl-3"),
+                List.of("persistent://public/in/c"),
+                "2026-05-12T21:58:00Z"));
+
+        // Heartbeat covers q-1 and q-3 but NOT q-2.
+        FilterRequest hb = FilterRequest.heartbeat(List.of("q-1", "q-3"));
+        // The orchestrator does not require a meaningful message key for HEARTBEAT —
+        // any non-blank value is fine, and a blank/null value is also accepted.
+        orchestrator.process(serialize(hb), contextFor("heartbeat-key"));
+
+        assertThat(readQueryEntry("q-1").getLastSeen()).isEqualTo("2026-05-12T22:10:00Z");
+        assertThat(readQueryEntry("q-3").getLastSeen()).isEqualTo("2026-05-12T22:10:00Z");
+        // q-2 was NOT named in the heartbeat → its lastSeen is preserved.
+        assertThat(readQueryEntry("q-2").getLastSeen()).isEqualTo("2026-05-12T21:59:00Z");
+
+        // Heartbeat publishes nothing on the control topics.
+        assertThat(controlPublishes).isEmpty();
+    }
+
+    @Test
+    void heartbeatForUnknownQueryIdIsSilentlyIgnored() throws Exception {
+        java.time.Clock fixed = java.time.Clock.fixed(
+                Instant.parse("2026-05-12T22:15:00Z"), java.time.ZoneOffset.UTC);
+        RegistryStore registry = new RegistryStore(stateView, stateProducer);
+        orchestrator = new OrchestratorFunction(config, registry, spawner, pulsarClient,
+                controlProducers, fixed);
+
+        seedQueryEntry("q-known", new QueryEntry(
+                "persistent://public/filtered/filtered-1",
+                List.of("persistent://public/filtered/ctrl-1"),
+                List.of("persistent://public/in/a"),
+                "2026-05-12T22:00:00Z"));
+
+        // Mix of known + unknown queryIds in a single heartbeat — must not throw and must touch
+        // the known one.
+        FilterRequest hb = FilterRequest.heartbeat(List.of("q-known", "q-unknown", "q-also-unknown"));
+        orchestrator.process(serialize(hb), contextFor("heartbeat-key"));
+
+        assertThat(readQueryEntry("q-known").getLastSeen()).isEqualTo("2026-05-12T22:15:00Z");
+        assertThat(readQueryEntry("q-unknown")).isNull();
+        assertThat(readQueryEntry("q-also-unknown")).isNull();
+    }
+
+    @Test
+    void heartbeatAcceptsBlankMessageKey() throws Exception {
+        // HEARTBEAT carries queryIds in the body; the key on the wire is arbitrary. Other
+        // commands still require a non-blank key.
+        Context ctx = mock(Context.class);
+        @SuppressWarnings("unchecked")
+        Record<byte[]> rec = (Record<byte[]>) mock(Record.class);
+        when(rec.getKey()).thenReturn(Optional.empty());
+        when(ctx.getCurrentRecord()).thenAnswer(inv -> rec);
+
+        seedQueryEntry("q-1", new QueryEntry(
+                "persistent://public/filtered/filtered-1",
+                List.of("persistent://public/filtered/ctrl-1"),
+                List.of("persistent://public/in/a"),
+                "2026-05-12T22:00:00Z"));
+
+        orchestrator.process(
+                serialize(FilterRequest.heartbeat(List.of("q-1"))),
+                ctx);
+
+        // No exception. q-1's lastSeen was touched.
+        assertThat(readQueryEntry("q-1").getLastSeen()).isNotEqualTo("2026-05-12T22:00:00Z");
+    }
+
     @Test
     void multiInputUnregisterDecrementsEachRegistryEntry() throws Exception {
         java.time.Clock fixed = java.time.Clock.fixed(

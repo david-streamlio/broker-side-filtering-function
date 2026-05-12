@@ -97,4 +97,60 @@ class QueryEntryTests {
         mutableKeys.add("persistent://public/in/b");
         assertThat(q.getRegistryKeys()).containsExactly("persistent://public/in/a");
     }
+
+    // ---------------------------------------------------------------- lastSeen / heartbeat
+
+    @Test
+    void withLastSeenStampsTimestamp() {
+        QueryEntry q = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/orchestrator/ctrl-a"),
+                List.of("persistent://public/in/a"));
+        assertThat(q.getLastSeen()).isNull();
+
+        java.time.Instant now = java.time.Instant.parse("2026-05-12T22:00:00Z");
+        QueryEntry stamped = q.withLastSeen(now);
+        assertThat(stamped.getLastSeen()).isEqualTo("2026-05-12T22:00:00Z");
+        // Other fields preserved.
+        assertThat(stamped.getOutputTopic()).isEqualTo(q.getOutputTopic());
+        assertThat(stamped.getControlTopics()).isEqualTo(q.getControlTopics());
+        assertThat(stamped.getRegistryKeys()).isEqualTo(q.getRegistryKeys());
+    }
+
+    @Test
+    void withLastSeenIsIndependentOfPriorLastSeen() {
+        QueryEntry q = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/orchestrator/ctrl-a"),
+                List.of("persistent://public/in/a"),
+                "2026-05-12T22:00:00Z");
+        QueryEntry refreshed = q.withLastSeen(java.time.Instant.parse("2026-05-12T22:00:30Z"));
+        assertThat(refreshed.getLastSeen()).isEqualTo("2026-05-12T22:00:30Z");
+    }
+
+    @Test
+    void serdeRoundTripWithLastSeen() throws Exception {
+        QueryEntry q = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/orchestrator/ctrl-a"),
+                List.of("persistent://public/in/a"),
+                "2026-05-12T22:00:00Z");
+        byte[] payload = MAPPER.writeValueAsBytes(q);
+        QueryEntry parsed = MAPPER.readValue(payload, QueryEntry.class);
+        assertThat(parsed).isEqualTo(q);
+        assertThat(parsed.getLastSeen()).isEqualTo("2026-05-12T22:00:00Z");
+    }
+
+    @Test
+    void legacyJsonWithoutLastSeenDeserializesNull() throws Exception {
+        String json = """
+                {
+                  "outputTopic": "persistent://public/out/x",
+                  "controlTopics": ["persistent://public/orchestrator/ctrl-a"],
+                  "registryKeys":  ["persistent://public/in/a"]
+                }
+                """;
+        QueryEntry parsed = MAPPER.readValue(json, QueryEntry.class);
+        assertThat(parsed.getLastSeen()).isNull();
+    }
 }

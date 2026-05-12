@@ -145,11 +145,6 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         }
 
         String queryId = ctx.getCurrentRecord().getKey().orElse(null);
-        if (queryId == null || queryId.isBlank()) {
-            LOG.warn("FilterRequest missing message key (queryId); rejecting");
-            ctx.recordMetric("orchestrator.requests.rejected_validation", 1);
-            return null;
-        }
 
         FilterRequest req;
         try {
@@ -161,10 +156,19 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             return null; // permanent reject — ack
         }
 
+        // HEARTBEAT carries the queryId list in the body; the message key is arbitrary. Every
+        // other command keys the message by the single queryId it operates on.
+        if (req.getCommand() != Command.HEARTBEAT && (queryId == null || queryId.isBlank())) {
+            LOG.warn("FilterRequest missing message key (queryId); rejecting");
+            ctx.recordMetric("orchestrator.requests.rejected_validation", 1);
+            return null;
+        }
+
         switch (req.getCommand()) {
             case REGISTER   -> handleRegister(queryId, req, ctx);
             case MODIFY     -> handleModify(queryId, req, ctx);
             case UNREGISTER -> handleUnregister(queryId, ctx);
+            case HEARTBEAT  -> handleHeartbeat(req, ctx);
         }
         return null;
     }
@@ -239,7 +243,8 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         }
 
         registry.putQueryEntry(queryId, new QueryEntry(
-                req.getOutputTopic(), publishedControlTopics, publishedRegistryKeys));
+                req.getOutputTopic(), publishedControlTopics, publishedRegistryKeys,
+                Instant.now(clock).toString()));
         ctx.recordMetric("orchestrator.requests.accepted", 1);
         LOG.info("REGISTER queryId={} outputTopic={} controlTopics={}",
                 queryId, req.getOutputTopic(), publishedControlTopics);
@@ -259,9 +264,37 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         for (String controlTopic : q.getControlTopics()) {
             publishQuery(controlTopic, queryId, selector, q.getOutputTopic());
         }
+        // Touch lastSeen — a MODIFY counts as liveness signal just like a heartbeat.
+        registry.putQueryEntry(queryId, q.withLastSeen(Instant.now(clock)));
         ctx.recordMetric("orchestrator.requests.accepted", 1);
         LOG.info("MODIFY queryId={} selector=[{}] fanout={}",
                 queryId, selector, q.getControlTopics().size());
+    }
+
+    // ---------------------------------------------------------------- UNREGISTER
+
+    // ---------------------------------------------------------------- HEARTBEAT
+
+    private void handleHeartbeat(FilterRequest req, Context ctx) throws Exception {
+        ctx.recordMetric("orchestrator.heartbeats.received", 1);
+        Instant now = Instant.now(clock);
+        int touched = 0;
+        int unknown = 0;
+        for (String queryId : req.getQueryIds()) {
+            QueryEntry q = registry.getQueryEntry(queryId);
+            if (q == null) {
+                // Already tombstoned (probably) — the SDK will drop this queryId from its live
+                // set on the next heartbeat tick. Silent no-op.
+                unknown++;
+                continue;
+            }
+            registry.putQueryEntry(queryId, q.withLastSeen(now));
+            touched++;
+        }
+        ctx.recordMetric("orchestrator.heartbeats.touched", touched);
+        ctx.recordMetric("orchestrator.heartbeats.unknown", unknown);
+        LOG.debug("HEARTBEAT touched={} unknown={} (total={})",
+                touched, unknown, req.getQueryIds().size());
     }
 
     // ---------------------------------------------------------------- UNREGISTER
