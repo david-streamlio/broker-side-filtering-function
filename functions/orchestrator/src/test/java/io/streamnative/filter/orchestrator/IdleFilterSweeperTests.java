@@ -118,6 +118,11 @@ class IdleFilterSweeperTests {
                 Clock.fixed(now, ZoneOffset.UTC));
     }
 
+    private IdleFilterSweeper sweeperAt(Instant now, java.util.function.Consumer<String> evict) {
+        return new IdleFilterSweeper(registry, admin, config,
+                Clock.fixed(now, ZoneOffset.UTC), evict);
+    }
+
     private static PulsarAdminException.NotFoundException notFound() {
         return new PulsarAdminException.NotFoundException(
                 new RuntimeException("not found"), "not found", 404);
@@ -383,6 +388,72 @@ class IdleFilterSweeperTests {
         assertThat(stats.deleted).isEqualTo(0);
         verify(functions, never()).deleteFunction(any(), any(), any());
     }
+
+    // ---------------------------------------------------------------- beforeTopicDelete callback
+
+    @Test
+    void beforeTopicDeleteCallbackFiresBetweenFunctionAndTopicDeletes() throws Exception {
+        Instant idleSince = Instant.parse("2026-05-12T20:00:00Z");
+        Instant now       = idleSince.plusSeconds(120);
+        RegistryEntry idle = baseEntry("trades")
+                .withQueryId("q-1").withoutQueryId("q-1", idleSince);
+        seedT("in/trades", idle);
+
+        // Record the order of side effects across deleteFunction → callback → deleteTopic.
+        java.util.List<String> events = new java.util.ArrayList<>();
+        doAnswer(inv -> { events.add("deleteFunction:" + inv.getArgument(2)); return null; })
+                .when(functions).deleteFunction(anyString(), anyString(), anyString());
+        doAnswer(inv -> { events.add("deleteTopic:" + inv.getArgument(0)); return null; })
+                .when(topics).delete(anyString(), anyBoolean());
+
+        IdleFilterSweeper.SweepStats stats = sweeperAt(now,
+                ct -> events.add("evict:" + ct)).sweep();
+
+        assertThat(stats.deleted).isEqualTo(1);
+        assertThat(events).containsExactly(
+                "deleteFunction:selector-filter-trades",
+                "evict:persistent://public/filtered/ctrl-trades",
+                "deleteTopic:persistent://public/filtered/ctrl-trades");
+    }
+
+    @Test
+    void evictCallbackExceptionDoesNotBlockTopicDelete() throws Exception {
+        Instant idleSince = Instant.parse("2026-05-12T20:00:00Z");
+        Instant now       = idleSince.plusSeconds(120);
+        RegistryEntry idle = baseEntry("trades")
+                .withQueryId("q-1").withoutQueryId("q-1", idleSince);
+        seedT("in/trades", idle);
+
+        IdleFilterSweeper.SweepStats stats = sweeperAt(now, ct -> {
+            throw new RuntimeException("simulated producer close failure");
+        }).sweep();
+
+        // Even though the callback threw, the topic delete still proceeded — the t: entry
+        // retracted, GC counted as deleted.
+        assertThat(stats.deleted).isEqualTo(1);
+        verify(topics).delete(eq("persistent://public/filtered/ctrl-trades"), eq(true));
+        assertThat(storage).doesNotContainKey(RegistryStore.TOPIC_KEY_PREFIX + "in/trades");
+    }
+
+    @Test
+    void evictCallbackNotInvokedWhenFunctionDeleteFails() throws Exception {
+        Instant idleSince = Instant.parse("2026-05-12T20:00:00Z");
+        Instant now       = idleSince.plusSeconds(120);
+        RegistryEntry idle = baseEntry("trades")
+                .withQueryId("q-1").withoutQueryId("q-1", idleSince);
+        seedT("in/trades", idle);
+
+        doThrow(adminError(403, "Forbidden")).when(functions)
+                .deleteFunction(FN_TENANT, FN_NAMESPACE, "selector-filter-trades");
+
+        boolean[] called = {false};
+        IdleFilterSweeper.SweepStats stats = sweeperAt(now, ct -> called[0] = true).sweep();
+
+        assertThat(stats.errors).isEqualTo(1);
+        assertThat(called[0]).as("evict callback must not fire if function delete failed").isFalse();
+    }
+
+    // ---------------------------------------------------------------- defensive
 
     @Test
     void qPrefixEntriesAreIgnoredByIteration() throws Exception {

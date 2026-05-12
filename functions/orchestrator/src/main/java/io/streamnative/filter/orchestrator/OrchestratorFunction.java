@@ -115,7 +115,8 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         this.spawner = new DefaultFilterFunctionSpawner(ownedAdmin);
 
         if (config.idleGcEnabled()) {
-            this.idleFilterSweeper = new IdleFilterSweeper(registry, ownedAdmin, config, clock);
+            this.idleFilterSweeper = new IdleFilterSweeper(registry, ownedAdmin, config, clock,
+                    this::evictControlProducer);
             this.idleFilterSweeper.start();
         }
 
@@ -345,6 +346,20 @@ public class OrchestratorFunction implements Function<byte[], Void> {
                 throw new IllegalStateException("Failed to create producer for control topic " + t, e);
             }
         });
+    }
+
+    /**
+     * Called by {@link IdleFilterSweeper} just before it deletes a control topic. We must close
+     * and remove our cached producer so its reconnect loop does not resurrect the topic via
+     * namespace auto-create the moment the delete lands.
+     */
+    private void evictControlProducer(String controlTopic) {
+        Producer<byte[]> p = controlProducers.remove(controlTopic);
+        if (p != null) {
+            try { p.close(); } catch (Exception e) {
+                LOG.warn("Close control producer for {} during GC: {}", controlTopic, e.getMessage());
+            }
+        }
     }
 
     private static String normalizedSelector(String userSelector) {

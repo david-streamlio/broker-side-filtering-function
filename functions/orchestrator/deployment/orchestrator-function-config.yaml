@@ -46,6 +46,22 @@ userConfig:
   # available when the function worker is configured with pulsarFunctionsCluster, which many
   # deployments don't enable by default.
   pulsar-admin-url: http://broker:8080
+
+  # ----------------------------------------------------------------------------
+  # Idle filter GC (opt-in)
+  # ----------------------------------------------------------------------------
+  # When enabled, the orchestrator runs a background sweeper that deletes filter functions
+  # whose queryIds have all UNREGISTERed for >= idle-gc-ttl-seconds. See the "Idle filter GC"
+  # section in README.md for the full semantics and limits.
+  #
+  # Permissions when enabled: the orchestrator principal needs `delete` permission on the
+  # per-function control topics under function-control-topic-tenant/namespace, in addition to
+  # the standard functions-admin role. Without it, GC attempts log WARN and the t: entry
+  # survives across sweep ticks.
+  #
+  # idle-gc-enabled: false                       # default: false (opt-in)
+  # idle-gc-ttl-seconds: 300                     # default: 300 (5 minutes)
+  # idle-gc-sweep-interval-seconds: 30           # default: 30
 resources:
   cpu: 1.0
   ram: 1073741824   # 1GB

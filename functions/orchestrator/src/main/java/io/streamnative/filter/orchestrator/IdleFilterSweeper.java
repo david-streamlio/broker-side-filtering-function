@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Periodic GC for idle filter functions. A filter function is "idle" when no queryIds reference it
@@ -42,15 +43,30 @@ final class IdleFilterSweeper implements AutoCloseable {
     private final PulsarAdmin admin;
     private final OrchestratorConfig config;
     private final Clock clock;
+    /**
+     * Invoked with a control topic FQN just before the sweeper deletes the topic. The
+     * orchestrator uses this to close + evict its cached {@link org.apache.pulsar.client.api.Producer}
+     * on that topic; otherwise the producer's reconnect loop races with the topic delete and
+     * resurrects the topic via auto-create (the SDK's private-output namespace requires
+     * {@code allowAutoTopicCreation=true}, so we cannot disable it broker-side).
+     */
+    private final Consumer<String> beforeTopicDelete;
 
     private ScheduledExecutorService scheduler;
 
     IdleFilterSweeper(RegistryStore registry, PulsarAdmin admin,
                       OrchestratorConfig config, Clock clock) {
-        this.registry = registry;
-        this.admin    = admin;
-        this.config   = config;
-        this.clock    = clock;
+        this(registry, admin, config, clock, t -> {});
+    }
+
+    IdleFilterSweeper(RegistryStore registry, PulsarAdmin admin,
+                      OrchestratorConfig config, Clock clock,
+                      Consumer<String> beforeTopicDelete) {
+        this.registry          = registry;
+        this.admin             = admin;
+        this.config            = config;
+        this.clock             = clock;
+        this.beforeTopicDelete = beforeTopicDelete;
     }
 
     /**
@@ -133,6 +149,15 @@ final class IdleFilterSweeper implements AutoCloseable {
             if (!deleteFunctionSafely(current)) {
                 stats.errors++;
                 continue;
+            }
+            // BEFORE deleting the topic, evict the orchestrator's own cached producer on it.
+            // If we skip this, the producer's reconnect loop will resurrect the topic via
+            // auto-create the moment we kill it.
+            try {
+                beforeTopicDelete.accept(current.getControlTopic());
+            } catch (Exception e) {
+                LOG.warn("beforeTopicDelete callback threw for {}: {}; proceeding with topic delete",
+                        current.getControlTopic(), e.getMessage());
             }
             if (!deleteControlTopicSafely(current)) {
                 stats.errors++;

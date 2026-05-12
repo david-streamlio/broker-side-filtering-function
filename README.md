@@ -290,6 +290,9 @@ for a fully-annotated sample. Key `userConfig` knobs:
 | `function-parallelism`     | no | Parallelism applied to each spawned filter function. Default 1. |
 | `apply-compaction`         | no | Whether the orchestrator programmatically sets `compactionThreshold` on each per-function control topic. Default `true`. |
 | `compaction-threshold-bytes` | no | Compaction threshold to apply when `apply-compaction=true`. Default 10 MB. |
+| `idle-gc-enabled`          | no | Master switch for idle-filter GC. When `true`, the orchestrator runs a background sweeper that deletes filter functions whose queryIds have all UNREGISTERed for at least `idle-gc-ttl-seconds`. Default `false` (opt-in). See [Idle filter GC](#idle-filter-gc) below. |
+| `idle-gc-ttl-seconds`      | no | Continuous-idle time before a filter function becomes deletion-eligible. Default 300 (5 minutes). Only applies when `idle-gc-enabled=true`. |
+| `idle-gc-sweep-interval-seconds` | no | How often the sweeper evaluates registry entries. Default 30 seconds. Only applies when `idle-gc-enabled=true`. |
 
 ### Deployment prerequisites
 
@@ -639,6 +642,60 @@ downstream consumer or extend the function.
 Cost per message is `O(N)` in the active query count `N`. For `N` in the low thousands this is
 fine. If `N` grows much beyond that, consider sharding queries across multiple function instances
 with different control topics.
+
+### Idle filter GC
+
+On a long-running cluster, spawned filter functions accumulate — once a queryId has UNREGISTERed,
+the orchestrator does not delete the filter by default. Set `idle-gc-enabled: true` to turn on a
+background sweeper that deletes idle filter functions.
+
+**Eligibility.** A filter function is deletion-eligible iff all four of these hold for its registry
+entry:
+
+1. `activeQueryIds` is present on the entry (i.e. the entry was written by the GC-aware orchestrator;
+   pre-1.0 entries from older releases are skipped until they churn).
+2. `activeQueryIds` is empty — every queryId that touched this filter has UNREGISTERed.
+3. `idleSince` is set (stamped by the last UNREGISTER when the set became empty).
+4. `now - idleSince >= idleGcTtlSeconds`.
+
+Multi-REGISTER on the same input topic adds each queryId to the set; the filter only becomes
+deletable after **all** of them UNREGISTER.
+
+**What gets deleted, in order:**
+
+1. The filter function instance (`admin.functions().deleteFunction(...)`). Closing the function
+   cleans up its subscription on the input topic automatically — the spawned filter is built with
+   `cleanupSubscription=true`.
+2. The per-function control topic (`admin.topics().delete(controlTopic, force=true)`). `force=true`
+   drops the compacted ledger and any lingering subscriptions.
+3. The `t:` registry entry — a null tombstone on the state topic.
+
+Each step tolerates `NotFound`, so a half-completed sequence (e.g. orchestrator crashed mid-GC)
+self-heals on the next sweep tick.
+
+**What does NOT get deleted:**
+
+- **The SDK's private "filtered output topic"** (`persistent://.../filtered-<uuid>`). The SDK
+  created it (`Session.createAndConfigurePrivateTopic`) and the SDK deletes it on
+  `Session.retirePrivateQuery`. If your SDK consumer never calls `close()`, this orphans — Pulsar's
+  `brokerDeleteInactiveTopics` (combined with `PrivateTopicPolicy.inactiveDeleteSeconds`) is the
+  fallback reclaim path.
+- **The user's input topic.** Never touched.
+
+**Permissions.** The orchestrator's runtime principal needs more than functions-admin when GC is
+on — it also needs `delete` permission on the per-function control topics under
+`function-control-topic-tenant/namespace`. If the principal lacks this, you will see
+`WARN deleteFunction ... failed: Forbidden` in the orchestrator logs and the `t:` entry will
+survive across sweep ticks.
+
+**Limits of v1 GC.** The sweeper only detects "all queryIds explicitly UNREGISTERed." It does
+**not** detect SDK consumers that died without calling `close()` — those queryIds remain in
+`activeQueryIds` indefinitely and pin the filter alive. Closing this gap requires a heartbeat
+mechanism on the SDK→orchestrator channel; that is planned for a future release.
+
+**Tuning.** Default `ttl=300s, sweep=30s` is conservative — a consumer that disconnects and
+reconnects within 5 minutes does not lose its filter function. Tighter settings (e.g. `ttl=60s,
+sweep=10s`) reclaim resources faster at the cost of churn on transient disconnects.
 
 ## Project layout
 
