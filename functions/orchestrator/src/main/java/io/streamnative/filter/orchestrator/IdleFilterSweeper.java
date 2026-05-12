@@ -40,6 +40,18 @@ final class IdleFilterSweeper implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(IdleFilterSweeper.class);
 
+    // Canonical metric names emitted on every relevant sweeper action. These follow the
+    // orchestrator.<area>.<event> convention used by OrchestratorFunction.process(); operators
+    // can read them via `pulsar-admin functions stats`. Dashboards depend on the exact strings,
+    // so changing them is a breaking change.
+    static final String M_GC_CANDIDATES_EVALUATED    = "orchestrator.gc.candidates_evaluated";
+    static final String M_GC_FUNCTIONS_DELETED       = "orchestrator.gc.functions_deleted";
+    static final String M_GC_SKIPPED_RECENT_REGISTER = "orchestrator.gc.skipped_recent_register";
+    static final String M_GC_ERRORS                  = "orchestrator.gc.errors";
+    static final String M_HEARTBEATS_SYNTHESIZED     = "orchestrator.heartbeats.synthesized";
+    static final String M_HEARTBEATS_SKIPPED_RECENT  = "orchestrator.heartbeats.skipped_recent";
+    static final String M_HEARTBEATS_ERRORS          = "orchestrator.heartbeats.errors";
+
     private final RegistryStore registry;
     private final PulsarAdmin admin;
     private final OrchestratorConfig config;
@@ -60,30 +72,46 @@ final class IdleFilterSweeper implements AutoCloseable {
      * dead-consumer detection (e.g. unit tests focused only on t: GC) are unaffected.
      */
     private final ThrowingBiConsumer<String, QueryEntry> synthesizeUnregister;
+    /**
+     * Invoked with {@code (metricName, 1.0)} on every relevant sweeper action so the orchestrator
+     * can surface counters via {@code Context.recordMetric}. Default no-op for tests that don't
+     * care about metrics. The callback runs on the sweeper scheduler thread, not on a
+     * {@code process()} invocation thread — see Phase 2 wiring for the deferred-flush rationale.
+     */
+    private final BiConsumer<String, Double> metrics;
 
     private ScheduledExecutorService scheduler;
 
     IdleFilterSweeper(RegistryStore registry, PulsarAdmin admin,
                       OrchestratorConfig config, Clock clock) {
-        this(registry, admin, config, clock, t -> {}, (qid, q) -> {});
+        this(registry, admin, config, clock, t -> {}, (qid, q) -> {}, (n, v) -> {});
     }
 
     IdleFilterSweeper(RegistryStore registry, PulsarAdmin admin,
                       OrchestratorConfig config, Clock clock,
                       Consumer<String> beforeTopicDelete) {
-        this(registry, admin, config, clock, beforeTopicDelete, (qid, q) -> {});
+        this(registry, admin, config, clock, beforeTopicDelete, (qid, q) -> {}, (n, v) -> {});
     }
 
     IdleFilterSweeper(RegistryStore registry, PulsarAdmin admin,
                       OrchestratorConfig config, Clock clock,
                       Consumer<String> beforeTopicDelete,
                       ThrowingBiConsumer<String, QueryEntry> synthesizeUnregister) {
+        this(registry, admin, config, clock, beforeTopicDelete, synthesizeUnregister, (n, v) -> {});
+    }
+
+    IdleFilterSweeper(RegistryStore registry, PulsarAdmin admin,
+                      OrchestratorConfig config, Clock clock,
+                      Consumer<String> beforeTopicDelete,
+                      ThrowingBiConsumer<String, QueryEntry> synthesizeUnregister,
+                      BiConsumer<String, Double> metrics) {
         this.registry             = registry;
         this.admin                = admin;
         this.config               = config;
         this.clock                = clock;
         this.beforeTopicDelete    = beforeTopicDelete;
         this.synthesizeUnregister = synthesizeUnregister;
+        this.metrics              = metrics;
     }
 
     /** {@link BiConsumer} that can throw checked exceptions (performUnregister can). */
@@ -166,17 +194,20 @@ final class IdleFilterSweeper implements AutoCloseable {
                 LOG.debug("Skipping synthesize-unregister for queryId={}: heartbeat arrived "
                         + "since snapshot", c.queryId);
                 stats.heartbeatsSkippedRecent++;
+                metrics.accept(M_HEARTBEATS_SKIPPED_RECENT, 1.0);
                 continue;
             }
             try {
                 synthesizeUnregister.accept(c.queryId, current);
                 stats.heartbeatsSynthesized++;
+                metrics.accept(M_HEARTBEATS_SYNTHESIZED, 1.0);
                 LOG.info("Synthesized UNREGISTER for stale queryId={} (lastSeen={} now={})",
                         c.queryId, current.getLastSeen(), now);
             } catch (Exception e) {
                 LOG.warn("synthesizeUnregister failed for queryId={}: {}. Next tick will retry.",
                         c.queryId, e.getMessage());
                 stats.heartbeatsErrors++;
+                metrics.accept(M_HEARTBEATS_ERRORS, 1.0);
             }
         }
 
@@ -186,6 +217,7 @@ final class IdleFilterSweeper implements AutoCloseable {
         List<String> candidateKeys = new ArrayList<>();
         registry.forEachInputTopicEntry((key, entry) -> {
             stats.evaluated++;
+            metrics.accept(M_GC_CANDIDATES_EVALUATED, 1.0);
             if (isGcEligible(entry, now, ttl)) {
                 candidateKeys.add(key);
             }
@@ -197,6 +229,7 @@ final class IdleFilterSweeper implements AutoCloseable {
             if (!isGcEligible(current, now, ttl)) {
                 LOG.debug("Skipping GC for key=[{}]: state changed since snapshot", key);
                 stats.skippedRecentRegister++;
+                metrics.accept(M_GC_SKIPPED_RECENT_REGISTER, 1.0);
                 continue;
             }
 
@@ -204,6 +237,7 @@ final class IdleFilterSweeper implements AutoCloseable {
             // deleting the topic next won't crash a live TableView producer inside the filter.
             if (!deleteFunctionSafely(current)) {
                 stats.errors++;
+                metrics.accept(M_GC_ERRORS, 1.0);
                 continue;
             }
             // BEFORE deleting the topic, evict the orchestrator's own cached producer on it.
@@ -217,6 +251,7 @@ final class IdleFilterSweeper implements AutoCloseable {
             }
             if (!deleteControlTopicSafely(current)) {
                 stats.errors++;
+                metrics.accept(M_GC_ERRORS, 1.0);
                 continue;
             }
             try {
@@ -225,9 +260,11 @@ final class IdleFilterSweeper implements AutoCloseable {
                 LOG.warn("GC near-complete for key=[{}]: function+topic deleted but t: retract "
                         + "failed: {}. Next sweep will retry.", key, e.getMessage());
                 stats.errors++;
+                metrics.accept(M_GC_ERRORS, 1.0);
                 continue;
             }
             stats.deleted++;
+            metrics.accept(M_GC_FUNCTIONS_DELETED, 1.0);
             LOG.info("GCed idle filter function name={} key=[{}] controlTopic={} idleSince={}",
                     current.getFilterFunctionName(), key, current.getControlTopic(),
                     current.getIdleSince());

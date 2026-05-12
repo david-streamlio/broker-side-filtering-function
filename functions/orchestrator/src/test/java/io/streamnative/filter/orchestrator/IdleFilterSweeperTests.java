@@ -636,4 +636,186 @@ class IdleFilterSweeperTests {
         assertThat(stats.heartbeatsErrors).isEqualTo(1);
         assertThat(synthesized).containsExactly("q-good");
     }
+
+    // ---------------------------------------------------------------- Metric callback
+
+    /** Builds a sweeper at {@code now} whose every per-stat increment fires into {@code sink}. */
+    private IdleFilterSweeper meteredSweeperAt(Instant now, Map<String, Double> sink) {
+        return new IdleFilterSweeper(registry, admin, config,
+                Clock.fixed(now, ZoneOffset.UTC),
+                ct -> {},
+                (qid, q) -> {},
+                (name, value) -> sink.merge(name, value, Double::sum));
+    }
+
+    @Test
+    void metricCallbackFiresForEvaluatedAndDeletedOnSuccessfulGc() throws Exception {
+        Instant idleSince = Instant.parse("2026-05-12T20:00:00Z");
+        Instant now       = idleSince.plusSeconds(120);
+        RegistryEntry idle = baseEntry("trades")
+                .withQueryId("q-1").withoutQueryId("q-1", idleSince);
+        seedT("in/trades", idle);
+
+        Map<String, Double> sink = new HashMap<>();
+        meteredSweeperAt(now, sink).sweep();
+
+        assertThat(sink)
+                .containsEntry("orchestrator.gc.candidates_evaluated", 1.0)
+                .containsEntry("orchestrator.gc.functions_deleted", 1.0)
+                .doesNotContainKey("orchestrator.gc.skipped_recent_register")
+                .doesNotContainKey("orchestrator.gc.errors");
+    }
+
+    @Test
+    void metricCallbackFiresForSkippedRecentRegisterOnRecencyMiss() throws Exception {
+        Instant idleSince = Instant.parse("2026-05-12T20:00:00Z");
+        Instant now       = idleSince.plusSeconds(120);
+        String key = "persistent://public/in/trades";
+
+        RegistryEntry idleSnap = baseEntry("trades")
+                .withQueryId("q-old").withoutQueryId("q-old", idleSince);
+        seedT(key, idleSnap);
+
+        RegistryEntry revived = idleSnap.withQueryId("q-new");
+        when(view.get(RegistryStore.TOPIC_KEY_PREFIX + key))
+                .thenReturn(MAPPER.writeValueAsBytes(revived));
+
+        Map<String, Double> sink = new HashMap<>();
+        meteredSweeperAt(now, sink).sweep();
+
+        assertThat(sink)
+                .containsEntry("orchestrator.gc.candidates_evaluated", 1.0)
+                .containsEntry("orchestrator.gc.skipped_recent_register", 1.0)
+                .doesNotContainKey("orchestrator.gc.functions_deleted");
+    }
+
+    @Test
+    void metricCallbackFiresForErrorsWhenFunctionDeleteFails() throws Exception {
+        Instant idleSince = Instant.parse("2026-05-12T20:00:00Z");
+        Instant now       = idleSince.plusSeconds(120);
+        RegistryEntry idle = baseEntry("trades")
+                .withQueryId("q-1").withoutQueryId("q-1", idleSince);
+        seedT("in/trades", idle);
+
+        doThrow(adminError(403, "Forbidden")).when(functions)
+                .deleteFunction(FN_TENANT, FN_NAMESPACE, "selector-filter-trades");
+
+        Map<String, Double> sink = new HashMap<>();
+        meteredSweeperAt(now, sink).sweep();
+
+        assertThat(sink)
+                .containsEntry("orchestrator.gc.candidates_evaluated", 1.0)
+                .containsEntry("orchestrator.gc.errors", 1.0)
+                .doesNotContainKey("orchestrator.gc.functions_deleted");
+    }
+
+    @Test
+    void metricCallbackAccumulatesAcrossMultipleCandidatesInOneTick() throws Exception {
+        Instant idleSince = Instant.parse("2026-05-12T20:00:00Z");
+        Instant now       = idleSince.plusSeconds(120);
+
+        // Two delete-eligible + one in-use + one within-TTL = 4 evaluated, 2 deleted.
+        seedT("in/a", baseEntry("a").withQueryId("q-a").withoutQueryId("q-a", idleSince));
+        seedT("in/b", baseEntry("b").withQueryId("q-b").withoutQueryId("q-b", idleSince));
+        seedT("in/c", baseEntry("c").withQueryId("q-c"));
+        seedT("in/d", baseEntry("d").withQueryId("q-d").withoutQueryId("q-d", now.minusSeconds(10)));
+
+        Map<String, Double> sink = new HashMap<>();
+        meteredSweeperAt(now, sink).sweep();
+
+        assertThat(sink)
+                .containsEntry("orchestrator.gc.candidates_evaluated", 4.0)
+                .containsEntry("orchestrator.gc.functions_deleted", 2.0);
+    }
+
+    @Test
+    void metricCallbackFiresForHeartbeatSynthesizedAndSkippedRecent() throws Exception {
+        Instant lastSeenStale = Instant.parse("2026-05-12T22:00:00Z");
+        Instant lastSeenFresh = Instant.parse("2026-05-12T22:01:30Z");
+        Instant now           = Instant.parse("2026-05-12T22:02:00Z"); // 120s past stale, 30s past fresh
+
+        config = OrchestratorConfig.forTestingWithHeartbeat(
+                "persistent://public/orchestrator/state",
+                "function://public/filters/selector-filter@1.0.0",
+                FN_TENANT, FN_NAMESPACE,
+                60L);
+
+        QueryEntry stale = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/filtered/ctrl-x"),
+                List.of("in/x"),
+                lastSeenStale.toString());
+        seedQ("q-stale", MAPPER.writeValueAsBytes(stale));
+
+        // Pre-stale by snapshot time but recency re-read returns a refreshed entry → skipped_recent.
+        QueryEntry snapshotStale = new QueryEntry(
+                "persistent://public/out/y",
+                List.of("persistent://public/filtered/ctrl-y"),
+                List.of("in/y"),
+                lastSeenStale.toString());
+        seedQ("q-revived", MAPPER.writeValueAsBytes(snapshotStale));
+        QueryEntry refreshed = snapshotStale.withLastSeen(lastSeenFresh);
+        when(view.get(RegistryStore.QUERY_KEY_PREFIX + "q-revived"))
+                .thenReturn(MAPPER.writeValueAsBytes(refreshed));
+
+        Map<String, Double> sink = new HashMap<>();
+        IdleFilterSweeper sweeper = new IdleFilterSweeper(registry, admin, config,
+                Clock.fixed(now, ZoneOffset.UTC),
+                ct -> {},
+                (qid, q) -> {},
+                (name, value) -> sink.merge(name, value, Double::sum));
+        sweeper.sweep();
+
+        assertThat(sink)
+                .containsEntry("orchestrator.heartbeats.synthesized", 1.0)
+                .containsEntry("orchestrator.heartbeats.skipped_recent", 1.0)
+                .doesNotContainKey("orchestrator.heartbeats.errors");
+    }
+
+    @Test
+    void metricCallbackFiresForHeartbeatErrorsWhenSynthesizeThrows() throws Exception {
+        Instant lastSeen = Instant.parse("2026-05-12T22:00:00Z");
+        Instant now      = lastSeen.plusSeconds(120);
+
+        config = OrchestratorConfig.forTestingWithHeartbeat(
+                "persistent://public/orchestrator/state",
+                "function://public/filters/selector-filter@1.0.0",
+                FN_TENANT, FN_NAMESPACE,
+                60L);
+
+        QueryEntry stale = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/filtered/ctrl-x"),
+                List.of("in/x"),
+                lastSeen.toString());
+        seedQ("q-bad", MAPPER.writeValueAsBytes(stale));
+
+        Map<String, Double> sink = new HashMap<>();
+        IdleFilterSweeper sweeper = new IdleFilterSweeper(registry, admin, config,
+                Clock.fixed(now, ZoneOffset.UTC),
+                ct -> {},
+                (qid, q) -> { throw new RuntimeException("simulated"); },
+                (name, value) -> sink.merge(name, value, Double::sum));
+        sweeper.sweep();
+
+        assertThat(sink)
+                .containsEntry("orchestrator.heartbeats.errors", 1.0)
+                .doesNotContainKey("orchestrator.heartbeats.synthesized");
+    }
+
+    @Test
+    void metricCallbackIsNoOpByDefaultThroughLegacyConstructors() throws Exception {
+        // Sanity check: existing tests use the 4-arg, 5-arg, and 6-arg constructors. Those wire a
+        // no-op metrics callback so any code reaching for it cannot NPE. Drive a tick through the
+        // 4-arg constructor with an idle entry to exercise the deletion path with metrics=null-op.
+        Instant idleSince = Instant.parse("2026-05-12T20:00:00Z");
+        Instant now       = idleSince.plusSeconds(120);
+        RegistryEntry idle = baseEntry("trades")
+                .withQueryId("q-1").withoutQueryId("q-1", idleSince);
+        seedT("in/trades", idle);
+
+        // No exception expected; metrics callback is the no-op default.
+        IdleFilterSweeper.SweepStats stats = sweeperAt(now).sweep();
+        assertThat(stats.deleted).isEqualTo(1);
+    }
 }
