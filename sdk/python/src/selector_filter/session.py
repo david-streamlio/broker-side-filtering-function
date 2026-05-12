@@ -43,6 +43,7 @@ class Session:
         private_topic_tenant: str,
         private_topic_namespace: str,
         private_topic_policy: PrivateTopicPolicy,
+        heartbeat_interval_seconds: float = 30.0,
     ) -> None:
         self._pulsar_client = pulsar_client
         self._owns_pulsar_client = owns_pulsar_client
@@ -50,11 +51,12 @@ class Session:
         self._private_topic_tenant = private_topic_tenant
         self._private_topic_namespace = private_topic_namespace
         self._private_topic_policy = private_topic_policy
+        self._heartbeat_interval = float(heartbeat_interval_seconds)
 
-        # Stable identifier reserved for the HEARTBEAT message key (Phase 4).
+        # Stable identifier — used as the HEARTBEAT message key. Orchestrator does not key on it.
         self._session_id = str(uuid.uuid4())
 
-        # Live queryIds for heartbeat fan-out. Phase 4 wires this into a scheduler.
+        # Live queryIds for heartbeat fan-out. Updated under _lock on register/retire.
         self._live_query_ids: set[str] = set()
         self._lock = threading.Lock()
 
@@ -65,6 +67,23 @@ class Session:
             producer_name=f"selector-filter-session-{self._session_id}",
             block_if_queue_full=True,
         )
+
+        # Heartbeat scheduling. A daemon thread waits on an Event with a timeout matching the
+        # interval; on Session.close() we set the event for clean shutdown without waiting up
+        # to a full interval. Disabled when interval <= 0.
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        if self._heartbeat_interval > 0:
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name=f"selector-filter-heartbeat-{self._session_id}",
+                daemon=True,
+            )
+            self._heartbeat_thread.start()
+            LOG.info("Session heartbeat scheduled: interval=%ss sessionId=%s",
+                     self._heartbeat_interval, self._session_id)
+        else:
+            LOG.info("Session heartbeats disabled (sessionId=%s)", self._session_id)
 
     @staticmethod
     def builder() -> "SessionBuilder":
@@ -201,7 +220,10 @@ class Session:
         )
 
     def close(self) -> None:
-        # Phase 4 will close the heartbeat scheduler here.
+        # Stop the heartbeat thread FIRST so it cannot publish after the producer is gone.
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=5.0)
         try:
             self._control_producer.close()
         except Exception as e:  # noqa: BLE001
@@ -211,6 +233,38 @@ class Session:
                 self._pulsar_client.close()
             except Exception as e:  # noqa: BLE001
                 LOG.warning("close client: %s", e)
+
+    # ---------------------------------------------------------------- heartbeat
+
+    def _heartbeat_loop(self) -> None:
+        """Daemon-thread body. Waits up to ``heartbeat_interval`` on the stop event; if the wait
+        timed out (i.e. no stop signal) emits one heartbeat. Returns when stop is signalled.
+        """
+        while not self._heartbeat_stop.is_set():
+            if self._heartbeat_stop.wait(timeout=self._heartbeat_interval):
+                return  # close() set the event; exit cleanly
+            self._send_heartbeat_quietly()
+
+    def _send_heartbeat_quietly(self) -> None:
+        """Snapshot live queryIds and publish one HEARTBEAT message. Swallows all exceptions —
+        transient publish failures must not kill the scheduler.
+
+        Package-private (single-underscore prefix is the closest Python idiom): unit tests
+        invoke this directly to drive the publish path without waiting on the timer.
+        """
+        try:
+            with self._lock:
+                snapshot = list(self._live_query_ids)
+            if not snapshot:
+                return
+            req = FilterRequest.heartbeat(snapshot)
+            self._publish_filter_request(f"heartbeat-{self._session_id}", req)
+            LOG.debug("Published HEARTBEAT covering %d queryId(s) sessionId=%s",
+                      len(snapshot), self._session_id)
+        except Exception as e:  # noqa: BLE001
+            # DEBUG not WARN — transient broker unavailability would otherwise spam every
+            # heartbeat_interval. The orchestrator synthesizes UNREGISTERs on extended outages.
+            LOG.debug("Heartbeat publish failed (will retry next tick): %s", e)
 
     def __enter__(self) -> "Session":
         return self
@@ -229,6 +283,9 @@ class SessionBuilder:
         self._private_topic_tenant: str = "public"
         self._private_topic_namespace: str = "filtered"
         self._private_topic_policy: PrivateTopicPolicy = DEFAULT_POLICY
+        # Default 30s matches the orchestrator default heartbeat-max-stale-seconds=90
+        # (three missed heartbeats before a queryId is declared dead).
+        self._heartbeat_interval_seconds: float = 30.0
 
     def service_url(self, url: str) -> "SessionBuilder":
         self._service_url = url
@@ -257,6 +314,23 @@ class SessionBuilder:
         self._private_topic_policy = policy if policy is not None else DEFAULT_POLICY
         return self
 
+    def heartbeat_interval_seconds(self, seconds: float) -> "SessionBuilder":
+        """Set how often the Session publishes a HEARTBEAT covering its live queryIds.
+
+        The orchestrator uses heartbeats to detect SDK consumers that died without calling
+        close(); it synthesizes an UNREGISTER for any queryId whose lastSeen is older than its
+        ``heartbeat-max-stale-seconds`` config (default 90).
+
+        Set to ``0`` to disable. Defaults to ``30``.
+        """
+        self._heartbeat_interval_seconds = max(0.0, float(seconds))
+        return self
+
+    def disable_heartbeat(self) -> "SessionBuilder":
+        """Convenience: turn off heartbeats entirely. Equivalent to ``heartbeat_interval_seconds(0)``."""
+        self._heartbeat_interval_seconds = 0.0
+        return self
+
     def build(self) -> Session:
         if self._control_topic is None:
             raise ValueError("control_topic is required")
@@ -281,4 +355,5 @@ class SessionBuilder:
             private_topic_tenant=self._private_topic_tenant,
             private_topic_namespace=self._private_topic_namespace,
             private_topic_policy=self._private_topic_policy,
+            heartbeat_interval_seconds=self._heartbeat_interval_seconds,
         )

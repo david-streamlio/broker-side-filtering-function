@@ -34,13 +34,18 @@ def mock_pulsar_client() -> MagicMock:
 
 @pytest.fixture
 def session(mock_pulsar_client: MagicMock) -> Session:
-    """A Session backed by a mocked Pulsar client and an explicit control topic."""
+    """A Session backed by a mocked Pulsar client and an explicit control topic.
+
+    Heartbeats disabled so the daemon thread cannot contaminate verify() assertions; heartbeat
+    behavior has dedicated coverage in ``test_heartbeat.py``.
+    """
     return (
         Session.builder()
         .pulsar_client(mock_pulsar_client)
         .control_topic("persistent://public/orchestrator/filter-requests")
         .private_topic_tenant("public")
         .private_topic_namespace("filtered")
+        .disable_heartbeat()
         .build()
     )
 
@@ -224,7 +229,7 @@ class TestClose:
 
     def test_context_manager_closes(self, mock_pulsar_client: MagicMock) -> None:
         with Session.builder().pulsar_client(mock_pulsar_client) \
-                .control_topic("persistent://t/n/x").build() as s:
+                .control_topic("persistent://t/n/x").disable_heartbeat().build() as s:
             assert s.control_topic == "persistent://t/n/x"
         s._control_producer.close.assert_called_once()  # noqa: SLF001
 

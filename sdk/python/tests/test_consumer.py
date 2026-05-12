@@ -35,6 +35,7 @@ def session(mock_pulsar_client: MagicMock) -> Session:
         Session.builder()
         .pulsar_client(mock_pulsar_client)
         .control_topic("persistent://public/orchestrator/filter-requests")
+        .disable_heartbeat()
         .build()
     )
 
