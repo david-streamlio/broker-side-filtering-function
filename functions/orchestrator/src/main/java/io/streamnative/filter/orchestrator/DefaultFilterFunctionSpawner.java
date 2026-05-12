@@ -147,7 +147,10 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
         Exception last = null;
         while (System.currentTimeMillis() < deadline) {
             try {
-                admin.functions().createFunction(fc, packageUrl);
+                // createFunctionWithUrl handles `function://...` package URLs (and `http(s)://`,
+                // `file://`); createFunction treats its String arg as a local file path. Both
+                // overloads exist for a reason.
+                admin.functions().createFunctionWithUrl(fc, packageUrl);
                 return;
             } catch (PulsarAdminException e) {
                 last = e;

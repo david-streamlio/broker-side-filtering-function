@@ -62,16 +62,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Testcontainers
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(org.junit.jupiter.api.MethodOrderer.OrderAnnotation.class)
-@org.junit.jupiter.api.Disabled(
-        "Phase 5 partial: orchestrator infrastructure validated (filter NAR uploads as Pulsar "
-                + "package, orchestrator function deploys + reaches RUNNING, PulsarAdmin spawn path "
-                + "exercised). End-to-end filtered delivery from input topic → spawned filter → SDK "
-                + "private output topic times out (test waits 45s for first US match; none arrives). "
-                + "Most likely a spawn-then-subscription timing issue between orchestrator processing "
-                + "the REGISTER and the spawned filter function reaching RUNNING in time to catch "
-                + "the producer's first messages. Phase 6 will re-attempt similar end-to-end "
-                + "coverage via the SDK ITs (SessionIT/KafkaConsumerKoPIT) which have a more mature "
-                + "test scaffolding for this scenario.")
 class OrchestratorFunctionIT {
 
     private static final Logger LOG = LoggerFactory.getLogger(OrchestratorFunctionIT.class);
@@ -196,8 +186,18 @@ class OrchestratorFunctionIT {
                      .subscribe()) {
 
             FilterControl fc = (FilterControl) consumer;
-            // Give orchestrator time to spawn the filter function and propagate the QueryMessage.
-            Thread.sleep(15_000);
+            // Explicitly wait for the spawned filter function to reach RUNNING. The orchestrator
+            // names it via TopicKeySanitizer.forInputTopic(INPUT_A); we compute the same name.
+            String expectedFilterFn = "selector-filter-" + TopicKeySanitizer.forInputTopic(INPUT_A);
+            try {
+                waitForFunctionRunning(admin, FN_TENANT, FN_NAMESPACE, expectedFilterFn, 90_000L);
+                Thread.sleep(5_000); // grace for the filter's TableView to load the QueryMessage
+            } catch (Exception e) {
+                dumpOrchestratorLog();
+                throw new AssertionError(
+                        "Spawned filter function did not reach RUNNING. Likely the orchestrator "
+                                + "did not process the REGISTER (check orchestrator log above).", e);
+            }
 
             // Produce mixed-region records.
             producerA.newMessage().key("AAPL").property("region", "US")
@@ -415,6 +415,24 @@ class OrchestratorFunctionIT {
         throw new IllegalStateException(
                 "Function did not reach RUNNING within " + timeoutMs + " ms: " + name
                 + " (diagnostic logs above on stderr)");
+    }
+
+    private void dumpOrchestratorLog() {
+        try {
+            org.testcontainers.containers.Container.ExecResult logTail = pulsar.execInContainer(
+                    "sh", "-c",
+                    "find /pulsar/logs/functions/" + FN_TENANT + "/" + FN_NAMESPACE + "/" + ORCH_NAME
+                            + " -name '*.log' 2>/dev/null | xargs -I{} sh -c 'echo === {} ===; tail -150 {}'");
+            System.err.println("---- orchestrator function instance log (tail) ----");
+            System.err.println(logTail.getStdout());
+
+            org.testcontainers.containers.Container.ExecResult listing = pulsar.execInContainer(
+                    "sh", "-c", "ls -la /pulsar/logs/functions/" + FN_TENANT + "/" + FN_NAMESPACE + "/ 2>&1");
+            System.err.println("---- function-log directory listing ----");
+            System.err.println(listing.getStdout());
+        } catch (Exception e) {
+            System.err.println("Failed to dump orchestrator log: " + e);
+        }
     }
 
     private static Path findFilterNar() {

@@ -96,7 +96,7 @@ class DefaultFilterFunctionSpawnerTests {
         // Function deployed with correct config.
         ArgumentCaptor<FunctionConfig> fcCap = ArgumentCaptor.forClass(FunctionConfig.class);
         ArgumentCaptor<String> pkgCap = ArgumentCaptor.forClass(String.class);
-        verify(functions).createFunction(fcCap.capture(), pkgCap.capture());
+        verify(functions).createFunctionWithUrl(fcCap.capture(), pkgCap.capture());
         FunctionConfig fc = fcCap.getValue();
         assertThat(fc.getName()).isEqualTo(entry.getFilterFunctionName());
         assertThat(fc.getInputs()).containsExactly("persistent://public/in/trades");
@@ -121,7 +121,7 @@ class DefaultFilterFunctionSpawnerTests {
         RegistryEntry entry = spawner.spawn("persistent://public/in/trades", req, cfg);
 
         assertThat(entry.getFilterFunctionName()).startsWith("selector-filter-trades-");
-        verify(functions, never()).createFunction(any(FunctionConfig.class), anyString());
+        verify(functions, never()).createFunctionWithUrl(any(FunctionConfig.class), anyString());
         verify(topics, never()).createNonPartitionedTopic(anyString());
         verify(topicPolicies, never()).setCompactionThreshold(anyString(), anyLong());
     }
@@ -136,7 +136,7 @@ class DefaultFilterFunctionSpawnerTests {
         spawner.spawn("persistent://public/trades/.*", req, cfg);
 
         ArgumentCaptor<FunctionConfig> fcCap = ArgumentCaptor.forClass(FunctionConfig.class);
-        verify(functions).createFunction(fcCap.capture(), anyString());
+        verify(functions).createFunctionWithUrl(fcCap.capture(), anyString());
         FunctionConfig fc = fcCap.getValue();
         assertThat(fc.getTopicsPattern()).isEqualTo("persistent://public/trades/.*");
         assertThat(fc.getInputs()).isNullOrEmpty();
@@ -151,12 +151,12 @@ class DefaultFilterFunctionSpawnerTests {
         PulsarAdminException leaderErr = buildAdminException(503, "Leader not yet ready");
         // First two attempts fail; third succeeds.
         doThrow(leaderErr).doThrow(leaderErr).doNothing()
-                .when(functions).createFunction(any(FunctionConfig.class), anyString());
+                .when(functions).createFunctionWithUrl(any(FunctionConfig.class), anyString());
 
         FilterRequest req = registerReq("persistent://public/in/trades");
         spawner.spawn("persistent://public/in/trades", req, cfg);
 
-        verify(functions, times(3)).createFunction(any(FunctionConfig.class), anyString());
+        verify(functions, times(3)).createFunctionWithUrl(any(FunctionConfig.class), anyString());
     }
 
     @Test
@@ -164,12 +164,12 @@ class DefaultFilterFunctionSpawnerTests {
         when(functions.getFunctionStatus(anyString(), anyString(), anyString())).thenThrow(notFound());
 
         PulsarAdminException existsErr = buildAdminException(400, "Function already exists");
-        doThrow(existsErr).when(functions).createFunction(any(FunctionConfig.class), anyString());
+        doThrow(existsErr).when(functions).createFunctionWithUrl(any(FunctionConfig.class), anyString());
 
         FilterRequest req = registerReq("persistent://public/in/trades");
         // Should NOT throw — treated as success.
         spawner.spawn("persistent://public/in/trades", req, cfg);
-        verify(functions, times(1)).createFunction(any(FunctionConfig.class), anyString());
+        verify(functions, times(1)).createFunctionWithUrl(any(FunctionConfig.class), anyString());
     }
 
     @Test
@@ -177,7 +177,7 @@ class DefaultFilterFunctionSpawnerTests {
         when(functions.getFunctionStatus(anyString(), anyString(), anyString())).thenThrow(notFound());
 
         PulsarAdminException permanent = buildAdminException(403, "Forbidden — caller lacks functions admin");
-        doThrow(permanent).when(functions).createFunction(any(FunctionConfig.class), anyString());
+        doThrow(permanent).when(functions).createFunctionWithUrl(any(FunctionConfig.class), anyString());
 
         FilterRequest req = registerReq("persistent://public/in/trades");
         assertThatThrownBy(() -> spawner.spawn("persistent://public/in/trades", req, cfg))
@@ -207,7 +207,7 @@ class DefaultFilterFunctionSpawnerTests {
         FilterRequest req = registerReq("persistent://public/in/trades");
         // Should not throw despite the compaction-set failure (warn-only).
         spawner.spawn("persistent://public/in/trades", req, noCompaction);
-        verify(functions, atLeast(1)).createFunction(any(FunctionConfig.class), anyString());
+        verify(functions, atLeast(1)).createFunctionWithUrl(any(FunctionConfig.class), anyString());
     }
 
     @Test
@@ -221,6 +221,6 @@ class DefaultFilterFunctionSpawnerTests {
         FilterRequest req = registerReq("persistent://public/in/trades");
         // Should proceed past the conflict to create the function.
         spawner.spawn("persistent://public/in/trades", req, cfg);
-        verify(functions).createFunction(any(FunctionConfig.class), anyString());
+        verify(functions).createFunctionWithUrl(any(FunctionConfig.class), anyString());
     }
 }
