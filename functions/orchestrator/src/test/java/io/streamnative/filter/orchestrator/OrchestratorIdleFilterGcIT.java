@@ -64,11 +64,17 @@ class OrchestratorIdleFilterGcIT {
     // Each test uses a distinct input topic so we have an unambiguous spawned-filter name to track.
     private static final String INPUT_GC      = "persistent://public/default/gc-input";
     private static final String INPUT_REVIVED = "persistent://public/default/gc-revived-input";
+    private static final String INPUT_DEAD    = "persistent://public/default/gc-dead-input";
 
     // Tight enough to finish a test pass in <30s, loose enough that incidental jitter doesn't
-    // flake the test 2 "revived" check.
-    private static final long IDLE_TTL_SECONDS         = 5L;
-    private static final long SWEEP_INTERVAL_SECONDS   = 2L;
+    // flake the test 2 "revived" check. Heartbeat staleness is aggressive (15s = 5 missed
+    // heartbeats at the test SDK interval below) so the dead-consumer test finishes in well
+    // under a minute; existing tests keep their q: entries fresh by heartbeating during
+    // the wait.
+    private static final long IDLE_TTL_SECONDS              = 5L;
+    private static final long SWEEP_INTERVAL_SECONDS        = 2L;
+    private static final long HEARTBEAT_MAX_STALE_SECONDS   = 15L;
+    private static final long SDK_HEARTBEAT_INTERVAL_SECONDS = 3L;
 
     private static final Path FILTER_NAR       = findFilterNar();
     private static final Path ORCHESTRATOR_NAR = findOrchestratorNar();
@@ -83,6 +89,7 @@ class OrchestratorIdleFilterGcIT {
     private PulsarAdmin admin;
     private Producer<byte[]> producerGc;
     private Producer<byte[]> producerRevived;
+    private Producer<byte[]> producerDead;
 
     @BeforeAll
     void setup() throws Exception {
@@ -93,6 +100,7 @@ class OrchestratorIdleFilterGcIT {
         admin.topics().createNonPartitionedTopic(ORCH_STATE_TOPIC);
         admin.topics().createNonPartitionedTopic(INPUT_GC);
         admin.topics().createNonPartitionedTopic(INPUT_REVIVED);
+        admin.topics().createNonPartitionedTopic(INPUT_DEAD);
         admin.namespaces().setAutoTopicCreation("public/default",
                 org.apache.pulsar.common.policies.data.AutoTopicCreationOverride.builder()
                         .allowAutoTopicCreation(true)
@@ -125,7 +133,8 @@ class OrchestratorIdleFilterGcIT {
                         Map.entry(OrchestratorConfig.KEY_PULSAR_ADMIN_URL,        "http://localhost:8080"),
                         Map.entry(OrchestratorConfig.KEY_IDLE_GC_ENABLED,         true),
                         Map.entry(OrchestratorConfig.KEY_IDLE_GC_TTL_SECONDS,     IDLE_TTL_SECONDS),
-                        Map.entry(OrchestratorConfig.KEY_IDLE_GC_SWEEP_INTERVAL,  SWEEP_INTERVAL_SECONDS)))
+                        Map.entry(OrchestratorConfig.KEY_IDLE_GC_SWEEP_INTERVAL,  SWEEP_INTERVAL_SECONDS),
+                        Map.entry(OrchestratorConfig.KEY_HEARTBEAT_MAX_STALE,     HEARTBEAT_MAX_STALE_SECONDS)))
                 .build();
         deployWithLeaderRetry(admin, orchConfig, ORCHESTRATOR_NAR.toString(),
                 FN_TENANT, FN_NAMESPACE, ORCH_NAME);
@@ -134,19 +143,27 @@ class OrchestratorIdleFilterGcIT {
 
         producerGc      = client.newProducer(Schema.BYTES).topic(INPUT_GC).create();
         producerRevived = client.newProducer(Schema.BYTES).topic(INPUT_REVIVED).create();
+        producerDead    = client.newProducer(Schema.BYTES).topic(INPUT_DEAD).create();
     }
 
     @AfterAll
     void teardown() throws Exception {
         if (producerGc != null) producerGc.close();
         if (producerRevived != null) producerRevived.close();
+        if (producerDead != null) producerDead.close();
         if (client != null) client.close();
         if (admin != null) admin.close();
     }
 
     private Session newSession() throws Exception {
+        return newSession(client);
+    }
+
+    private Session newSession(PulsarClient sessionClient) throws Exception {
+        // Short heartbeat interval so an open Session keeps its q: entry fresh during the
+        // existing-tests' wait windows (HEARTBEAT_MAX_STALE_SECONDS = 15s).
         return Session.builder()
-                .pulsarClient(client)
+                .pulsarClient(sessionClient)
                 .pulsarAdmin(admin)
                 .controlTopic(SDK_INPUT_TOPIC)
                 .privateTopicTenant(FN_TENANT)
@@ -157,6 +174,7 @@ class OrchestratorIdleFilterGcIT {
                         .retentionSizeMB(8)
                         .inactiveDeleteSeconds(60)
                         .build())
+                .heartbeatIntervalSeconds(SDK_HEARTBEAT_INTERVAL_SECONDS)
                 .build();
     }
 
@@ -249,6 +267,62 @@ class OrchestratorIdleFilterGcIT {
             assertThat(new String(m.getData(), StandardCharsets.UTF_8)).isEqualTo("uk-revived");
             secondConsumer.acknowledge(m);
         }
+    }
+
+    @Test
+    void deadConsumerTriggersSynthesizedUnregister() throws Exception {
+        String expectedFilterFn  = "selector-filter-" + TopicKeySanitizer.forInputTopic(INPUT_DEAD);
+        String expectedCtrlTopic = "persistent://" + FN_TENANT + "/" + FN_NAMESPACE
+                + "/ctrl-" + TopicKeySanitizer.forInputTopic(INPUT_DEAD);
+
+        // Build a doomed PulsarClient that we will hard-close to simulate an SDK crash. Its
+        // Session never gets close() called, so no clean UNREGISTER is published; instead the
+        // orchestrator must detect the stale heartbeat and synthesize one.
+        PulsarClient doomedClient = PulsarClient.builder()
+                .serviceUrl(pulsar.getPulsarBrokerUrl())
+                .build();
+
+        Session doomedSession = newSession(doomedClient);
+        try {
+            doomedSession.registerPrivateQuery(List.of(INPUT_DEAD), "region = 'US'");
+            waitForFunctionRunning(admin, FN_TENANT, FN_NAMESPACE, expectedFilterFn, 90_000L);
+            Thread.sleep(3_000); // grace for filter TableView to load the QueryMessage
+
+            // Drive one input message to confirm the filter is genuinely alive before we kill
+            // the client. We do not consume the output — proving the wire is intact requires
+            // only that the input publish succeeds.
+            producerDead.newMessage().key("AAPL").property("region", "US")
+                    .value("us-1".getBytes(StandardCharsets.UTF_8)).send();
+            Thread.sleep(2_000);
+        } finally {
+            // Hard-kill the client without going through Session.close() (which would call
+            // retirePrivateQuery and publish a clean UNREGISTER). The Session is left dangling.
+            // Heartbeats from its scheduler will fail silently against the closed client.
+            doomedClient.close();
+        }
+
+        // Total time from kill to GC: max-stale (15s) + idle-ttl (5s) + sweep slack. Poll up to
+        // a generous deadline.
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(
+                HEARTBEAT_MAX_STALE_SECONDS + IDLE_TTL_SECONDS + SWEEP_INTERVAL_SECONDS * 4 + 15);
+        boolean functionGone = false;
+        boolean topicGone    = false;
+        while (System.currentTimeMillis() < deadline) {
+            List<String> functions = admin.functions().getFunctions(FN_TENANT, FN_NAMESPACE);
+            functionGone = !functions.contains(expectedFilterFn);
+            try {
+                admin.topics().getStats(expectedCtrlTopic);
+                topicGone = false;
+            } catch (PulsarAdminException.NotFoundException e) {
+                topicGone = true;
+            }
+            if (functionGone && topicGone) break;
+            Thread.sleep(1_000);
+        }
+        assertThat(functionGone).as(
+                "filter function should be GCed after heartbeat staleness + idle TTL").isTrue();
+        assertThat(topicGone).as(
+                "control topic should be GCed after heartbeat staleness + idle TTL").isTrue();
     }
 
     // ---------------------------------------------------------------- helpers (mirrored from OrchestratorFunctionIT)
