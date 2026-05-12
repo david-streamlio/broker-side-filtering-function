@@ -13,7 +13,6 @@ import pytest
 
 from selector_filter import ClientType, Command, FilterRequest
 
-
 # ---------------------------------------------------------------- factory + getter parity
 
 class TestFactories:

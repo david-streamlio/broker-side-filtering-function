@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     # pulsar-client is a runtime dep but only the type stubs are needed here.
     import pulsar  # noqa: F401
 
+    from .consumer import ConsumerBuilder
+
 LOG = logging.getLogger(__name__)
 
 
@@ -327,7 +329,7 @@ class SessionBuilder:
         return self
 
     def disable_heartbeat(self) -> "SessionBuilder":
-        """Convenience: turn off heartbeats entirely. Equivalent to ``heartbeat_interval_seconds(0)``."""
+        """Turn off heartbeats. Equivalent to ``heartbeat_interval_seconds(0)``."""
         self._heartbeat_interval_seconds = 0.0
         return self
 

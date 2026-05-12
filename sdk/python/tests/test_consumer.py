@@ -161,8 +161,9 @@ class TestFilterControl:
         consumer.set_selector("region = 'UK'")
         assert consumer.current_selector() == "region = 'UK'"
 
-    def test_current_selector_is_none_when_subscribe_passed_none(self, mock_pulsar_client: MagicMock,
-                                                                 session: Session) -> None:
+    def test_current_selector_is_none_when_subscribe_passed_none(
+        self, mock_pulsar_client: MagicMock, session: Session
+    ) -> None:
         consumer = (
             session.new_consumer()
             .topic("persistent://public/in/x")

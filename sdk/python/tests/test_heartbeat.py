@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from selector_filter import Command, FilterRequest, Session
+from selector_filter import Command, Session
 
 
 @pytest.fixture

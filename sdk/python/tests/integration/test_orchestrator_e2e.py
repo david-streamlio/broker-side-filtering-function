@@ -26,6 +26,7 @@ Wall time: ~60-90s on a warm Docker host (Pulsar image is the long pole).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import subprocess
@@ -36,12 +37,10 @@ import pytest
 
 # Skip the whole module if testcontainers is not installed.
 testcontainers_core = pytest.importorskip("testcontainers.core.container")
+import pulsar  # type: ignore[import-untyped]  # noqa: E402
 from testcontainers.core.container import DockerContainer  # noqa: E402
 
-import pulsar  # type: ignore[import-untyped]  # noqa: E402
-
 from selector_filter import Session  # noqa: E402
-
 
 # ---------------------------------------------------------------- locating the NARs
 
@@ -244,7 +243,9 @@ def pulsar_container(
             "create orchestrator function",
         )
 
-        _wait_for_function_running(container, FN_TENANT, FN_NAMESPACE, ORCH_NAME, timeout_seconds=90)
+        _wait_for_function_running(
+            container, FN_TENANT, FN_NAMESPACE, ORCH_NAME, timeout_seconds=90
+        )
         time.sleep(5)  # grace for the orchestrator's TableView to open
 
         yield container
@@ -328,14 +329,10 @@ class TestOrchestratorEndToEnd:
                     except Exception:  # noqa: BLE001 — timeout is success
                         pass
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 input_producer.close()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 pulsar_client.close()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def _wait_for_spawned_filter(container: DockerContainer, timeout_seconds: float) -> None:

@@ -18,6 +18,7 @@ from .private_query import PrivateQuery
 
 if TYPE_CHECKING:
     import pulsar  # noqa: F401
+
     from .session import Session
 
 LOG = logging.getLogger(__name__)
@@ -48,7 +49,10 @@ class FilteringConsumer:
     # ---------------------------------------------------------------- FilterControl
 
     def query_id(self) -> str:
-        """The SDK-generated UUIDv4 for this registered query. Stable across :meth:`set_selector`."""
+        """The SDK-generated UUIDv4 for this registered query.
+
+        Stable across :meth:`set_selector`.
+        """
         return self._private_query.query_id
 
     def current_selector(self) -> Optional[str]:

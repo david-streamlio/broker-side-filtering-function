@@ -15,11 +15,8 @@ import pytest
 from selector_filter import (
     ClientType,
     Command,
-    FilterRequest,
-    PrivateTopicPolicy,
     Session,
 )
-
 
 # ---------------------------------------------------------------- fixtures
 
@@ -51,7 +48,7 @@ def session(mock_pulsar_client: MagicMock) -> Session:
 
 
 def _captured_sends(session: Session) -> list[dict]:
-    """Pull the captured sends off the mocked producer; each call is decoded as a FilterRequest dict."""
+    """Pull captured sends off the mocked producer; each is decoded as a FilterRequest dict."""
     producer = session._control_producer  # noqa: SLF001 — test access
     sends: list[dict] = []
     for call in producer.send.call_args_list:
