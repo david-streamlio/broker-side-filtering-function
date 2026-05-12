@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pulsar-selector-filter"
+version = "0.1.0"
+description = "Broker-side selector filter SDK for Apache Pulsar — orchestrator-fronted filtered consumers via JMS-selector expressions."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "StreamNative", email = "ci@localhost" },
+]
+keywords = ["pulsar", "filter", "jms-selector", "streaming"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Distributed Computing",
+]
+# Runtime deps — kept minimal. pulsar-client is needed by Session (Phase 2+) but Phase 1 only
+# uses stdlib. We declare it now so a single install gets the full surface.
+dependencies = [
+  "pulsar-client>=3.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "ruff>=0.6",
+  "mypy>=1.10",
+]
+it = [
+  # testcontainers-python pulls in docker; only needed for live ITs (Phase 5+).
+  "testcontainers[pulsar]>=4.0",
+]
+
+[project.urls]
+"Homepage"   = "https://github.com/david-streamlio/broker-side-filtering-function"
+"Repository" = "https://github.com/david-streamlio/broker-side-filtering-function"
+"Issues"     = "https://github.com/david-streamlio/broker-side-filtering-function/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/selector_filter"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "integration: live integration tests against a Pulsar testcontainer (requires Docker)",
+]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RET"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
