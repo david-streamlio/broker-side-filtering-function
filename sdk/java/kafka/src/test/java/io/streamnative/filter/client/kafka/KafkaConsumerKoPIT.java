@@ -26,7 +26,6 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
-import org.testcontainers.utility.MountableFile;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -53,16 +52,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code functions/orchestrator/target/} — run {@code mvn verify} at the reactor root.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-@org.junit.jupiter.api.Disabled(
-        "Phase 6 partial: scaffold rewired to deploy orchestrator + upload filter NAR as package. "
-                + "On streamnative/sn-platform:4.2.0.6 with KoP, the orchestrator deploys + reaches "
-                + "RUNNING (after switching to ThreadRuntime to avoid ProcessRuntime gRPC issues), "
-                + "but the spawned filter function does not reach RUNNING within 90s. The "
-                + "equivalent SessionIT + OrchestratorFunctionIT against the vanilla apache pulsar "
-                + "image work end-to-end, so the gap is sn-platform-specific (likely a function "
-                + "deployment / package-resolution interaction with the KSN protocol handler). "
-                + "Follow-up: enable verbose logging on the spawned filter, inspect its instance "
-                + "log inside the sn-platform container, and tune deployment if needed.")
 class KafkaConsumerKoPIT {
 
     private static final Logger LOG = LoggerFactory.getLogger(KafkaConsumerKoPIT.class);
@@ -115,14 +104,22 @@ class KafkaConsumerKoPIT {
                 .withEnv("PULSAR_PREFIX_allowAutoTopicCreation", "true")
                 .withEnv("PULSAR_PREFIX_allowAutoTopicCreationType", "non-partitioned")
                 .withEnv("PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled", "false")
-                // Use ThreadRuntime for function instances — ProcessRuntime requires a working
-                // subprocess JVM + gRPC and has classpath surprises with our NAR (which bundles
-                // pulsar-client-admin-original). ThreadRuntime runs the function inside the
-                // broker JVM, which works reliably for our scale and keeps logs visible.
-                .withEnv("PULSAR_PREFIX_functionRuntimeFactoryClassName",
-                        "org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory")
+                // Force ThreadRuntime on the function WORKER (not the broker). sn-platform's
+                // standalone reads WorkerConfig from conf/functions_worker.yml (NOT from
+                // standalone.conf), so PULSAR_PREFIX_* env vars are useless for worker settings.
+                // apply-config-from-env.py is for .conf files (key=value) — running it against
+                // .yml files appends key=value lines that break YAML parsing. Use sed to
+                // surgically replace the one key we care about. Default ProcessRuntime dies with
+                // gRPC connection-refused on this image (function subprocess JVM fails to start
+                // cleanly with our NAR), so we force ThreadRuntime which runs the function
+                // inside the broker JVM.
                 .withCommand("sh", "-c",
                         "bin/apply-config-from-env.py conf/standalone.conf "
+                                + "&& sed -i "
+                                + "'s|^functionRuntimeFactoryClassName:.*|"
+                                + "functionRuntimeFactoryClassName: "
+                                + "org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory|' "
+                                + "conf/functions_worker.yml "
                                 + "&& bin/pulsar standalone -nss")
                 .waitingFor(Wait.forLogMessage(".*messaging service is ready.*", 1)
                         .withStartupTimeout(Duration.ofMinutes(5)))) {
