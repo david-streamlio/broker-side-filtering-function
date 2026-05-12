@@ -21,7 +21,11 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -62,13 +66,24 @@ public final class Session implements Closeable {
     private final String privateTopicNamespace;
     private final PrivateTopicPolicy privateTopicPolicy;
     private final Producer<byte[]> controlProducer;
+    /** Stable identifier used as the HEARTBEAT message key. Arbitrary; orchestrator does not key on it. */
+    private final String sessionId = UUID.randomUUID().toString();
+    /**
+     * Currently-live queryIds owned by this Session. Updated on register/retire; snapshotted by
+     * the heartbeat task to build each HEARTBEAT message body.
+     */
+    private final Set<String> liveQueryIds = ConcurrentHashMap.newKeySet();
+    /** {@code null} when heartbeats are disabled. */
+    private final ScheduledExecutorService heartbeatScheduler;
+    private final long heartbeatIntervalSeconds;
 
     Session(PulsarClient pulsarClient, boolean ownsPulsarClient,
             PulsarAdmin pulsarAdmin, boolean ownsPulsarAdmin,
             String controlTopic,
             String privateTopicTenant,
             String privateTopicNamespace,
-            PrivateTopicPolicy privateTopicPolicy) throws PulsarClientException {
+            PrivateTopicPolicy privateTopicPolicy,
+            long heartbeatIntervalSeconds) throws PulsarClientException {
         this.pulsarClient        = pulsarClient;
         this.ownsPulsarClient    = ownsPulsarClient;
         this.pulsarAdmin         = pulsarAdmin;
@@ -77,15 +92,32 @@ public final class Session implements Closeable {
         this.privateTopicTenant  = privateTopicTenant;
         this.privateTopicNamespace = privateTopicNamespace;
         this.privateTopicPolicy  = privateTopicPolicy;
+        this.heartbeatIntervalSeconds = heartbeatIntervalSeconds;
         this.controlProducer     = pulsarClient.newProducer(Schema.BYTES)
                 .topic(controlTopic)
-                .producerName("selector-filter-session-" + UUID.randomUUID())
+                .producerName("selector-filter-session-" + sessionId)
                 .enableBatching(false)
                 .create();
 
         if (pulsarAdmin == null && privateTopicPolicy.isApplyPerTopicPolicies()) {
             LOG.warn("No PulsarAdmin handle provided. Per-topic TTL/retention/inactive-cleanup "
                     + "policies cannot be applied to private topics; falling back to namespace defaults.");
+        }
+
+        if (heartbeatIntervalSeconds > 0L) {
+            this.heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "selector-filter-heartbeat-" + sessionId);
+                t.setDaemon(true);
+                return t;
+            });
+            this.heartbeatScheduler.scheduleWithFixedDelay(
+                    this::sendHeartbeatQuietly,
+                    heartbeatIntervalSeconds, heartbeatIntervalSeconds, TimeUnit.SECONDS);
+            LOG.info("Session heartbeat scheduled: interval={}s sessionId={}",
+                    heartbeatIntervalSeconds, sessionId);
+        } else {
+            this.heartbeatScheduler = null;
+            LOG.info("Session heartbeats disabled (sessionId={})", sessionId);
         }
     }
 
@@ -126,12 +158,45 @@ public final class Session implements Closeable {
 
     @Override
     public void close() {
+        // Stop the heartbeat task FIRST so it cannot publish after the producer is gone.
+        if (heartbeatScheduler != null) {
+            heartbeatScheduler.shutdown();
+            try {
+                if (!heartbeatScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                    heartbeatScheduler.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                heartbeatScheduler.shutdownNow();
+            }
+        }
         try { controlProducer.close(); } catch (Exception e) { LOG.warn("close producer", e); }
         if (ownsPulsarAdmin && pulsarAdmin != null) {
             try { pulsarAdmin.close(); } catch (Exception e) { LOG.warn("close admin", e); }
         }
         if (ownsPulsarClient) {
             try { pulsarClient.close(); } catch (Exception e) { LOG.warn("close client", e); }
+        }
+    }
+
+    /**
+     * Scheduled task body. Snapshots {@link #liveQueryIds} and publishes one HEARTBEAT message if
+     * the snapshot is non-empty. Swallows all exceptions — a transient publish failure must not
+     * kill the scheduler.
+     */
+    void sendHeartbeatQuietly() {
+        try {
+            List<String> snapshot = List.copyOf(liveQueryIds);
+            if (snapshot.isEmpty()) return;
+            FilterRequest hb = FilterRequest.heartbeat(snapshot);
+            publishFilterRequest("heartbeat-" + sessionId, hb);
+            LOG.debug("Published HEARTBEAT covering {} queryId(s) sessionId={}",
+                    snapshot.size(), sessionId);
+        } catch (Throwable t) {
+            // DEBUG, not WARN — transient broker unavailability would otherwise spam the log
+            // every heartbeatIntervalSeconds. If the broker is unreachable for an extended
+            // window, the orchestrator will eventually synthesize UNREGISTERs anyway.
+            LOG.debug("Heartbeat publish failed (will retry next tick): {}", t.getMessage());
         }
     }
 
@@ -185,6 +250,10 @@ public final class Session implements Closeable {
                 keyDeserializer, valueDeserializer, clientType);
         publishFilterRequest(queryId, req);
 
+        // Track this queryId in our heartbeat set so subsequent heartbeats keep the orchestrator
+        // informed that it is still live.
+        liveQueryIds.add(queryId);
+
         LOG.info("Registered query queryId={} private={} selector=[{}] clientType={}",
                 queryId, privateTopic, userSelector, clientType);
         return new PrivateQuery(queryId, privateTopic, sourceTopics);
@@ -214,6 +283,9 @@ public final class Session implements Closeable {
      * does not throw; log-only on errors.
      */
     public void retirePrivateQuery(PrivateQuery pq) {
+        // Stop heartbeating this queryId BEFORE publishing UNREGISTER, so a heartbeat that races
+        // with the UNREGISTER cannot re-touch a queryId we are about to retract.
+        liveQueryIds.remove(pq.queryId());
         try {
             publishFilterRequest(pq.queryId(), FilterRequest.unregister());
             LOG.info("Retracted query queryId={}", pq.queryId());

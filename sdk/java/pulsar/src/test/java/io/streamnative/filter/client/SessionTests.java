@@ -89,6 +89,9 @@ class SessionTests {
     }
 
     private Session newSession(PrivateTopicPolicy policy) throws Exception {
+        // Existing tests are deterministic about wire publishes. Disable the heartbeat scheduler
+        // so background ticks cannot contaminate verify() assertions; heartbeat behavior has its
+        // own focused tests below.
         return Session.builder()
                 .pulsarClient(client)
                 .pulsarAdmin(admin)
@@ -96,6 +99,7 @@ class SessionTests {
                 .privateTopicTenant("public")
                 .privateTopicNamespace("filtered")
                 .privateTopicPolicy(policy)
+                .disableHeartbeat()
                 .build();
     }
 
@@ -329,5 +333,107 @@ class SessionTests {
                 .isEqualTo("org.apache.kafka.common.serialization.StringDeserializer");
         assertThat(req.getValueDeserializer())
                 .isEqualTo("org.apache.kafka.common.serialization.ByteArrayDeserializer");
+    }
+
+    // ---------------------------------------------------------------- Heartbeat (Phase 4)
+
+    /**
+     * Build a Session with heartbeats enabled but at a long interval so the scheduler does NOT
+     * fire during the test. Tests invoke {@code sendHeartbeatQuietly()} directly to drive the
+     * publish path deterministically.
+     */
+    private Session newSessionWithHeartbeats() throws Exception {
+        return Session.builder()
+                .pulsarClient(client)
+                .pulsarAdmin(admin)
+                .controlTopic("persistent://public/orchestrator/filter-requests")
+                .privateTopicTenant("public")
+                .privateTopicNamespace("filtered")
+                .privateTopicPolicy(PrivateTopicPolicy.DEFAULT)
+                .heartbeatIntervalSeconds(3600L)   // long enough not to fire during the test
+                .build();
+    }
+
+    @Test
+    void heartbeatPublishesAllLiveQueryIds() throws Exception {
+        try (Session session = newSessionWithHeartbeats()) {
+            // Two registrations leave both queryIds in the heartbeat set.
+            PrivateQuery pq1 = session.registerPrivateQuery(
+                    List.of("persistent://t/n/a"), "x = 1");
+            PrivateQuery pq2 = session.registerPrivateQuery(
+                    List.of("persistent://t/n/b"), "x = 2");
+
+            // Drive one heartbeat tick manually.
+            session.sendHeartbeatQuietly();
+
+            // Wire shape: capture the last byte[] published — must be a HEARTBEAT containing both
+            // queryIds.
+            ArgumentCaptor<byte[]> payloads = ArgumentCaptor.forClass(byte[].class);
+            verify(controlMsgBuilder, times(3)).value(payloads.capture());  // 2 REGISTER + 1 HB
+            byte[] hb = payloads.getAllValues().get(2);
+            FilterRequest req = MAPPER.readValue(hb, FilterRequest.class);
+            assertThat(req.getCommand()).isEqualTo(Command.HEARTBEAT);
+            assertThat(req.getQueryIds()).containsExactlyInAnyOrder(pq1.queryId(), pq2.queryId());
+        }
+    }
+
+    @Test
+    void heartbeatWithEmptyLiveSetPublishesNothing() throws Exception {
+        try (Session session = newSessionWithHeartbeats()) {
+            // No registrations — heartbeat task must NOT publish.
+            session.sendHeartbeatQuietly();
+            verify(controlMsgBuilder, never()).value(any(byte[].class));
+        }
+    }
+
+    @Test
+    void heartbeatAfterRetireOmitsRetiredQueryId() throws Exception {
+        try (Session session = newSessionWithHeartbeats()) {
+            PrivateQuery pq1 = session.registerPrivateQuery(
+                    List.of("persistent://t/n/a"), "x = 1");
+            PrivateQuery pq2 = session.registerPrivateQuery(
+                    List.of("persistent://t/n/b"), "x = 2");
+            // Retire pq1.
+            session.retirePrivateQuery(pq1);
+
+            session.sendHeartbeatQuietly();
+
+            // Captured payloads: REGISTER pq1, REGISTER pq2, UNREGISTER pq1, HEARTBEAT.
+            ArgumentCaptor<byte[]> payloads = ArgumentCaptor.forClass(byte[].class);
+            verify(controlMsgBuilder, times(4)).value(payloads.capture());
+            byte[] hb = payloads.getAllValues().get(3);
+            FilterRequest req = MAPPER.readValue(hb, FilterRequest.class);
+            assertThat(req.getCommand()).isEqualTo(Command.HEARTBEAT);
+            assertThat(req.getQueryIds()).containsExactly(pq2.queryId());
+        }
+    }
+
+    @Test
+    void disableHeartbeatSkipsScheduler() throws Exception {
+        // With heartbeats disabled, no background scheduler thread is created. The proof is that
+        // close() returns promptly (no awaitTermination on a missing scheduler) and that the
+        // only publish on the wire is the REGISTER. The sendHeartbeatQuietly method itself stays
+        // package-visible and would publish if called — but a disabled session never triggers it.
+        Session session = newSession(PrivateTopicPolicy.DEFAULT); // helper disables HB
+        session.registerPrivateQuery(List.of("persistent://t/n/a"), "x = 1");
+        session.close();
+        ArgumentCaptor<byte[]> payloads = ArgumentCaptor.forClass(byte[].class);
+        verify(controlMsgBuilder, times(1)).value(payloads.capture());
+        FilterRequest req = MAPPER.readValue(payloads.getValue(), FilterRequest.class);
+        assertThat(req.getCommand()).isEqualTo(Command.REGISTER);
+    }
+
+    @Test
+    void heartbeatPublishKeyIsArbitraryNotAQueryId() throws Exception {
+        try (Session session = newSessionWithHeartbeats()) {
+            session.registerPrivateQuery(List.of("persistent://t/n/a"), "x = 1");
+            session.sendHeartbeatQuietly();
+
+            // Last key() invocation belongs to the HEARTBEAT; assert it starts with "heartbeat-".
+            ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+            verify(controlMsgBuilder, times(2)).key(keys.capture());  // REGISTER key + HEARTBEAT key
+            String hbKey = keys.getAllValues().get(1);
+            assertThat(hbKey).startsWith("heartbeat-");
+        }
     }
 }

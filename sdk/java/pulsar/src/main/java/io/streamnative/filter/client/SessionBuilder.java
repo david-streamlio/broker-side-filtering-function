@@ -33,6 +33,9 @@ public final class SessionBuilder {
     private String privateTopicTenant    = "public";
     private String privateTopicNamespace = "filtered";
     private PrivateTopicPolicy privateTopicPolicy = PrivateTopicPolicy.DEFAULT;
+    /** Heartbeat publish interval. {@code 0} disables. Default 30s matches the orchestrator default
+     *  heartbeat-max-stale-seconds=90 (three missed heartbeats → declared dead). */
+    private long heartbeatIntervalSeconds = 30L;
 
     SessionBuilder() {}
 
@@ -76,6 +79,24 @@ public final class SessionBuilder {
         return this;
     }
 
+    /**
+     * Set the heartbeat publish interval (in seconds). The Session sends one HEARTBEAT message
+     * per interval listing all of its currently-live queryIds; the orchestrator uses these to
+     * detect SDK consumers that died without calling close(). Set to {@code 0} to disable.
+     * Defaults to {@code 30}, matching the orchestrator default {@code heartbeat-max-stale-seconds=90}
+     * (three missed heartbeats before a queryId is declared dead).
+     */
+    public SessionBuilder heartbeatIntervalSeconds(long seconds) {
+        this.heartbeatIntervalSeconds = Math.max(0L, seconds);
+        return this;
+    }
+
+    /** Convenience: turn off heartbeats entirely. Equivalent to {@code heartbeatIntervalSeconds(0)}. */
+    public SessionBuilder disableHeartbeat() {
+        this.heartbeatIntervalSeconds = 0L;
+        return this;
+    }
+
     public Session build() throws PulsarClientException {
         Objects.requireNonNull(controlTopic, "controlTopic is required");
         if (pulsarClient == null && (serviceUrl == null || serviceUrl.isBlank())) {
@@ -106,6 +127,7 @@ public final class SessionBuilder {
         }
 
         return new Session(client, ownsClient, admin, ownsAdmin,
-                controlTopic, privateTopicTenant, privateTopicNamespace, privateTopicPolicy);
+                controlTopic, privateTopicTenant, privateTopicNamespace, privateTopicPolicy,
+                heartbeatIntervalSeconds);
     }
 }
