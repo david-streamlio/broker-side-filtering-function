@@ -733,6 +733,59 @@ heartbeating but stuck in a deadlocked message handler will NOT trigger dead-con
 Application-level heartbeats (e.g., a separate health endpoint, or a custom probe consumer on the
 filtered output topic) cover that gap.
 
+### Orchestrator observability
+
+The orchestrator's idle-filter sweeper emits per-tick counters via `Context.recordMetric(...)`,
+visible through `pulsar-admin functions stats` and the function-worker Prometheus endpoint. Use
+these to monitor reclaim throughput and detect sweeper-side failures before they accumulate
+silently across ticks.
+
+**Sweeper metrics:**
+
+| Metric | Recorded as | Meaning |
+|---|---|---|
+| `orchestrator.gc.candidates_evaluated` | `+1` per `t:` entry inspected | Filter-function registry entries the sweeper considered this tick. |
+| `orchestrator.gc.functions_deleted` | `+1` per successful end-to-end GC | Filter functions reclaimed (function delete + control topic delete + `t:` retract all succeeded). |
+| `orchestrator.gc.skipped_recent_register` | `+1` per recency-check miss | Snapshot looked GC-eligible but the per-key re-read showed a concurrent REGISTER refreshed it — sweeper backed off correctly. |
+| `orchestrator.gc.errors` | `+1` per failed GC step | Function delete, topic delete, or `t:` retract failed with a non-`NotFound` error. The `t:` entry survives and the next tick retries. |
+| `orchestrator.heartbeats.synthesized` | `+1` per synthesized UNREGISTER | The sweeper declared a queryId dead (its `lastSeen` was older than `heartbeat-max-stale-seconds`) and ran the UNREGISTER fan-out on its behalf. |
+| `orchestrator.heartbeats.skipped_recent` | `+1` per recency-check miss | Snapshot showed a `q:` entry stale, but the per-key re-read showed a fresh HEARTBEAT arrived — sweeper backed off correctly. |
+| `orchestrator.heartbeats.errors` | `+1` per failed synthesize | The synthesize-UNREGISTER callback threw. The `q:` entry survives and the next tick retries. |
+
+**Reading the counters.**
+
+```bash
+pulsar-admin functions stats public/default/selector-filter-orchestrator-XXXX
+```
+
+The relevant counters appear under `userMetrics` (alongside the per-message orchestrator
+counters from `process()` such as `orchestrator.requests.received` / `.accepted` /
+`.rejected_*`). When scraped via the function-worker Prometheus endpoint the dots become
+underscores, so dashboard expressions look like:
+
+```
+reclaim rate       = rate(orchestrator_gc_functions_deleted[5m])
+sweeper error rate = rate(orchestrator_gc_errors[5m]) + rate(orchestrator_heartbeats_errors[5m])
+contention rate    = rate(orchestrator_gc_skipped_recent_register[5m]) + rate(orchestrator_heartbeats_skipped_recent[5m])
+```
+
+A non-zero `sweeper error rate` is the alertable signal — the sweeper is self-healing across
+ticks, but a persistent error rate means a permanent fault (most often a missing `delete`
+permission on the per-function control-topic namespace; see **Idle filter GC → Permissions**).
+
+**Structured DEBUG logs.** Every successful GC delete and every synthesized UNREGISTER also
+emits a canonical key=value log line at DEBUG level alongside the existing INFO line. Format:
+
+```
+gc action=delete fn=<function-name> key=<registry-key> ctrl=<control-topic> reason=<idle|stale_heartbeat> elapsed_ms=<n>
+gc action=synthesize_unregister query=<queryId> reason=stale_heartbeat elapsed_ms=<n>
+```
+
+Values do not contain spaces (function names, registry keys, and Pulsar topic URIs are all
+space-free by construction), so a simple `split(' ')` followed by `split('=', 2)` is enough
+for a scraper. The human-readable INFO line will be dropped one release after operators
+migrate.
+
 ## Project layout
 
 ```
