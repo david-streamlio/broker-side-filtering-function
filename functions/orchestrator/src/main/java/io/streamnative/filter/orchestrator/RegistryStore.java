@@ -93,6 +93,21 @@ final class RegistryStore {
         producer.newMessage().key(QUERY_KEY_PREFIX + queryId).value(null).send();
     }
 
+    /**
+     * Iterate every {@code q:}-prefixed entry currently in the TableView, decoding each into a
+     * {@link QueryEntry}. Used by the idle-filter sweeper to find queryIds whose
+     * {@link QueryEntry#getLastSeen()} indicates the SDK has stopped heartbeating. The same
+     * not-a-transactional-snapshot caveat as {@link #forEachInputTopicEntry(BiConsumer)} applies.
+     */
+    void forEachQueryEntry(BiConsumer<String, QueryEntry> consumer) {
+        for (Map.Entry<String, byte[]> e : view.entrySet()) {
+            if (!e.getKey().startsWith(QUERY_KEY_PREFIX)) continue;
+            String queryId = e.getKey().substring(QUERY_KEY_PREFIX.length());
+            QueryEntry entry = decode(e.getValue(), QueryEntry.class);
+            consumer.accept(queryId, entry);
+        }
+    }
+
     // ---------- internals ----------
 
     private void publish(String key, Object value) throws PulsarClientException {

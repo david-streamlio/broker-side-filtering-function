@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -456,16 +457,183 @@ class IdleFilterSweeperTests {
     // ---------------------------------------------------------------- defensive
 
     @Test
-    void qPrefixEntriesAreIgnoredByIteration() throws Exception {
+    void qPrefixEntriesAreIgnoredByTPass() throws Exception {
         Instant idleSince = Instant.parse("2026-05-12T20:00:00Z");
         Instant now       = idleSince.plusSeconds(120);
         seedT("in/a", baseEntry("a").withQueryId("q-1").withoutQueryId("q-1", idleSince));
-        // Drop a junk q: entry in storage — sweeper must not crash trying to decode it as a
-        // RegistryEntry.
-        seedQ("some-query-id", "this is not a registry entry".getBytes());
+        // A coexisting valid q: entry must not affect the t: GC pass. (Pre-heartbeat support, a
+        // junk-bytes q: entry was used here to test prefix filtering; now we also have a real q:
+        // pass over QueryEntries, so the test uses a well-formed entry. The intent — q: entries
+        // do not break t: iteration — survives.)
+        seedQ("some-query-id", MAPPER.writeValueAsBytes(new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/filtered/ctrl-x"),
+                List.of("in/a"))));
 
         IdleFilterSweeper.SweepStats stats = sweeperAt(now).sweep();
         assertThat(stats.evaluated).isEqualTo(1);
         assertThat(stats.deleted).isEqualTo(1);
+    }
+
+    // ---------------------------------------------------------------- Stale-heartbeat detection
+
+    @Test
+    void freshHeartbeatNeverSynthesizesUnregister() throws Exception {
+        Instant lastSeen = Instant.parse("2026-05-12T22:00:00Z");
+        Instant now      = lastSeen.plusSeconds(30);  // 30s < 60s default maxStale (we set 60s below)
+
+        // GC + heartbeat both enabled with 60s maxStale.
+        config = OrchestratorConfig.forTestingWithHeartbeat(
+                "persistent://public/orchestrator/state",
+                "function://public/filters/selector-filter@1.0.0",
+                FN_TENANT, FN_NAMESPACE,
+                60L);
+
+        QueryEntry q = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/filtered/ctrl-trades"),
+                List.of("in/trades"),
+                lastSeen.toString());
+        seedQ("q-1", MAPPER.writeValueAsBytes(q));
+
+        java.util.List<String> synthesized = new java.util.ArrayList<>();
+        IdleFilterSweeper sweeper = new IdleFilterSweeper(registry, admin, config,
+                Clock.fixed(now, ZoneOffset.UTC), ct -> {}, (qid, qe) -> synthesized.add(qid));
+
+        IdleFilterSweeper.SweepStats stats = sweeper.sweep();
+
+        assertThat(stats.heartbeatsEvaluated).isEqualTo(1);
+        assertThat(stats.heartbeatsSynthesized).isEqualTo(0);
+        assertThat(synthesized).isEmpty();
+    }
+
+    @Test
+    void staleHeartbeatSynthesizesUnregister() throws Exception {
+        Instant lastSeen = Instant.parse("2026-05-12T22:00:00Z");
+        Instant now      = lastSeen.plusSeconds(120);  // > 60s maxStale
+
+        config = OrchestratorConfig.forTestingWithHeartbeat(
+                "persistent://public/orchestrator/state",
+                "function://public/filters/selector-filter@1.0.0",
+                FN_TENANT, FN_NAMESPACE,
+                60L);
+
+        QueryEntry stale = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/filtered/ctrl-trades"),
+                List.of("in/trades"),
+                lastSeen.toString());
+        seedQ("q-stale", MAPPER.writeValueAsBytes(stale));
+
+        java.util.List<String> synthesized = new java.util.ArrayList<>();
+        IdleFilterSweeper sweeper = new IdleFilterSweeper(registry, admin, config,
+                Clock.fixed(now, ZoneOffset.UTC), ct -> {}, (qid, qe) -> synthesized.add(qid));
+
+        IdleFilterSweeper.SweepStats stats = sweeper.sweep();
+
+        assertThat(stats.heartbeatsEvaluated).isEqualTo(1);
+        assertThat(stats.heartbeatsSynthesized).isEqualTo(1);
+        assertThat(synthesized).containsExactly("q-stale");
+    }
+
+    @Test
+    void preHeartbeatEntryWithNullLastSeenIsNeverStale() throws Exception {
+        Instant now = Instant.parse("2026-05-12T22:10:00Z");
+
+        config = OrchestratorConfig.forTestingWithHeartbeat(
+                "persistent://public/orchestrator/state",
+                "function://public/filters/selector-filter@1.0.0",
+                FN_TENANT, FN_NAMESPACE,
+                60L);
+
+        // Legacy q: entry — null lastSeen because it was written before heartbeat support.
+        QueryEntry legacy = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/filtered/ctrl-trades"),
+                List.of("in/trades"));
+        seedQ("q-legacy", MAPPER.writeValueAsBytes(legacy));
+
+        java.util.List<String> synthesized = new java.util.ArrayList<>();
+        IdleFilterSweeper sweeper = new IdleFilterSweeper(registry, admin, config,
+                Clock.fixed(now, ZoneOffset.UTC), ct -> {}, (qid, qe) -> synthesized.add(qid));
+
+        IdleFilterSweeper.SweepStats stats = sweeper.sweep();
+
+        // The legacy entry was evaluated but null lastSeen means "not stale" per the design.
+        assertThat(stats.heartbeatsEvaluated).isEqualTo(1);
+        assertThat(stats.heartbeatsSynthesized).isEqualTo(0);
+        assertThat(synthesized).isEmpty();
+    }
+
+    @Test
+    void heartbeatRecencyCheckCatchesRecentTouch() throws Exception {
+        Instant snapshotLastSeen = Instant.parse("2026-05-12T22:00:00Z");
+        Instant now              = snapshotLastSeen.plusSeconds(120);
+
+        config = OrchestratorConfig.forTestingWithHeartbeat(
+                "persistent://public/orchestrator/state",
+                "function://public/filters/selector-filter@1.0.0",
+                FN_TENANT, FN_NAMESPACE,
+                60L);
+
+        QueryEntry snapshot = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/filtered/ctrl-trades"),
+                List.of("in/trades"),
+                snapshotLastSeen.toString());
+        seedQ("q-revived", MAPPER.writeValueAsBytes(snapshot));
+
+        // Simulate a concurrent HEARTBEAT arriving between snapshot iteration and recency re-read.
+        // The per-key get returns a refreshed entry with current lastSeen.
+        QueryEntry refreshed = snapshot.withLastSeen(now.minusSeconds(5));
+        when(view.get(RegistryStore.QUERY_KEY_PREFIX + "q-revived"))
+                .thenReturn(MAPPER.writeValueAsBytes(refreshed));
+
+        java.util.List<String> synthesized = new java.util.ArrayList<>();
+        IdleFilterSweeper sweeper = new IdleFilterSweeper(registry, admin, config,
+                Clock.fixed(now, ZoneOffset.UTC), ct -> {}, (qid, qe) -> synthesized.add(qid));
+
+        IdleFilterSweeper.SweepStats stats = sweeper.sweep();
+
+        assertThat(stats.heartbeatsEvaluated).isEqualTo(1);
+        assertThat(stats.heartbeatsSynthesized).isEqualTo(0);
+        assertThat(stats.heartbeatsSkippedRecent).isEqualTo(1);
+        assertThat(synthesized).isEmpty();
+    }
+
+    @Test
+    void synthesizeUnregisterErrorContinuesOnNextCandidate() throws Exception {
+        Instant lastSeen = Instant.parse("2026-05-12T22:00:00Z");
+        Instant now      = lastSeen.plusSeconds(120);
+
+        config = OrchestratorConfig.forTestingWithHeartbeat(
+                "persistent://public/orchestrator/state",
+                "function://public/filters/selector-filter@1.0.0",
+                FN_TENANT, FN_NAMESPACE,
+                60L);
+
+        QueryEntry stale = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/filtered/ctrl-x"),
+                List.of("in/x"),
+                lastSeen.toString());
+        seedQ("q-bad",  MAPPER.writeValueAsBytes(stale));
+        seedQ("q-good", MAPPER.writeValueAsBytes(stale));
+
+        java.util.List<String> synthesized = new java.util.ArrayList<>();
+        IdleFilterSweeper sweeper = new IdleFilterSweeper(registry, admin, config,
+                Clock.fixed(now, ZoneOffset.UTC),
+                ct -> {},
+                (qid, qe) -> {
+                    if ("q-bad".equals(qid)) throw new RuntimeException("simulated failure");
+                    synthesized.add(qid);
+                });
+
+        IdleFilterSweeper.SweepStats stats = sweeper.sweep();
+
+        assertThat(stats.heartbeatsEvaluated).isEqualTo(2);
+        assertThat(stats.heartbeatsSynthesized).isEqualTo(1);
+        assertThat(stats.heartbeatsErrors).isEqualTo(1);
+        assertThat(synthesized).containsExactly("q-good");
     }
 }

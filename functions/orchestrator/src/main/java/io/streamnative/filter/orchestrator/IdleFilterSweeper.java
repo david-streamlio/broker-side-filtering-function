@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -51,22 +52,44 @@ final class IdleFilterSweeper implements AutoCloseable {
      * {@code allowAutoTopicCreation=true}, so we cannot disable it broker-side).
      */
     private final Consumer<String> beforeTopicDelete;
+    /**
+     * Invoked by the dead-consumer pass to synthesize an UNREGISTER for a queryId whose
+     * heartbeat has gone stale. The callback receives the queryId + its current QueryEntry and is
+     * expected to do what {@code handleUnregister} would do (tombstone control topics, decrement
+     * activeQueryIds, retract the q: entry). Default no-op so callers that do not need
+     * dead-consumer detection (e.g. unit tests focused only on t: GC) are unaffected.
+     */
+    private final ThrowingBiConsumer<String, QueryEntry> synthesizeUnregister;
 
     private ScheduledExecutorService scheduler;
 
     IdleFilterSweeper(RegistryStore registry, PulsarAdmin admin,
                       OrchestratorConfig config, Clock clock) {
-        this(registry, admin, config, clock, t -> {});
+        this(registry, admin, config, clock, t -> {}, (qid, q) -> {});
     }
 
     IdleFilterSweeper(RegistryStore registry, PulsarAdmin admin,
                       OrchestratorConfig config, Clock clock,
                       Consumer<String> beforeTopicDelete) {
-        this.registry          = registry;
-        this.admin             = admin;
-        this.config            = config;
-        this.clock             = clock;
-        this.beforeTopicDelete = beforeTopicDelete;
+        this(registry, admin, config, clock, beforeTopicDelete, (qid, q) -> {});
+    }
+
+    IdleFilterSweeper(RegistryStore registry, PulsarAdmin admin,
+                      OrchestratorConfig config, Clock clock,
+                      Consumer<String> beforeTopicDelete,
+                      ThrowingBiConsumer<String, QueryEntry> synthesizeUnregister) {
+        this.registry             = registry;
+        this.admin                = admin;
+        this.config               = config;
+        this.clock                = clock;
+        this.beforeTopicDelete    = beforeTopicDelete;
+        this.synthesizeUnregister = synthesizeUnregister;
+    }
+
+    /** {@link BiConsumer} that can throw checked exceptions (performUnregister can). */
+    @FunctionalInterface
+    interface ThrowingBiConsumer<A, B> {
+        void accept(A a, B b) throws Exception;
     }
 
     /**
@@ -123,6 +146,39 @@ final class IdleFilterSweeper implements AutoCloseable {
         SweepStats stats = new SweepStats();
         Instant now = Instant.now(clock);
         Duration ttl = Duration.ofSeconds(config.idleGcTtlSeconds());
+        Duration maxStale = Duration.ofSeconds(config.heartbeatMaxStaleSeconds());
+
+        // Pass 0: dead-consumer detection. Walk q: entries; for any whose lastSeen is older than
+        // maxStale, synthesize an UNREGISTER. This empties the corresponding t: entries'
+        // activeQueryIds, which lets the existing t: GC pass below pick them up after one more
+        // idle-gc-ttl window (so total dead-to-deleted = maxStale + ttl + sweep slack).
+        List<DeadCandidate> deadCandidates = new ArrayList<>();
+        registry.forEachQueryEntry((queryId, entry) -> {
+            stats.heartbeatsEvaluated++;
+            if (isStale(entry, now, maxStale)) {
+                deadCandidates.add(new DeadCandidate(queryId, entry));
+            }
+        });
+        for (DeadCandidate c : deadCandidates) {
+            // Recency re-read — a fresh HEARTBEAT may have landed since the snapshot.
+            QueryEntry current = registry.getQueryEntry(c.queryId);
+            if (!isStale(current, now, maxStale)) {
+                LOG.debug("Skipping synthesize-unregister for queryId={}: heartbeat arrived "
+                        + "since snapshot", c.queryId);
+                stats.heartbeatsSkippedRecent++;
+                continue;
+            }
+            try {
+                synthesizeUnregister.accept(c.queryId, current);
+                stats.heartbeatsSynthesized++;
+                LOG.info("Synthesized UNREGISTER for stale queryId={} (lastSeen={} now={})",
+                        c.queryId, current.getLastSeen(), now);
+            } catch (Exception e) {
+                LOG.warn("synthesizeUnregister failed for queryId={}: {}. Next tick will retry.",
+                        c.queryId, e.getMessage());
+                stats.heartbeatsErrors++;
+            }
+        }
 
         // First pass: snapshot candidates. Iterating the TableView while issuing deletes against
         // the same view can hide entries from the iterator, so we materialize the candidate keys
@@ -177,6 +233,20 @@ final class IdleFilterSweeper implements AutoCloseable {
                     current.getIdleSince());
         }
         return stats;
+    }
+
+    /** Whether {@code q} has gone past its heartbeat-staleness threshold. */
+    private boolean isStale(QueryEntry q, Instant now, Duration maxStale) {
+        if (q == null) return false;
+        if (q.getLastSeen() == null) return false;  // pre-heartbeat entries are never stale
+        Instant ls;
+        try {
+            ls = Instant.parse(q.getLastSeen());
+        } catch (Exception e) {
+            LOG.warn("Unparseable lastSeen=[{}] on QueryEntry; skipping", q.getLastSeen());
+            return false;
+        }
+        return Duration.between(ls, now).compareTo(maxStale) >= 0;
     }
 
     /** Whether {@code entry} would be GC-eligible at {@code now}. */
@@ -235,13 +305,24 @@ final class IdleFilterSweeper implements AutoCloseable {
         int deleted;
         int skippedRecentRegister;
         int errors;
+        int heartbeatsEvaluated;
+        int heartbeatsSynthesized;
+        int heartbeatsSkippedRecent;
+        int heartbeatsErrors;
 
         @Override
         public String toString() {
             return "SweepStats{evaluated=" + evaluated
                     + ", deleted=" + deleted
                     + ", skippedRecentRegister=" + skippedRecentRegister
-                    + ", errors=" + errors + '}';
+                    + ", errors=" + errors
+                    + ", heartbeatsEvaluated=" + heartbeatsEvaluated
+                    + ", heartbeatsSynthesized=" + heartbeatsSynthesized
+                    + ", heartbeatsSkippedRecent=" + heartbeatsSkippedRecent
+                    + ", heartbeatsErrors=" + heartbeatsErrors
+                    + '}';
         }
     }
+
+    private record DeadCandidate(String queryId, QueryEntry entry) {}
 }

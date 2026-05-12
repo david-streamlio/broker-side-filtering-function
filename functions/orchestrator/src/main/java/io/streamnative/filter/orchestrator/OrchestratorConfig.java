@@ -53,6 +53,14 @@ final class OrchestratorConfig {
     /** How often the sweeper evaluates t: entries. */
     static final String KEY_IDLE_GC_SWEEP_INTERVAL    = "idle-gc-sweep-interval-seconds";
 
+    /**
+     * Maximum allowed gap between SDK heartbeats before the orchestrator synthesizes an
+     * UNREGISTER for a queryId. Independent of idle-gc-ttl-seconds — staleness is about
+     * "consumer no longer responding," idle TTL is about "all consumers cleanly closed and
+     * nothing rebound." Default is 90s (three missed heartbeats at the SDK default 30s interval).
+     */
+    static final String KEY_HEARTBEAT_MAX_STALE       = "heartbeat-max-stale-seconds";
+
     private final String stateTopic;
     private final String functionPackageUrl;
     private final String functionTenant;
@@ -66,6 +74,7 @@ final class OrchestratorConfig {
     private final boolean idleGcEnabled;
     private final long idleGcTtlSeconds;
     private final long idleGcSweepIntervalSeconds;
+    private final long heartbeatMaxStaleSeconds;
 
     private OrchestratorConfig(String stateTopic, String functionPackageUrl,
                                String functionTenant, String functionNamespace,
@@ -73,7 +82,8 @@ final class OrchestratorConfig {
                                int functionParallelism, boolean applyCompaction,
                                long compactionThresholdBytes, String pulsarAdminUrl,
                                boolean idleGcEnabled, long idleGcTtlSeconds,
-                               long idleGcSweepIntervalSeconds) {
+                               long idleGcSweepIntervalSeconds,
+                               long heartbeatMaxStaleSeconds) {
         this.stateTopic                  = stateTopic;
         this.functionPackageUrl          = functionPackageUrl;
         this.functionTenant              = functionTenant;
@@ -87,6 +97,7 @@ final class OrchestratorConfig {
         this.idleGcEnabled               = idleGcEnabled;
         this.idleGcTtlSeconds            = idleGcTtlSeconds;
         this.idleGcSweepIntervalSeconds  = idleGcSweepIntervalSeconds;
+        this.heartbeatMaxStaleSeconds    = heartbeatMaxStaleSeconds;
     }
 
     static OrchestratorConfig fromContext(Context ctx) {
@@ -103,9 +114,10 @@ final class OrchestratorConfig {
         boolean gcEnabled    = optionalBoolean(ctx, KEY_IDLE_GC_ENABLED, false);
         long gcTtl           = optionalLong(ctx, KEY_IDLE_GC_TTL_SECONDS, 300L);
         long gcInterval      = optionalLong(ctx, KEY_IDLE_GC_SWEEP_INTERVAL, 30L);
+        long hbMaxStale      = optionalLong(ctx, KEY_HEARTBEAT_MAX_STALE, 90L);
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 ctrlTenant, ctrlNamespace, parallelism, compaction, threshold, adminUrl,
-                gcEnabled, gcTtl, gcInterval);
+                gcEnabled, gcTtl, gcInterval, hbMaxStale);
     }
 
     /** Package-private factory for tests — GC disabled by default. */
@@ -114,7 +126,7 @@ final class OrchestratorConfig {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
                 "http://localhost:8080",
-                false, 300L, 30L);
+                false, 300L, 30L, 90L);
     }
 
     /** Test factory exposing GC knobs — used by IdleFilterSweeper tests. */
@@ -125,7 +137,17 @@ final class OrchestratorConfig {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
                 "http://localhost:8080",
-                gcEnabled, gcTtlSeconds, gcSweepIntervalSeconds);
+                gcEnabled, gcTtlSeconds, gcSweepIntervalSeconds, 90L);
+    }
+
+    /** Test factory exposing both idle-GC and heartbeat knobs. */
+    static OrchestratorConfig forTestingWithHeartbeat(String stateTopic, String packageUrl,
+                                                     String fnTenant, String fnNamespace,
+                                                     long heartbeatMaxStaleSeconds) {
+        return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
+                fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
+                "http://localhost:8080",
+                true, 300L, 30L, heartbeatMaxStaleSeconds);
     }
 
     public String stateTopic()                  { return stateTopic; }
@@ -141,6 +163,7 @@ final class OrchestratorConfig {
     public boolean idleGcEnabled()              { return idleGcEnabled; }
     public long idleGcTtlSeconds()              { return idleGcTtlSeconds; }
     public long idleGcSweepIntervalSeconds()    { return idleGcSweepIntervalSeconds; }
+    public long heartbeatMaxStaleSeconds()      { return heartbeatMaxStaleSeconds; }
 
     private static String requireString(Context ctx, String key) {
         Object raw = ctx.getUserConfigValue(key).orElse(null);
@@ -194,6 +217,7 @@ final class OrchestratorConfig {
                 && idleGcEnabled == that.idleGcEnabled
                 && idleGcTtlSeconds == that.idleGcTtlSeconds
                 && idleGcSweepIntervalSeconds == that.idleGcSweepIntervalSeconds
+                && heartbeatMaxStaleSeconds == that.heartbeatMaxStaleSeconds
                 && Objects.equals(stateTopic, that.stateTopic)
                 && Objects.equals(functionPackageUrl, that.functionPackageUrl)
                 && Objects.equals(functionTenant, that.functionTenant)
@@ -208,6 +232,7 @@ final class OrchestratorConfig {
         return Objects.hash(stateTopic, functionPackageUrl, functionTenant, functionNamespace,
                 controlTopicTenant, controlTopicNamespace, functionParallelism,
                 applyCompaction, compactionThresholdBytes, pulsarAdminUrl,
-                idleGcEnabled, idleGcTtlSeconds, idleGcSweepIntervalSeconds);
+                idleGcEnabled, idleGcTtlSeconds, idleGcSweepIntervalSeconds,
+                heartbeatMaxStaleSeconds);
     }
 }

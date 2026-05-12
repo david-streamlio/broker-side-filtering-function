@@ -116,7 +116,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
 
         if (config.idleGcEnabled()) {
             this.idleFilterSweeper = new IdleFilterSweeper(registry, ownedAdmin, config, clock,
-                    this::evictControlProducer);
+                    this::evictControlProducer, this::performUnregister);
             this.idleFilterSweeper.start();
         }
 
@@ -308,6 +308,21 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             ctx.recordMetric("orchestrator.requests.accepted", 1);
             return;
         }
+        performUnregister(queryId, q);
+        ctx.recordMetric("orchestrator.tombstones.fanout", q.getControlTopics().size());
+        ctx.recordMetric("orchestrator.requests.accepted", 1);
+        LOG.info("UNREGISTER queryId={} tombstoned on {} control topic(s)",
+                queryId, q.getControlTopics().size());
+    }
+
+    /**
+     * Core UNREGISTER work, factored out so the {@link IdleFilterSweeper} can synthesize an
+     * UNREGISTER on dead-consumer detection without re-entering the message-processing path.
+     * Tombstones the queryId on each control topic, decrements {@code activeQueryIds} on each
+     * referenced {@code t:} entry, and retracts the {@code q:} entry. Idempotent — a repeated call
+     * with the same queryId is a no-op because the q: entry has been removed.
+     */
+    void performUnregister(String queryId, QueryEntry q) throws Exception {
         // Tombstone the queryId on every per-function control topic it was published to.
         for (String controlTopic : q.getControlTopics()) {
             Producer<byte[]> p = controlProducerFor(controlTopic);
@@ -328,16 +343,12 @@ public class OrchestratorFunction implements Function<byte[], Void> {
                 }
             }
         } else {
-            LOG.debug("UNREGISTER queryId={} has legacy QueryEntry without registryKeys; "
+            LOG.debug("performUnregister queryId={} has legacy QueryEntry without registryKeys; "
                     + "activeQueryIds bookkeeping skipped (filter will not be GC-eligible)",
                     queryId);
         }
 
         registry.removeQueryEntry(queryId);
-        ctx.recordMetric("orchestrator.tombstones.fanout", q.getControlTopics().size());
-        ctx.recordMetric("orchestrator.requests.accepted", 1);
-        LOG.info("UNREGISTER queryId={} tombstoned on {} control topic(s)",
-                queryId, q.getControlTopics().size());
     }
 
     // ---------------------------------------------------------------- helpers
