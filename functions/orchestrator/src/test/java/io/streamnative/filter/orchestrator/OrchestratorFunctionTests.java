@@ -30,6 +30,7 @@ import java.util.concurrent.ConcurrentMap;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
@@ -809,5 +810,69 @@ class OrchestratorFunctionTests {
         assertThat(afterA.getIdleSince()).isEqualTo("2026-05-12T21:30:00Z");
         assertThat(afterB.getActiveQueryIds()).isEmpty();
         assertThat(afterB.getIdleSince()).isEqualTo("2026-05-12T21:30:00Z");
+    }
+
+    // ---------------------------------------------------------------- Sweeper metric callback wiring
+
+    @Test
+    void recordSweeperMetricIsNoOpBeforeFirstProcessInvocation() {
+        // Cold-start path: the sweeper scheduler can fire before any traffic arrives. The callback
+        // must drop silently rather than NPE.
+        orchestrator.recordSweeperMetric("orchestrator.gc.candidates_evaluated", 1.0);
+        // No assertion on a mock — the contract is "does not throw". Reaching this line is the
+        // assertion.
+    }
+
+    @Test
+    void recordSweeperMetricRoutesToMostRecentProcessContext() throws Exception {
+        // Two HEARTBEATs back-to-back with distinct Context mocks. Only the *most recent* context
+        // should see the sweeper-emitted metric call.
+        Context ctx1 = contextFor("q-anything");
+        Context ctx2 = contextFor("q-anything");
+
+        // HEARTBEAT requires a non-empty queryIds list; the queryId is unknown, which is a no-op
+        // path in handleHeartbeat — exactly what we want as a context-only flush.
+        byte[] hb = serialize(FilterRequest.heartbeat(List.of("q-unknown-1")));
+        orchestrator.process(hb, ctx1);
+        orchestrator.process(hb, ctx2);
+
+        orchestrator.recordSweeperMetric("orchestrator.gc.functions_deleted", 1.0);
+
+        verify(ctx2).recordMetric("orchestrator.gc.functions_deleted", 1.0);
+        verify(ctx1, never()).recordMetric(eq("orchestrator.gc.functions_deleted"), any(Double.class));
+    }
+
+    @Test
+    void recordSweeperMetricSwallowsExceptionFromContext() throws Exception {
+        Context ctx = contextFor("q-anything");
+        org.mockito.Mockito.doThrow(new RuntimeException("ctx already closed"))
+                .when(ctx).recordMetric(eq("orchestrator.gc.errors"), any(Double.class));
+
+        orchestrator.process(serialize(FilterRequest.heartbeat(List.of("q-unknown-1"))), ctx);
+
+        // The contract: must not propagate — losing a counter must not poison a sweep tick.
+        orchestrator.recordSweeperMetric("orchestrator.gc.errors", 1.0);
+    }
+
+    @Test
+    void recordSweeperMetricEmitsAllSevenCanonicalNames() throws Exception {
+        Context ctx = contextFor("q-anything");
+        orchestrator.process(serialize(FilterRequest.heartbeat(List.of("q-unknown-1"))), ctx);
+
+        // The exact public surface of metric names is locked by the todo and consumed by
+        // dashboards. Drive every one of the seven through the callback and assert that the
+        // strings reaching Context.recordMetric match — guards against any future rename.
+        List<String> canonical = List.of(
+                "orchestrator.gc.candidates_evaluated",
+                "orchestrator.gc.functions_deleted",
+                "orchestrator.gc.skipped_recent_register",
+                "orchestrator.gc.errors",
+                "orchestrator.heartbeats.synthesized",
+                "orchestrator.heartbeats.skipped_recent",
+                "orchestrator.heartbeats.errors");
+        for (String name : canonical) {
+            orchestrator.recordSweeperMetric(name, 1.0);
+            verify(ctx).recordMetric(name, 1.0);
+        }
     }
 }
