@@ -109,6 +109,12 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
                 .tenant(cfg.functionTenant())
                 .namespace(cfg.functionNamespace())
                 .name(functionName)
+                // Populate `jar` with the package URL up front. Self-managed Pulsar resolves the
+                // URL passed to createFunctionWithUrl(...) server-side, but SN Cloud's
+                // function-mesh admission webhook validates `spec.java.jar` BEFORE that
+                // conversion runs — an empty value fails the webhook with "jar cannot be empty
+                // in java runtime". Setting both is harmless on the URL-based path.
+                .jar(cfg.functionPackageUrl())
                 .runtime(FunctionConfig.Runtime.JAVA)
                 .className(FILTER_FUNCTION_CLASS)
                 .subscriptionPosition(SubscriptionInitialPosition.Earliest)
