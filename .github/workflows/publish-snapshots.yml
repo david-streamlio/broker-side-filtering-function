@@ -1,0 +1,44 @@
+name: Publish snapshots
+
+# Publishes Maven SNAPSHOTs of the SDK + common modules to GitHub Packages on every push
+# to main. Consumers (e.g. Trade-Wise-app's topic-filter-service) point their Maven
+# <repositories> at https://maven.pkg.github.com/david-streamlio/broker-side-filtering-function
+# and authenticate via a personal access token with read:packages scope.
+#
+# The `perf` module is excluded from deploy via maven.deploy.skip in its own POM. The
+# orchestrator + selector-filter NAR modules are still deployable here, but the canonical
+# distribution for those NARs is the GitHub Release (see release-nars.yml).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.java'
+      - '**/pom.xml'
+      - '.github/workflows/publish-snapshots.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: mvn deploy → GitHub Packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Deploy snapshots
+        run: mvn -B -DskipTests deploy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

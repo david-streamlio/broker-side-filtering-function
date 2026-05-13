@@ -140,6 +140,19 @@
         </dependencies>
     </dependencyManagement>
 
+    <distributionManagement>
+        <snapshotRepository>
+            <id>github</id>
+            <name>GitHub Packages — broker-side-filtering-function</name>
+            <url>https://maven.pkg.github.com/david-streamlio/broker-side-filtering-function</url>
+        </snapshotRepository>
+        <repository>
+            <id>github</id>
+            <name>GitHub Packages — broker-side-filtering-function</name>
+            <url>https://maven.pkg.github.com/david-streamlio/broker-side-filtering-function</url>
+        </repository>
+    </distributionManagement>
+
     <build>
         <pluginManagement>
             <plugins>

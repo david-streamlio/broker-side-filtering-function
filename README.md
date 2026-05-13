@@ -624,6 +624,78 @@ This is observable via `SelectorEvaluator.referencesOnlyKey()`, useful for telem
 profiling of registered queries. The optimization is automatic and transparent — clients don't
 have to opt in.
 
+## Consuming the SDK from another repo
+
+The Java SDK modules and the orchestrator + selector-filter NARs are published from this
+repo so downstream projects can adopt them without `mvn install`:
+
+- **Maven SNAPSHOTs → GitHub Packages.** Every push to `main` runs
+  `.github/workflows/publish-snapshots.yml`, which deploys
+  `selector-filter-common`, `selector-filter-client`, and `selector-filter-client-kafka` to
+  `https://maven.pkg.github.com/david-streamlio/broker-side-filtering-function`.
+- **Function NARs → GitHub Releases.** Every `v*` tag triggers
+  `.github/workflows/release-nars.yml`, which attaches
+  `selector-filter-orchestrator-<v>.nar` and `selector-filter-function-<v>.nar` to the
+  release. Consumers download them by URL — see `recreate.sh` examples in any consuming
+  repo.
+
+### Maven consumer setup
+
+Add a `<repository>` block to the consumer's `pom.xml` and declare the GAVs you need:
+
+```xml
+<repositories>
+  <repository>
+    <id>github</id>
+    <name>GitHub Packages — broker-side-filtering-function</name>
+    <url>https://maven.pkg.github.com/david-streamlio/broker-side-filtering-function</url>
+    <snapshots><enabled>true</enabled></snapshots>
+  </repository>
+</repositories>
+
+<dependencies>
+  <dependency>
+    <groupId>io.streamnative</groupId>
+    <artifactId>selector-filter-client</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </dependency>
+  <!-- Use selector-filter-client-kafka instead for the KoP-backed Kafka SDK path. -->
+</dependencies>
+```
+
+Then put a GitHub personal access token with `read:packages` scope in your
+`~/.m2/settings.xml`:
+
+```xml
+<settings>
+  <servers>
+    <server>
+      <id>github</id>
+      <username>YOUR_GITHUB_USERNAME</username>
+      <password>YOUR_PAT_WITH_read:packages</password>
+    </server>
+  </servers>
+</settings>
+```
+
+For Docker-based builds that compile inside the image, mount this `settings.xml` into the
+build (`-v ~/.m2/settings.xml:/root/.m2/settings.xml`) or pass the PAT as a build-arg and
+template it in.
+
+### SN Cloud `kafkaNamespace` caveat
+
+The Kafka SDK path (`selector-filter-client-kafka`) requires the cluster's `kafkaNamespace`
+to **equal the tail of `Session.privateTopicNamespace(...)`** so KoP exposes the
+orchestrator-spawned private output topics on the Kafka protocol. On self-managed Pulsar
+this is set in `broker.conf` (see `deploy/terraform/pulsar-helm/values.broker.kop.yaml`);
+on **StreamNative Cloud** it's a cluster-provisioning property visible in the console — it
+is **not** something the `pulsar` Terraform provider can change after the fact. If your
+private-topic namespace is `tradewise/live-customer-data`, the SN Cloud cluster's
+`kafkaNamespace` must be `live-customer-data` (or `tradewise/live-customer-data`, depending
+on how SN Cloud namespaces the tail). When it doesn't match, the Kafka consumer connects
+cleanly but no records arrive — verify with
+`pulsar-admin brokers get-runtime-config | grep kafkaNamespace` before debugging further.
+
 ## Operations
 
 ### Metrics

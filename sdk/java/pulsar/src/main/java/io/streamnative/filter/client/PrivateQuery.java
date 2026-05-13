@@ -25,6 +25,23 @@ public final class PrivateQuery {
         this.sourceTopics = List.copyOf(sourceTopics);
     }
 
+    /**
+     * Rebuild a {@code PrivateQuery} handle from values previously persisted by the caller
+     * (e.g., in a database). Intended for stateful agents that survive process restarts and
+     * need to call {@link Session#updatePrivateQuery} or {@link Session#retirePrivateQuery}
+     * on a queryId that was originally returned by an earlier process.
+     *
+     * <p>The SDK does not validate the queryId against the orchestrator — the orchestrator
+     * silently no-ops on UNREGISTER for unknown queryIds and silently routes MODIFY to
+     * matching filter-function instances. The caller is responsible for supplying values
+     * that match what {@link Session#registerPrivateQuery} originally returned.
+     */
+    public static PrivateQuery fromPersistedState(String queryId,
+                                                  String privateTopic,
+                                                  List<String> sourceTopics) {
+        return new PrivateQuery(queryId, privateTopic, sourceTopics);
+    }
+
     /** Stable identifier; same value used to publish, update, and retract the query. */
     public String queryId() {
         return queryId;

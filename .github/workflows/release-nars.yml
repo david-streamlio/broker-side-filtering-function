@@ -1,0 +1,55 @@
+name: Release NARs
+
+# On every v* tag, builds the orchestrator and selector-filter NARs and attaches them to
+# the corresponding GitHub Release. Consumers (e.g. Trade-Wise-app's recreate.sh /
+# deploy-orchestrator.sh) curl them by URL:
+#
+#   curl -L -o /tmp/orchestrator.nar \
+#     "https://github.com/david-streamlio/broker-side-filtering-function/releases/download/v1.0.0/selector-filter-orchestrator-v1.0.0.nar"
+#
+# The Maven SNAPSHOTs (publish-snapshots.yml) continue to ride main pushes for SDK
+# consumers; this workflow only touches the function NARs, which aren't a great fit for
+# Maven Packages distribution.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Build NARs and attach to release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Set POM version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mvn -B versions:set -DnewVersion="${VERSION}" -DgenerateBackupPoms=false
+
+      - name: Build NARs
+        run: mvn -B -DskipTests -pl functions/selector-filter,functions/orchestrator -am package
+
+      - name: Stage NAR files
+        run: |
+          mkdir -p staging
+          cp functions/orchestrator/target/selector-filter-orchestrator-*.nar staging/
+          cp functions/selector-filter/target/selector-filter-function-*.nar staging/
+          ls -la staging/
+
+      - name: Create release + attach NARs
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/*.nar
+          generate_release_notes: true
+          fail_on_unmatched_files: true
