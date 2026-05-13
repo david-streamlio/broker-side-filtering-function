@@ -29,6 +29,8 @@
         <skipTests>false</skipTests>
         <skipITs>true</skipITs>
         <hdrhistogram.version>2.2.2</hdrhistogram.version>
+        <!-- Internal load harness; not a consumable artifact. -->
+        <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
 
     <dependencies>
