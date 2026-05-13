@@ -41,6 +41,15 @@ final class OrchestratorConfig {
      */
     static final String KEY_PULSAR_ADMIN_URL          = "pulsar-admin-url";
 
+    /**
+     * Optional bearer token applied to the orchestrator's owned PulsarAdmin client. Required
+     * on clusters that enforce broker-side auth (e.g., StreamNative Cloud), where the admin
+     * endpoint returns 401 without it. Leave unset for self-managed Pulsar with auth disabled.
+     * Typical value: a JWT API key for the SA the orchestrator function runs under (with
+     * functions-admin on its own namespace).
+     */
+    static final String KEY_PULSAR_ADMIN_TOKEN        = "pulsar-admin-token";
+
     /** Compaction threshold (bytes) for per-function control topics + registry-state topic. */
     static final String KEY_COMPACTION_THRESHOLD      = "compaction-threshold-bytes";
 
@@ -71,6 +80,7 @@ final class OrchestratorConfig {
     private final boolean applyCompaction;
     private final long compactionThresholdBytes;
     private final String pulsarAdminUrl;
+    private final String pulsarAdminToken;
     private final boolean idleGcEnabled;
     private final long idleGcTtlSeconds;
     private final long idleGcSweepIntervalSeconds;
@@ -81,6 +91,7 @@ final class OrchestratorConfig {
                                String controlTopicTenant, String controlTopicNamespace,
                                int functionParallelism, boolean applyCompaction,
                                long compactionThresholdBytes, String pulsarAdminUrl,
+                               String pulsarAdminToken,
                                boolean idleGcEnabled, long idleGcTtlSeconds,
                                long idleGcSweepIntervalSeconds,
                                long heartbeatMaxStaleSeconds) {
@@ -94,6 +105,7 @@ final class OrchestratorConfig {
         this.applyCompaction             = applyCompaction;
         this.compactionThresholdBytes    = compactionThresholdBytes;
         this.pulsarAdminUrl              = pulsarAdminUrl;
+        this.pulsarAdminToken            = pulsarAdminToken == null ? "" : pulsarAdminToken;
         this.idleGcEnabled               = idleGcEnabled;
         this.idleGcTtlSeconds            = idleGcTtlSeconds;
         this.idleGcSweepIntervalSeconds  = idleGcSweepIntervalSeconds;
@@ -111,13 +123,14 @@ final class OrchestratorConfig {
         boolean compaction   = optionalBoolean(ctx, KEY_APPLY_COMPACTION, true);
         long threshold       = optionalLong(ctx, KEY_COMPACTION_THRESHOLD, 10L * 1024 * 1024); // 10 MB
         String adminUrl      = requireString(ctx, KEY_PULSAR_ADMIN_URL);
+        String adminToken    = optionalString(ctx, KEY_PULSAR_ADMIN_TOKEN, "");
         boolean gcEnabled    = optionalBoolean(ctx, KEY_IDLE_GC_ENABLED, false);
         long gcTtl           = optionalLong(ctx, KEY_IDLE_GC_TTL_SECONDS, 300L);
         long gcInterval      = optionalLong(ctx, KEY_IDLE_GC_SWEEP_INTERVAL, 30L);
         long hbMaxStale      = optionalLong(ctx, KEY_HEARTBEAT_MAX_STALE, 90L);
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 ctrlTenant, ctrlNamespace, parallelism, compaction, threshold, adminUrl,
-                gcEnabled, gcTtl, gcInterval, hbMaxStale);
+                adminToken, gcEnabled, gcTtl, gcInterval, hbMaxStale);
     }
 
     /** Package-private factory for tests — GC disabled by default. */
@@ -125,7 +138,7 @@ final class OrchestratorConfig {
                                          String fnTenant, String fnNamespace) {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
-                "http://localhost:8080",
+                "http://localhost:8080", "",
                 false, 300L, 30L, 90L);
     }
 
@@ -136,7 +149,7 @@ final class OrchestratorConfig {
                                                long gcSweepIntervalSeconds) {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
-                "http://localhost:8080",
+                "http://localhost:8080", "",
                 gcEnabled, gcTtlSeconds, gcSweepIntervalSeconds, 90L);
     }
 
@@ -146,7 +159,7 @@ final class OrchestratorConfig {
                                                      long heartbeatMaxStaleSeconds) {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
-                "http://localhost:8080",
+                "http://localhost:8080", "",
                 true, 300L, 30L, heartbeatMaxStaleSeconds);
     }
 
@@ -160,6 +173,7 @@ final class OrchestratorConfig {
     public boolean applyCompaction()            { return applyCompaction; }
     public long compactionThresholdBytes()      { return compactionThresholdBytes; }
     public String pulsarAdminUrl()              { return pulsarAdminUrl; }
+    public String pulsarAdminToken()            { return pulsarAdminToken; }
     public boolean idleGcEnabled()              { return idleGcEnabled; }
     public long idleGcTtlSeconds()              { return idleGcTtlSeconds; }
     public long idleGcSweepIntervalSeconds()    { return idleGcSweepIntervalSeconds; }
@@ -224,14 +238,15 @@ final class OrchestratorConfig {
                 && Objects.equals(functionNamespace, that.functionNamespace)
                 && Objects.equals(controlTopicTenant, that.controlTopicTenant)
                 && Objects.equals(controlTopicNamespace, that.controlTopicNamespace)
-                && Objects.equals(pulsarAdminUrl, that.pulsarAdminUrl);
+                && Objects.equals(pulsarAdminUrl, that.pulsarAdminUrl)
+                && Objects.equals(pulsarAdminToken, that.pulsarAdminToken);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(stateTopic, functionPackageUrl, functionTenant, functionNamespace,
                 controlTopicTenant, controlTopicNamespace, functionParallelism,
-                applyCompaction, compactionThresholdBytes, pulsarAdminUrl,
+                applyCompaction, compactionThresholdBytes, pulsarAdminUrl, pulsarAdminToken,
                 idleGcEnabled, idleGcTtlSeconds, idleGcSweepIntervalSeconds,
                 heartbeatMaxStaleSeconds);
     }

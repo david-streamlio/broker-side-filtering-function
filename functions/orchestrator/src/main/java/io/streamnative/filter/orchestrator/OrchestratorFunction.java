@@ -7,6 +7,8 @@ import io.streamnative.filter.common.Command;
 import io.streamnative.filter.common.FilterRequest;
 import io.streamnative.filter.common.QueryMessage;
 import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.client.admin.PulsarAdminBuilder;
+import org.apache.pulsar.client.api.AuthenticationFactory;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
@@ -123,9 +125,14 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         // Construct our own PulsarAdmin from userConfig — Context.getPulsarAdmin() is only
         // available when the function worker is configured with pulsarFunctionsCluster, which
         // lightweight (and many production) deployments don't enable by default.
-        this.ownedAdmin = PulsarAdmin.builder()
-                .serviceHttpUrl(config.pulsarAdminUrl())
-                .build();
+        // On clusters that enforce auth (e.g. StreamNative Cloud), pulsar-admin-token must be
+        // supplied — without it, admin calls return 401 and spawn fails.
+        PulsarAdminBuilder adminBuilder = PulsarAdmin.builder()
+                .serviceHttpUrl(config.pulsarAdminUrl());
+        if (!config.pulsarAdminToken().isBlank()) {
+            adminBuilder.authentication(AuthenticationFactory.token(config.pulsarAdminToken()));
+        }
+        this.ownedAdmin = adminBuilder.build();
         this.spawner = new DefaultFilterFunctionSpawner(ownedAdmin);
 
         if (config.idleGcEnabled()) {
