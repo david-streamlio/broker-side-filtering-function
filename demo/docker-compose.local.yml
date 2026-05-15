@@ -1,0 +1,157 @@
+# Local-mode stack — runs entirely on your laptop. No SN Cloud, no terraform,
+# no SA tokens. A streamnative/pulsar-all standalone container ships KoP +
+# functions + auto-topic-creation built in; the rest of the stack auto-detects
+# the no-auth setup and skips SASL / token mounts.
+#
+# Trade-off: local-mode does NOT exercise the auth + RBAC chain — the most
+# fragile part of the system on real clusters. Use it for fast iteration on
+# the multi-query app / queries / observability UI; use docker-compose.yml
+# (cloud-mode) for any test that needs to validate permissions / audience /
+# rolebinding behavior.
+#
+# Bring-up:
+#   docker compose -f docker-compose.local.yml up --build
+#
+# Open <http://localhost:3200> once everything's healthy. Containers boot in
+# this order: pulsar (~30s) → orchestrator-deploy (one-shot, ~20s) → bootstrap
+# (one-shot, ~5s) → shadowtraffic + multi-query-app + observability.
+
+services:
+  pulsar:
+    image: streamnative/sn-pulsar:4.0.5
+    container_name: stock-demo-pulsar
+    command: >
+      sh -c "bin/apply-config-from-env.py conf/standalone.conf &&
+             bin/pulsar standalone --advertised-address pulsar"
+    environment:
+      # KoP — Kafka-on-Pulsar protocol handler. The streamnative/sn-pulsar image
+      # already ships the KoP NAR in protocols/. The PULSAR_PREFIX_ keys are
+      # mapped into broker.conf by apply-config-from-env.
+      PULSAR_PREFIX_messagingProtocols:                       "kafka"
+      PULSAR_PREFIX_protocolHandlerDirectory:                 "./protocols"
+      PULSAR_PREFIX_kafkaListeners:                           "PLAINTEXT://0.0.0.0:9092"
+      PULSAR_PREFIX_kafkaAdvertisedListeners:                 "PLAINTEXT://pulsar:9092"
+      PULSAR_PREFIX_kafkaEnableMultiTenantMetadata:           "true"
+      PULSAR_PREFIX_kafkaTransactionCoordinatorEnabled:       "false"
+      # Functions — required for the orchestrator + spawned selector-filters.
+      PULSAR_PREFIX_functionsWorkerEnabled:                   "true"
+      PULSAR_PREFIX_allowAutoTopicCreation:                   "true"
+      PULSAR_PREFIX_allowAutoTopicCreationType:               "non-partitioned"
+      # Tame the heap so 2-4 GB laptops can run this.
+      PULSAR_MEM:                                              "-Xms512m -Xmx1g -XX:MaxDirectMemorySize=1g"
+    ports:
+      - "8080:8080"     # admin
+      - "6650:6650"     # pulsar binary protocol
+      - "9092:9092"     # KoP Kafka protocol
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/admin/v2/clusters | grep -q standalone || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # One-shot: downloads the selector-filter + orchestrator NARs from the GitHub
+  # release, uploads selector-filter as a Pulsar package, deploys the
+  # orchestrator function. Equivalent to recreate.sh Phase 7 but for the local
+  # standalone broker. Idempotent — re-running on an already-deployed cluster
+  # skips the function-create step.
+  orchestrator-deploy:
+    image: apachepulsar/pulsar:4.0.5
+    container_name: stock-demo-orchestrator-deploy
+    depends_on:
+      pulsar:
+        condition: service_healthy
+    environment:
+      PULSAR_ADMIN_URL: "http://pulsar:8080"
+      SELECTOR_REPO:    "${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
+      SELECTOR_REL:     "${SELECTOR_REL:-v1.0.0-rc3}"
+    volumes:
+      - ./local/orchestrator-deploy.sh:/usr/local/bin/orchestrator-deploy.sh:ro
+      - ./local/orchestrator-function-config.yaml:/etc/orchestrator-function-config.yaml:ro
+    entrypoint: ["/bin/bash", "/usr/local/bin/orchestrator-deploy.sh"]
+
+  bootstrap:
+    image: apachepulsar/pulsar:4.0.5
+    container_name: stock-demo-bootstrap
+    restart: "no"
+    depends_on:
+      orchestrator-deploy:
+        condition: service_completed_successfully
+    environment:
+      PULSAR_ADMIN_URL:       "http://pulsar:8080"
+      DEMO_SOURCE_TOPIC:      "persistent://public/default/stock-quotes"
+      DEMO_CONTROL_TOPIC:     "persistent://public/default/filter-requests"
+      DEMO_SOURCE_PARTITIONS: "1"
+      # PULSAR_TOKEN_FILE intentionally unset — bootstrap.sh auto-detects no-auth.
+    volumes:
+      - ./bootstrap/bootstrap.sh:/usr/local/bin/bootstrap.sh:ro
+    entrypoint: ["/bin/bash", "/usr/local/bin/bootstrap.sh"]
+
+  shadowtraffic:
+    image: shadowtraffic/shadowtraffic:latest
+    container_name: stock-demo-shadowtraffic
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      LICENSE_ID:  "${SHADOWTRAFFIC_LICENSE_ID:?set SHADOWTRAFFIC_LICENSE_ID — local mode still needs a license}"
+      LICENSE_KEY: "${SHADOWTRAFFIC_LICENSE_KEY:?set SHADOWTRAFFIC_LICENSE_KEY}"
+    volumes:
+      - ./shadowtraffic/stock-quotes.json:/etc/shadowtraffic/stock-quotes.json:ro
+    entrypoint: ["/bin/sh", "-c"]
+    # No SASL — pulsar:9092 is PLAINTEXT in local mode.
+    command: >
+      'export SHADOWTRAFFIC_VAR_topic="persistent://public/default/stock-quotes";
+       export SHADOWTRAFFIC_VAR_bootstrap="pulsar:9092";
+       export SHADOWTRAFFIC_VAR_throttle_ms="5";
+       shadowtraffic --config /etc/shadowtraffic/stock-quotes.json'
+
+  multi-query-app:
+    build:
+      context: ..
+      dockerfile: demo/multi-query-app/Dockerfile
+    container_name: stock-demo-multi-query
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      shadowtraffic:
+        condition: service_started
+    environment:
+      PULSAR_SERVICE_URL:  "pulsar://pulsar:6650"
+      PULSAR_ADMIN_URL:    "http://pulsar:8080"
+      KAFKA_BOOTSTRAP:     "pulsar:9092"
+      DEMO_SOURCE_TOPIC:   "persistent://public/default/stock-quotes"
+      DEMO_CONTROL_TOPIC:  "persistent://public/default/filter-requests"
+      DEMO_QUERIES_PATH:   "/app/queries.yaml"
+      # KAFKA_PASSWORD intentionally unset — MultiQueryDemo's buildKafkaProps
+      # auto-detects this and uses PLAINTEXT instead of SASL_SSL.
+    volumes:
+      - ./multi-query-app/queries.yaml:/app/queries.yaml:ro
+
+  observability:
+    image: ghcr.io/david-streamlio/broker-side-filter-observability:latest
+    container_name: stock-demo-observability
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    ports:
+      - "3200:3200"
+    environment:
+      PULSAR_SERVICE_URL:         "pulsar://pulsar:6650"
+      PULSAR_ADMIN_URL:           "http://pulsar:8080"
+      STATE_TOPIC:                "persistent://public/default/orchestrator-state"
+      ORCHESTRATOR_TENANT:        "public"
+      ORCHESTRATOR_NAMESPACE:     "default"
+      ORCHESTRATOR_FUNCTION:      "orchestrator"
+      HEARTBEAT_MAX_STALE_SECONDS: "90"
+      # No PULSAR_TOKEN_FILE — observability's PulsarConfig falls through
+      # to no-auth when neither token nor oauth2 are configured.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:3200/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

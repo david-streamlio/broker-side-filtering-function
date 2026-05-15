@@ -18,9 +18,13 @@ Unlike the TradeWise demo (which registers a single key-IN watchlist), this one 
 ```
 demo/
   README.md                            ← this file
-  docker-compose.yml                   ← 4-service stack (bootstrap + shadowtraffic + multi-query-app + observability)
+  docker-compose.yml                   ← cloud-mode: bootstrap + shadowtraffic + multi-query-app + observability against SN Cloud
+  docker-compose.local.yml             ← local-mode: pulsar-standalone + orchestrator-deploy + the four runtime services
   bootstrap/
-    bootstrap.sh                       ← one-shot pre-flight: create topics, grant permissions
+    bootstrap.sh                       ← pre-flight (topics + permissions); auto-detects auth mode from PULSAR_TOKEN_FILE
+  local/
+    orchestrator-deploy.sh             ← downloads + uploads NARs + deploys orchestrator function (local-mode only)
+    orchestrator-function-config.yaml  ← function config (tenant=public, ns=default, no admin token)
   shadowtraffic/
     stock-quotes.json                  ← generator config (templated bootstrap/topic/throttle)
   multi-query-app/
@@ -30,7 +34,25 @@ demo/
     src/main/java/io/streamnative/filter/demo/
       MultiQueryDemo.java              ← entrypoint; one drain-loop thread per query
       QueryConfig.java                 ← YAML loader
+  infra/
+    README.md                          ← SN Cloud infrastructure replication (terraform-based)
+    terraform/                         ← cluster + tenant + SAs + apikeys + orchestrator deploy
+    pulsar-functions/orchestrator-function-config.yaml  ← cloud-mode function config (uses pulsar-admin-token)
 ```
+
+## Cloud-mode vs local-mode
+
+Two ways to run the same demo content:
+
+| | **Cloud-mode** (`docker-compose.yml`) | **Local-mode** (`docker-compose.local.yml`) |
+|---|---|---|
+| Pulsar | SN Cloud serverless cluster (real auth, KoP on SASL_SSL :9093) | `streamnative/sn-pulsar:4.0.5` standalone, KoP PLAINTEXT :9092, anonymous auth |
+| Bring-up | `cd infra/terraform && ./recreate.sh` first, then `docker compose up` | `docker compose -f docker-compose.local.yml up --build` |
+| Cluster cost | Real SN Cloud charges while running | Free; runs on your laptop |
+| Exercises | The auth + RBAC chain that production hits | Only the runtime application logic |
+| Use when | Validating end-to-end against real cluster semantics | Fast iteration on UI / multi-query app / queries.yaml |
+
+`bootstrap.sh` + `MultiQueryDemo.java` + the observability UI auto-detect the auth mode from the absence of `PULSAR_TOKEN_FILE` / `KAFKA_PASSWORD` env vars — same images run in both modes.
 
 ## Bootstrap service
 
@@ -51,7 +73,19 @@ Idempotent — all four steps treat "already exists" / "already granted" as succ
 - A [ShadowTraffic license](https://shadowtraffic.io/account) — free tier is sufficient (capped at ~1000 msg/s).
 - Docker + docker-compose v2.
 
-## Running
+## Running (local-mode)
+
+Fastest path — no SN Cloud account needed:
+
+```bash
+export SHADOWTRAFFIC_LICENSE_ID=<your-id>
+export SHADOWTRAFFIC_LICENSE_KEY=<your-key>
+docker compose -f docker-compose.local.yml up --build
+```
+
+Pulsar standalone takes ~30s to come up; orchestrator-deploy + bootstrap run in series after that (~30s more); then shadowtraffic + multi-query-app + observability start. Open <http://localhost:3200> when the observability container is healthy.
+
+## Running (cloud-mode)
 
 Copy `.env.example` to `.env` and fill in your cluster details:
 
