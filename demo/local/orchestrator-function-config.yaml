@@ -1,0 +1,31 @@
+# Local-mode orchestrator function config.
+#
+# Lives in public/default — no separate tenant/namespace because standalone
+# Pulsar's anonymous SA has no per-namespace restrictions. orchestrator-deploy.sh
+# substitutes @VERSION and ${PULSAR_ADMIN_URL} at deploy time.
+
+tenant: public
+namespace: default
+name: orchestrator
+className: io.streamnative.filter.orchestrator.OrchestratorFunction
+inputs:
+  - persistent://public/default/filter-requests
+processingGuarantees: ATLEAST_ONCE
+parallelism: 1
+userConfig:
+  state-topic: persistent://public/default/orchestrator-state
+  function-package-url: function://public/default/selector-filter@VERSION
+  function-tenant: public
+  function-namespace: default
+  function-parallelism: 1
+  apply-compaction: true
+  compaction-threshold-bytes: 10485760  # 10 MB
+  pulsar-admin-url: ${PULSAR_ADMIN_URL}
+  # No pulsar-admin-token — local broker accepts anonymous.
+  idle-gc-enabled: true
+  idle-gc-ttl-seconds: 600
+  idle-gc-sweep-interval-seconds: 60
+  heartbeat-max-stale-seconds: 90
+resources:
+  cpu: 0.5
+  ram: 536870912   # 512 MB — local Pulsar standalone has tight headroom

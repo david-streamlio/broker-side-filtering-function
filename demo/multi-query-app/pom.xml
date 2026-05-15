@@ -33,6 +33,19 @@
             <version>${project.version}</version>
         </dependency>
 
+        <!-- Pulsar client implementation. The SDK modules declare these at
+             test scope, so they aren't on the demo's runtime classpath via
+             the transitive graph. Without them, PulsarClient.builder() throws
+             ClassNotFoundException for PulsarClientImplementationBindingImpl. -->
+        <dependency>
+            <groupId>org.apache.pulsar</groupId>
+            <artifactId>pulsar-client</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.pulsar</groupId>
+            <artifactId>pulsar-client-admin</artifactId>
+        </dependency>
+
         <!-- Kafka client for the consumer side via the SDK. -->
         <dependency>
             <groupId>org.apache.kafka</groupId>

@@ -74,10 +74,19 @@ public final class MultiQueryDemo {
         logger.info("Loaded {} queries from {}", config.queries().size(), queriesPath);
 
         Properties kafkaProps = buildKafkaProps();
+        // Pin private filtered topics to public/default. The SDK default is
+        // public/filtered which doesn't exist on a fresh standalone broker —
+        // auto-topic-creation creates topics, not namespaces, so spawned
+        // filters silently fail to publish their output. public/default is
+        // bootstrapped on every Pulsar cluster AND is KoP's default
+        // kafkaNamespace, so Kafka clients can also read the filtered topics
+        // via SASL/PLAINTEXT on :9092 / :9093.
         Session session = Session.builder()
                 .serviceUrl(env("PULSAR_SERVICE_URL"))
                 .adminUrl(env("PULSAR_ADMIN_URL"))
                 .controlTopic(controlTopic)
+                .privateTopicTenant("public")
+                .privateTopicNamespace("default")
                 .build();
 
         ExecutorService pool = Executors.newCachedThreadPool(r -> {
@@ -176,9 +185,10 @@ public final class MultiQueryDemo {
 
     /**
      * Build the Properties the SDK forwards to the underlying Kafka consumer.
-     * SASL/PLAIN against KoP; the SDK seeds the consumer with the private
-     * topic the orchestrator returns from REGISTER, so the bootstrap servers
-     * are the cluster's KoP endpoint and the rest is standard auth boilerplate.
+     * Auth mode auto-selects: when {@code KAFKA_PASSWORD} is set we configure
+     * SASL_SSL + PLAIN (KoP-on-SN-Cloud convention, token-as-password); when
+     * it's absent we fall through to PLAINTEXT (local Pulsar standalone with
+     * KoP and anonymous auth).
      */
     private static Properties buildKafkaProps() {
         Properties p = new Properties();
@@ -188,18 +198,17 @@ public final class MultiQueryDemo {
         p.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         p.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
 
-        // SASL_SSL with token-as-password — the convention KoP on SN Cloud uses.
-        p.put("security.protocol", "SASL_SSL");
-        p.put("sasl.mechanism", "PLAIN");
-        String user = System.getenv().getOrDefault("KAFKA_USERNAME", "tradewise-backend");
         String pass = System.getenv("KAFKA_PASSWORD");
-        if (pass == null) {
-            throw new IllegalStateException(
-                    "KAFKA_PASSWORD env var is required (typically the SA token contents)");
+        if (pass != null && !pass.isBlank()) {
+            String user = System.getenv().getOrDefault("KAFKA_USERNAME", "stock-demo-app");
+            p.put("security.protocol", "SASL_SSL");
+            p.put("sasl.mechanism", "PLAIN");
+            p.put("sasl.jaas.config",
+                    "org.apache.kafka.common.security.plain.PlainLoginModule required "
+                            + "username=\"" + user + "\" password=\"token:" + pass + "\";");
+        } else {
+            p.put("security.protocol", "PLAINTEXT");
         }
-        p.put("sasl.jaas.config",
-                "org.apache.kafka.common.security.plain.PlainLoginModule required "
-                        + "username=\"" + user + "\" password=\"token:" + pass + "\";");
         return p;
     }
 

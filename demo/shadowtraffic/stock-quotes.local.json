@@ -1,0 +1,54 @@
+{
+  "generators": [
+    {
+      "topic": "persistent://public/default/stock-quotes",
+      "key": {
+        "_gen": "oneOf",
+        "choices": [
+          "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AMD", "ADBE", "INTC",
+          "JPM", "BAC", "WFC", "C", "GS", "MS", "V", "MA", "AXP", "BLK",
+          "JNJ", "PFE", "MRK", "UNH", "ABT", "TMO", "LLY", "ABBV",
+          "WMT", "HD", "NKE", "MCD", "KO", "SBUX", "PEP", "COST",
+          "XOM", "CVX", "COP",
+          "BA", "CAT", "GE", "HON"
+        ]
+      },
+      "value": {
+        "seq":      { "_gen": "sequentialInteger" },
+        "exchange": { "_gen": "oneOf", "choices": ["NYSE", "NASDAQ"] },
+        "sector":   { "_gen": "oneOf", "choices": ["tech", "finance", "healthcare", "consumer", "energy", "industrial"] },
+        "price":    { "_gen": "uniformDistribution", "bounds": [50.0, 500.0] },
+        "bid":      { "_gen": "uniformDistribution", "bounds": [49.99, 499.95] },
+        "ask":      { "_gen": "uniformDistribution", "bounds": [50.01, 500.05] },
+        "bidSize":  { "_gen": "weightedOneOf", "choices": [
+                        { "weight": 60, "value": 100 },
+                        { "weight": 30, "value": 500 },
+                        { "weight":  8, "value": 1000 },
+                        { "weight":  2, "value": 5000 }
+                      ] },
+        "askSize":  { "_gen": "weightedOneOf", "choices": [
+                        { "weight": 60, "value": 100 },
+                        { "weight": 30, "value": 500 },
+                        { "weight":  8, "value": 1000 },
+                        { "weight":  2, "value": 5000 }
+                      ] },
+        "spread":   { "_gen": "uniformDistribution", "bounds": [0.01, 0.50] },
+        "volume":   { "_gen": "uniformDistribution", "bounds": [100000, 50000000] },
+        "side":     { "_gen": "oneOf", "choices": ["B", "S"] }
+      },
+      "localConfigs": {
+        "throttleMs": 5
+      }
+    }
+  ],
+  "connections": {
+    "kafka": {
+      "kind": "kafka",
+      "producerConfigs": {
+        "bootstrap.servers": "pulsar:9092",
+        "key.serializer":   "org.apache.kafka.common.serialization.StringSerializer",
+        "value.serializer": "io.shadowtraffic.kafka.serdes.JsonSerializer"
+      }
+    }
+  }
+}
