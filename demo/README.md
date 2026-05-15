@@ -18,7 +18,9 @@ Unlike the TradeWise demo (which registers a single key-IN watchlist), this one 
 ```
 demo/
   README.md                            ← this file
-  docker-compose.yml                   ← 3-service stack (shadowtraffic, multi-query-app, observability)
+  docker-compose.yml                   ← 4-service stack (bootstrap + shadowtraffic + multi-query-app + observability)
+  bootstrap/
+    bootstrap.sh                       ← one-shot pre-flight: create topics, grant permissions
   shadowtraffic/
     stock-quotes.json                  ← generator config (templated bootstrap/topic/throttle)
   multi-query-app/
@@ -30,11 +32,22 @@ demo/
       QueryConfig.java                 ← YAML loader
 ```
 
+## Bootstrap service
+
+The first thing `docker compose up` runs is the **`bootstrap`** service — a one-shot
+container that uses `pulsar-admin` to:
+
+1. Create the destination topic (partitioned, partition count from `DEMO_SOURCE_PARTITIONS`)
+2. Create the control topic (non-partitioned)
+3. Grant `produce + consume` to the demo SA on the source-topic and control-topic namespaces
+4. Enable auto-topic-creation on the source namespace (so the orchestrator's spawned-filter `filtered-*` private topics auto-create)
+
+Idempotent — all four steps treat "already exists" / "already granted" as success. shadowtraffic + multi-query-app `depends_on` it with `condition: service_completed_successfully`, so the rest of the stack doesn't start until the cluster's ready.
+
 ## Prerequisites
 
 - A Pulsar cluster (typically SN Cloud) with KoP enabled and the broker-side-filtering-function orchestrator deployed — see the root README's bring-up section.
-- The source + control topics exist (or auto-topic-creation is on for their namespaces): `persistent://<tenant>/<ns>/stock-quotes` and `persistent://<tenant>/<ns>/filter-requests`.
-- An SA token with `consume + produce` on the source/control namespaces and `consume` on `public/default` (or wherever private filtered topics land).
+- An SA token with permission to create topics + grant permissions on the source-topic namespace (the bootstrap step needs this), AND `consume + produce` on the same namespaces at runtime. Typically a single `tradewise-backend`-style SA bound to the `namespace-operator` ClusterRole covers both.
 - A [ShadowTraffic license](https://shadowtraffic.io/account) — free tier is sufficient (capped at ~1000 msg/s).
 - Docker + docker-compose v2.
 
