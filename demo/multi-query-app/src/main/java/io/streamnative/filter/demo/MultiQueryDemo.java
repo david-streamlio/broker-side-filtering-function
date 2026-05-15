@@ -1,0 +1,215 @@
+package io.streamnative.filter.demo;
+
+import io.streamnative.filter.client.FilterControl;
+import io.streamnative.filter.client.Session;
+import io.streamnative.filter.client.kafka.FilterableKafkaConsumers;
+import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Stand-up demo: read a list of queries from {@code queries.yaml}, register each
+ * one through {@code selector-filter-client-kafka}, and consume from the private
+ * filtered output topic the SDK + orchestrator wire up for each query.
+ *
+ * <p>Each query gets its own thread that drains its private topic at a steady
+ * 1s poll cadence and logs a sample of received records. After the operator
+ * adds queries to the watchlist, the {@code broker-side-filter-observability}
+ * UI should show the spawned filter, the registered selectors, drop %s
+ * differing across queries, and (for the {@code bad-syntax-demo} query) a
+ * fired {@code selector-compile-fail} diagnostic.
+ *
+ * <p>Env vars required:
+ * <ul>
+ *   <li>{@code KAFKA_BOOTSTRAP} — KoP SASL_SSL bootstrap (e.g. {@code pc-...:9093}).</li>
+ *   <li>{@code KAFKA_USERNAME} / {@code KAFKA_PASSWORD} — SASL/PLAIN creds.</li>
+ *   <li>{@code PULSAR_SERVICE_URL} / {@code PULSAR_ADMIN_URL} — the SDK uses these
+ *       for the control-plane Session that talks to the orchestrator.</li>
+ *   <li>{@code PULSAR_TOKEN_FILE} — JWT (the SDK can also use OAuth2 if the
+ *       inherited Pulsar client builder picks it up).</li>
+ *   <li>{@code DEMO_SOURCE_TOPIC} — defaults to
+ *       {@code persistent://public/default/stock-quotes}.</li>
+ *   <li>{@code DEMO_CONTROL_TOPIC} — defaults to
+ *       {@code persistent://public/default/filter-requests}.</li>
+ * </ul>
+ *
+ * <p>Optional: {@code DEMO_QUERIES_PATH} (defaults to {@code /app/queries.yaml})
+ * and {@code DEMO_LOG_SAMPLE_EVERY} (log one in N records per query; default 50).
+ *
+ * <p>SIGTERM / Ctrl-C closes every consumer cleanly, which triggers SDK-level
+ * UNREGISTER for every queryId — the orchestrator then tombstones the matching
+ * registry entries within ~1 sweep interval.
+ */
+public final class MultiQueryDemo {
+
+    private static final Logger logger = LoggerFactory.getLogger(MultiQueryDemo.class);
+
+    public static void main(String[] args) throws Exception {
+        Path queriesPath = Paths.get(System.getenv().getOrDefault(
+                "DEMO_QUERIES_PATH", "/app/queries.yaml"));
+        String sourceTopic = System.getenv().getOrDefault(
+                "DEMO_SOURCE_TOPIC", "persistent://public/default/stock-quotes");
+        String controlTopic = System.getenv().getOrDefault(
+                "DEMO_CONTROL_TOPIC", "persistent://public/default/filter-requests");
+        long logSampleEvery = Long.parseLong(
+                System.getenv().getOrDefault("DEMO_LOG_SAMPLE_EVERY", "50"));
+
+        QueryConfig config = QueryConfig.load(queriesPath);
+        logger.info("Loaded {} queries from {}", config.queries().size(), queriesPath);
+
+        Properties kafkaProps = buildKafkaProps();
+        Session session = Session.builder()
+                .serviceUrl(env("PULSAR_SERVICE_URL"))
+                .adminUrl(env("PULSAR_ADMIN_URL"))
+                .controlTopic(controlTopic)
+                .build();
+
+        ExecutorService pool = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r);
+            t.setDaemon(false);
+            t.setName("query-drainer-" + UUID.randomUUID().toString().substring(0, 6));
+            return t;
+        });
+        List<Consumer<String, String>> consumers = new ArrayList<>();
+        CountDownLatch shutdownLatch = new CountDownLatch(1);
+
+        try {
+            for (QueryConfig.Query q : config.queries()) {
+                try {
+                    Consumer<String, String> consumer = FilterableKafkaConsumers
+                            .<String, String>newConsumer(session, kafkaProps)
+                            .topic(sourceTopic)
+                            .selector(q.selector())
+                            .subscribe();
+                    consumers.add(consumer);
+                    // The SDK's consumer implements both Kafka's Consumer<K,V> AND
+                    // io.streamnative.filter.client.FilterControl — cast to read
+                    // the orchestrator-assigned queryId for correlation with the UI.
+                    String queryId = ((FilterControl) consumer).queryId();
+                    logger.info("Registered '{}' as queryId={}  (selector: {})",
+                            q.id(), queryId, q.selector());
+                    pool.submit(() -> drainLoop(q.id(), queryId, consumer, logSampleEvery, shutdownLatch));
+                } catch (Exception e) {
+                    // Don't take the whole demo down for one bad query — the
+                    // selector-compile-fail demo query is *expected* to surface
+                    // here on registration. Log + continue.
+                    logger.warn("Failed to register '{}' (selector={}): {} — skipping",
+                            q.id(), q.selector(), e.toString());
+                }
+            }
+
+            // Shutdown hook: wake the drain loops + close consumers cleanly so
+            // the SDK can UNREGISTER each queryId before the JVM exits.
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                logger.info("Shutdown signal — closing {} consumers", consumers.size());
+                shutdownLatch.countDown();
+                for (Consumer<String, String> c : consumers) {
+                    try {
+                        c.close(Duration.ofSeconds(5));
+                    } catch (Exception e) {
+                        String qid = c instanceof FilterControl fc ? fc.queryId() : "<unknown>";
+                        logger.warn("Error closing consumer queryId={}: {}", qid, e.toString());
+                    }
+                }
+                try {
+                    pool.shutdown();
+                    if (!pool.awaitTermination(10, TimeUnit.SECONDS)) pool.shutdownNow();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                try { session.close(); } catch (Exception ignored) {}
+            }, "multi-query-demo-shutdown"));
+
+            logger.info("Demo running with {} active consumers. Press Ctrl-C to exit.", consumers.size());
+            shutdownLatch.await();
+        } catch (Throwable fatal) {
+            logger.error("Fatal error in demo main: {}", fatal.toString(), fatal);
+            throw fatal;
+        }
+    }
+
+    private static void drainLoop(String label,
+                                  String queryId,
+                                  Consumer<String, String> consumer,
+                                  long logEvery,
+                                  CountDownLatch shutdown) {
+        long seen = 0;
+        try {
+            while (shutdown.getCount() > 0) {
+                ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(1));
+                for (ConsumerRecord<String, String> r : records) {
+                    seen++;
+                    if (seen <= 3 || seen % logEvery == 0) {
+                        String value = r.value();
+                        String preview = value == null ? "<null>"
+                                : value.length() > 120 ? value.substring(0, 120) + "…"
+                                                       : value;
+                        logger.info("[{} q={}] #{}  key={}  value={}",
+                                label, queryId, seen, r.key(), preview);
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            if (shutdown.getCount() > 0) {
+                logger.error("[{} q={}] drain loop crashed: {}", label, queryId, t.toString(), t);
+            }
+        } finally {
+            logger.info("[{} q={}] drained {} records total", label, queryId, seen);
+        }
+    }
+
+    /**
+     * Build the Properties the SDK forwards to the underlying Kafka consumer.
+     * SASL/PLAIN against KoP; the SDK seeds the consumer with the private
+     * topic the orchestrator returns from REGISTER, so the bootstrap servers
+     * are the cluster's KoP endpoint and the rest is standard auth boilerplate.
+     */
+    private static Properties buildKafkaProps() {
+        Properties p = new Properties();
+        p.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, env("KAFKA_BOOTSTRAP"));
+        p.put(ConsumerConfig.GROUP_ID_CONFIG, "multi-query-demo-" + UUID.randomUUID());
+        p.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
+        p.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        p.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+
+        // SASL_SSL with token-as-password — the convention KoP on SN Cloud uses.
+        p.put("security.protocol", "SASL_SSL");
+        p.put("sasl.mechanism", "PLAIN");
+        String user = System.getenv().getOrDefault("KAFKA_USERNAME", "tradewise-backend");
+        String pass = System.getenv("KAFKA_PASSWORD");
+        if (pass == null) {
+            throw new IllegalStateException(
+                    "KAFKA_PASSWORD env var is required (typically the SA token contents)");
+        }
+        p.put("sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required "
+                        + "username=\"" + user + "\" password=\"token:" + pass + "\";");
+        return p;
+    }
+
+    private static String env(String name) {
+        String v = System.getenv(name);
+        if (v == null || v.isBlank()) {
+            throw new IllegalStateException("Required env var not set: " + name);
+        }
+        return v;
+    }
+
+    private MultiQueryDemo() {}
+}
