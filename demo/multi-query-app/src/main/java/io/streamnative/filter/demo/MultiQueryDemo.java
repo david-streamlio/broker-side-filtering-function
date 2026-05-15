@@ -74,10 +74,19 @@ public final class MultiQueryDemo {
         logger.info("Loaded {} queries from {}", config.queries().size(), queriesPath);
 
         Properties kafkaProps = buildKafkaProps();
+        // Pin private filtered topics to public/default. The SDK default is
+        // public/filtered which doesn't exist on a fresh standalone broker —
+        // auto-topic-creation creates topics, not namespaces, so spawned
+        // filters silently fail to publish their output. public/default is
+        // bootstrapped on every Pulsar cluster AND is KoP's default
+        // kafkaNamespace, so Kafka clients can also read the filtered topics
+        // via SASL/PLAINTEXT on :9092 / :9093.
         Session session = Session.builder()
                 .serviceUrl(env("PULSAR_SERVICE_URL"))
                 .adminUrl(env("PULSAR_ADMIN_URL"))
                 .controlTopic(controlTopic)
+                .privateTopicTenant("public")
+                .privateTopicNamespace("default")
                 .build();
 
         ExecutorService pool = Executors.newCachedThreadPool(r -> {
