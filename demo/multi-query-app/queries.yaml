@@ -1,0 +1,47 @@
+# Demo queries — each picks a different slice of the stock-quotes stream so the
+# observability UI shows distinct drop %s, message rates, and per-filter behavior.
+#
+# - `id` is a human-friendly label only. The SDK generates the actual queryId at
+#   subscribe time; the demo app prints both so operators can correlate.
+# - `selector` is JMS-style. The orchestrator's selector-filter function parses
+#   these and rejects malformed ones with `filter.queries.bad_sum`, which the UI
+#   surfaces as the `selector-compile-fail` diagnostic flag.
+# - `bad-syntax-demo` is intentionally broken to make that flag fire on cue.
+
+queries:
+  - id: tech-titans
+    selector: "__key__ IN ('AAPL','MSFT','GOOGL','NVDA','META')"
+    # 5 of 43 symbols ≈ 12% match → ~88% drop
+
+  - id: bank-watch
+    selector: "__key__ IN ('JPM','BAC','GS','MS','C','WFC')"
+    # 6 of 43 ≈ 14% match → ~86% drop
+
+  - id: nasdaq-only
+    selector: "exchange = 'NASDAQ'"
+    # 50/50 venue split → ~50% drop
+
+  - id: healthcare-sector
+    selector: "sector = 'healthcare'"
+    # 1 of 6 sectors → ~83% drop
+
+  - id: large-block-trades
+    selector: "bidSize >= 1000 OR askSize >= 1000"
+    # weighted-choice produces 1000/5000 ~10% of the time per side; ~20% match
+    # → ~80% drop
+
+  - id: tight-spreads
+    selector: "spread < 0.05"
+    # only the smallest spreads → ~10% match → ~90% drop
+
+  - id: high-value-stocks
+    selector: "price > 300"
+    # uniform [50, 500] → ~44% match → ~56% drop
+
+  - id: buy-side-finance
+    selector: "side = 'B' AND sector = 'finance'"
+    # 50% × 17% ≈ 8% match → ~92% drop
+
+  - id: bad-syntax-demo
+    selector: "this is not a valid selector ("
+    # intentionally bad — fires selector-compile-fail in the observability UI
