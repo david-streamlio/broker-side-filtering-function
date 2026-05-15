@@ -82,14 +82,25 @@ cp license.env.example license.env
 # edit license.env: paste in the six LICENSE_* values from your ShadowTraffic account
 ```
 
+Pre-download the orchestrator + selector-filter NARs on the host. The
+broker-side-filtering-function repo is private, and `gh` on your host already
+has the right auth — far simpler than forwarding a token into the
+orchestrator-deploy container and parsing the GitHub API there:
+
+```bash
+gh release download v1.0.0-rc3 \
+  --repo david-streamlio/broker-side-filtering-function \
+  --dir local/nars \
+  --pattern '*.nar'
+```
+
+`local/nars/` is mounted into the orchestrator-deploy container; it uses the
+mounted NARs directly. (If the repo is ever made public, you can skip this
+step and the container falls back to downloading them itself.)
+
 Then bring the stack up:
 
 ```bash
-# If the broker-side-filtering-function repo is private (currently the default
-# release source), the orchestrator-deploy container needs a GitHub token to
-# pull release assets. Skip this line if you've made the repo public.
-export GITHUB_TOKEN=$(gh auth token)
-
 docker compose -f docker-compose.local.yml up --build
 ```
 

@@ -6,3 +6,7 @@ license.env
 # bring-up. The terraform .gitignore already covers infra/terraform/*.token;
 # this one is a belt-and-suspenders for any token that drifts up to demo/.
 *.token
+
+# Pre-downloaded NARs for local-mode (large binaries, fetched per-run via
+# `gh release download`). The directory is kept via local/nars/.gitkeep.
+local/nars/*.nar

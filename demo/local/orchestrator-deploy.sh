@@ -23,11 +23,31 @@ echo "  Admin URL:    $PULSAR_ADMIN_URL"
 echo "  Release:      $SELECTOR_REPO @ $SELECTOR_REL"
 echo ""
 
-# ── Step 1: Download NARs ────────────────────────────────────────────────────
-echo -e "${BLUE}📦 Step 1/3 — Download orchestrator + selector-filter NARs${NC}"
+# ── Step 1: Locate NARs ──────────────────────────────────────────────────────
+# Preferred path: NARs pre-downloaded on the host and mounted at /nars. This is
+# the recommended local-mode flow because the broker-side-filtering-function
+# repo is private — `gh` on the host already has the right auth, whereas
+# downloading from inside this container needs a token forwarded + the API
+# parsed + container egress, three separate failure points.
+#
+# README documents:
+#   gh release download v1.0.0-rc3 \
+#     --repo david-streamlio/broker-side-filtering-function \
+#     --dir demo/local/nars
+#
+# Fallback (public repos / no mounted NARs): download directly.
+echo -e "${BLUE}📦 Step 1/3 — Locate orchestrator + selector-filter NARs${NC}"
 mkdir -p /tmp/selector-filter-release
 ORCH_NAR="/tmp/selector-filter-release/selector-filter-orchestrator-${SF_VER}.nar"
 FILT_NAR="/tmp/selector-filter-release/selector-filter-function-${SF_VER}.nar"
+
+MOUNTED_ORCH="/nars/selector-filter-orchestrator-${SF_VER}.nar"
+MOUNTED_FILT="/nars/selector-filter-function-${SF_VER}.nar"
+if [[ -f "$MOUNTED_ORCH" && -f "$MOUNTED_FILT" ]]; then
+    echo -e "${GREEN}  ✅ using host-mounted NARs from /nars${NC}"
+    cp "$MOUNTED_ORCH" "$ORCH_NAR"
+    cp "$MOUNTED_FILT" "$FILT_NAR"
+fi
 
 # Private repos need an auth token. The compose file forwards GITHUB_TOKEN
 # from the host shell:
