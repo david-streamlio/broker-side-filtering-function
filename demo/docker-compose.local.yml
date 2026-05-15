@@ -45,6 +45,14 @@ services:
       # the broker level (vs per-namespace via bootstrap.sh) so it applies
       # before any topic is created — no ordering / timing risk.
       PULSAR_PREFIX_kafkaEntryFormat:                         "pulsar_non_batched"
+      # KoP computes Kafka offsets from broker-entry index metadata. Without
+      # the AppendIndexMetadataInterceptor enabled, every fetch fails with
+      # "No BrokerEntryMetadata found" and consumers get empty batches.
+      # exposingBrokerEntryMetadataToClientEnabled lets the consumer read it
+      # back. Both are documented KoP prerequisites the sn-platform image
+      # doesn't enable by default in standalone mode.
+      PULSAR_PREFIX_brokerEntryMetadataInterceptors:          "org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
+      PULSAR_PREFIX_exposingBrokerEntryMetadataToClientEnabled: "true"
       # Functions — required for the orchestrator + spawned selector-filters.
       PULSAR_PREFIX_functionsWorkerEnabled:                   "true"
       PULSAR_PREFIX_allowAutoTopicCreation:                   "true"
