@@ -85,6 +85,11 @@ cp license.env.example license.env
 Then bring the stack up:
 
 ```bash
+# If the broker-side-filtering-function repo is private (currently the default
+# release source), the orchestrator-deploy container needs a GitHub token to
+# pull release assets. Skip this line if you've made the repo public.
+export GITHUB_TOKEN=$(gh auth token)
+
 docker compose -f docker-compose.local.yml up --build
 ```
 

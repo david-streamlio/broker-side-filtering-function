@@ -69,6 +69,10 @@ services:
       PULSAR_ADMIN_URL: "http://pulsar:8080"
       SELECTOR_REPO:    "${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
       SELECTOR_REL:     "${SELECTOR_REL:-v1.0.0-rc3}"
+      # Required when SELECTOR_REPO is private (the default repo currently is).
+      # Set with: export GITHUB_TOKEN=$(gh auth token).
+      # Leave unset for public repos.
+      GITHUB_TOKEN:     "${GITHUB_TOKEN:-}"
     volumes:
       - ./local/orchestrator-deploy.sh:/usr/local/bin/orchestrator-deploy.sh:ro
       - ./local/orchestrator-function-config.yaml:/etc/orchestrator-function-config.yaml:ro

@@ -29,14 +29,39 @@ mkdir -p /tmp/selector-filter-release
 ORCH_NAR="/tmp/selector-filter-release/selector-filter-orchestrator-${SF_VER}.nar"
 FILT_NAR="/tmp/selector-filter-release/selector-filter-function-${SF_VER}.nar"
 
+# Private repos need an auth token. The compose file forwards GITHUB_TOKEN
+# from the host shell:
+#   export GITHUB_TOKEN=$(gh auth token)
+#   docker compose -f docker-compose.local.yml up --build
+# When unset, the direct download URL is used (works for public repos).
+download_asset() {
+    local asset_name="$1" dest="$2"
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        # Look up the asset's API URL by name (the API URL accepts auth headers
+        # — the browser download URL doesn't, because GitHub's CDN strips them
+        # on redirect). Then fetch with Accept: application/octet-stream so the
+        # response is the raw NAR, not the JSON metadata.
+        local api_url
+        api_url=$(curl -sfL -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${SELECTOR_REPO}/releases/tags/${SELECTOR_REL}" \
+            | python3 -c "import sys,json; r=json.load(sys.stdin); print(next(a['url'] for a in r['assets'] if a['name']=='$asset_name'))")
+        [[ -z "$api_url" ]] && { echo "  ❌ asset not found: $asset_name"; return 1; }
+        curl -sfL \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            -o "$dest" "$api_url"
+    else
+        curl -sfL -o "$dest" \
+            "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/${asset_name}"
+    fi
+}
+
 if [[ ! -f "$ORCH_NAR" ]]; then
-    curl -sfL -o "$ORCH_NAR" \
-        "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-orchestrator-${SF_VER}.nar" \
+    download_asset "selector-filter-orchestrator-${SF_VER}.nar" "$ORCH_NAR" \
         || { echo -e "${RED}❌ orchestrator NAR download failed${NC}"; exit 1; }
 fi
 if [[ ! -f "$FILT_NAR" ]]; then
-    curl -sfL -o "$FILT_NAR" \
-        "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-function-${SF_VER}.nar" \
+    download_asset "selector-filter-function-${SF_VER}.nar" "$FILT_NAR" \
         || { echo -e "${RED}❌ selector-filter NAR download failed${NC}"; exit 1; }
 fi
 echo -e "${GREEN}  ✅ NARs ready${NC}"
