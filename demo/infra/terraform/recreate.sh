@@ -209,20 +209,38 @@ echo "  Setting namespace-default kafkaEntryFormat on public/default…"
   && ok "Namespace property set" \
   || warn "Could not set namespace property"
 
-# Download orchestrator + selector-filter NARs from the GitHub release.
-echo "  Downloading orchestrator + selector-filter NARs (release: $SELECTOR_REL)…"
-mkdir -p /tmp/selector-filter-release
+# Locate orchestrator + selector-filter NARs.
+# Preferred: NARs pre-downloaded on the host (gh has private-repo auth — plain
+# curl from this script does not). Mirrors the local-mode fix:
+#   gh release download v$SF_VER \
+#     --repo david-streamlio/broker-side-filtering-function \
+#     --dir demo/local/nars --pattern '*.nar'
+# Fallback: unauthenticated curl (works only if the release repo is public).
 SF_VER="${SELECTOR_REL#v}"
+mkdir -p /tmp/selector-filter-release
 ORCH_NAR="/tmp/selector-filter-release/selector-filter-orchestrator-${SF_VER}.nar"
 FILT_NAR="/tmp/selector-filter-release/selector-filter-function-${SF_VER}.nar"
 
-curl -sfL -o "$ORCH_NAR" \
-  "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-orchestrator-${SF_VER}.nar" \
-  || fail "Failed to download orchestrator NAR from ${SELECTOR_REPO} ${SELECTOR_REL}"
-curl -sfL -o "$FILT_NAR" \
-  "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-function-${SF_VER}.nar" \
-  || fail "Failed to download selector-filter NAR"
-ok "NARs downloaded"
+# demo/local/nars relative to this script: recreate.sh lives in
+# demo/infra/terraform, so ../../local/nars.
+HOST_NARS="$TF_DIR/../../local/nars"
+HOST_ORCH="$HOST_NARS/selector-filter-orchestrator-${SF_VER}.nar"
+HOST_FILT="$HOST_NARS/selector-filter-function-${SF_VER}.nar"
+
+if [[ -f "$HOST_ORCH" && -f "$HOST_FILT" ]]; then
+  echo "  Using host-downloaded NARs from $HOST_NARS"
+  cp "$HOST_ORCH" "$ORCH_NAR"
+  cp "$HOST_FILT" "$FILT_NAR"
+else
+  echo "  Host NARs not found at $HOST_NARS — falling back to direct download (public repo only)…"
+  curl -sfL -o "$ORCH_NAR" \
+    "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-orchestrator-${SF_VER}.nar" \
+    || fail "Failed to download orchestrator NAR. For a private repo, pre-download with: gh release download ${SELECTOR_REL} --repo ${SELECTOR_REPO} --dir demo/local/nars --pattern '*.nar'"
+  curl -sfL -o "$FILT_NAR" \
+    "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-function-${SF_VER}.nar" \
+    || fail "Failed to download selector-filter NAR. See the gh release download hint above."
+fi
+ok "NARs ready"
 
 # Upload selector-filter NAR as a Pulsar package — the orchestrator spawns
 # instances of this function on demand by referencing the package URL.
