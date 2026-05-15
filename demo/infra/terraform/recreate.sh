@@ -99,11 +99,16 @@ if [[ "$CLUSTER_UP" == "false" ]]; then
     -target=streamnative_rolebinding.stock_demo_app_consumer_group_reader
   )
 
+  # Serverless instance/cluster provisioning takes ~10-15 min. The provider
+  # returns CONTINUE_RETRY_READ_PULSAR_INSTANCE / "cluster not found" fast
+  # (it exhausts its own internal poll budget and errors rather than
+  # blocking), so each attempt is short — the loop, not the provider, is
+  # what actually waits out provisioning. 30 attempts * 60s = ~30 min ceiling.
   attempt=1
   until terraform apply -auto-approve "${TF_TARGETS[@]}" 2>&1; do
-    warn "Terraform timed out (attempt $attempt) — retrying in 60s…"
+    warn "Instance/cluster still provisioning (attempt $attempt/30) — retrying in 60s…"
     attempt=$(( attempt + 1 ))
-    [[ $attempt -gt 5 ]] && fail "Cluster not ready after 5 attempts"
+    [[ $attempt -gt 30 ]] && fail "Instance/cluster not queryable after 30 attempts (~30 min) — check the SN Cloud console for the stock-demo instance state"
     sleep 60
   done
   elapsed "Terraform Step A" $PHASE2_START
