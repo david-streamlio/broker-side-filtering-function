@@ -18,7 +18,7 @@
 
 services:
   pulsar:
-    image: streamnative/sn-platform:4.0.5
+    image: streamnative/sn-platform:4.0.10.1
     # streamnative/sn-platform doesn't ship a linux/arm64 manifest — force amd64
     # so Docker Desktop emulates it via Rosetta on Apple Silicon hosts. Slightly
     # slower startup (~10s extra) but otherwise transparent.
