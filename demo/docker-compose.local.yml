@@ -18,14 +18,14 @@
 
 services:
   pulsar:
-    image: streamnative/sn-pulsar:4.0.5
+    image: streamnative/sn-platform:4.0.5
     container_name: stock-demo-pulsar
     command: >
       sh -c "bin/apply-config-from-env.py conf/standalone.conf &&
              bin/pulsar standalone --advertised-address pulsar"
     environment:
-      # KoP — Kafka-on-Pulsar protocol handler. The streamnative/sn-pulsar image
-      # already ships the KoP NAR in protocols/. The PULSAR_PREFIX_ keys are
+      # KoP — Kafka-on-Pulsar protocol handler. The streamnative/sn-platform
+      # image ships the KoP NAR in protocols/. The PULSAR_PREFIX_ keys are
       # mapped into broker.conf by apply-config-from-env.
       PULSAR_PREFIX_messagingProtocols:                       "kafka"
       PULSAR_PREFIX_protocolHandlerDirectory:                 "./protocols"
