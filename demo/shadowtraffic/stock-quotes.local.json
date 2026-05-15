@@ -1,5 +1,4 @@
 {
-  "_comment": "Local-mode variant of stock-quotes.json — values hardcoded for the standalone Pulsar + KoP-PLAINTEXT setup in docker-compose.local.yml. Edit stock-quotes.json (the templated cloud-mode variant) and re-mirror its generator block here when changing the data shape; ShadowTraffic doesn't do env-var substitution natively.",
   "generators": [
     {
       "topic": "persistent://public/default/stock-quotes",

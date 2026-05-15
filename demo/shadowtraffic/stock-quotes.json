@@ -1,5 +1,4 @@
 {
-  "_comment": "Stock-quote stream for the multi-query demo. 40 symbols, mixed sectors and exchanges. Fields are independently randomized (the perf-suite shadowtraffic config does the same) — meaning sector/exchange/price aren't strictly correlated with the symbol, but the selectors still partition the stream cleanly: __key__ IN(...) keys exact, sector= picks ~17%, exchange= picks ~50%, price>300 picks ~40%, etc.",
   "generators": [
     {
       "topic": "${topic}",
