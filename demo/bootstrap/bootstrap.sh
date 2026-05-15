@@ -76,8 +76,25 @@ echo "  Control topic:   $DEMO_CONTROL_TOPIC  (ns=$CONTROL_NS)"
 [[ "$AUTH_MODE" == "token" ]] && echo "  Demo SA:         $DEMO_SA_PRINCIPAL"
 echo ""
 
-# ── Step 1: ensure the source topic exists as a partitioned topic ────────────
-echo -e "${BLUE}📦 Step 1/4 — ensure source topic exists${NC}"
+# ── Step 1: set kafkaEntryFormat=pulsar_non_batched on the source namespace ──
+# MUST run before the source topic is created. KoP defaults to a batched
+# entry format; the orchestrator's spawned filter functions are regular
+# Pulsar consumers that can't decode KoP-batched entries (broker logs
+# `SingleMessageMetadata: Some required fields are missing` and discards
+# the ledger entry). This property is recognized only at the NAMESPACE
+# level — it is NOT a valid broker-config value — so it must be set here,
+# and BEFORE topic creation so the topic inherits it at create time
+# (changing it after a topic exists doesn't retroactively re-encode, and
+# KoP may have cached the topic's effective format).
+echo -e "${BLUE}🔧 Step 1/4 — set kafkaEntryFormat=pulsar_non_batched on $SOURCE_NS${NC}"
+PA namespaces set-property "$SOURCE_NS" \
+    --key kafkaEntryFormat \
+    --value pulsar_non_batched 2>&1 | grep -vE '^$' || true
+echo -e "${GREEN}  ✅ namespace property set${NC}"
+
+# ── Step 1b: ensure the source topic exists as a partitioned topic ───────────
+# Created AFTER the namespace property above so it inherits pulsar_non_batched.
+echo -e "${BLUE}📦 Step 1b — ensure source topic exists${NC}"
 if OUT=$(PA topics create-partitioned-topic "$DEMO_SOURCE_TOPIC" -p "$DEMO_SOURCE_PARTITIONS" 2>&1); then
     echo -e "${GREEN}  ✅ created partitioned source topic${NC}"
 elif echo "$OUT" | grep -qE 'already exists|409'; then
@@ -85,20 +102,6 @@ elif echo "$OUT" | grep -qE 'already exists|409'; then
 else
     echo -e "${RED}  ❌ failed:${NC}"; echo "$OUT"; exit 1
 fi
-
-# ── Step 1b: set kafkaEntryFormat=pulsar_non_batched on the source namespace ─
-# KoP defaults to a batched entry format. The orchestrator's spawned filter
-# functions are regular Pulsar consumers — they can't decode KoP-batched
-# entries and the broker logs BatchDeSerializeError on every consume. Setting
-# this property tells KoP to store incoming Kafka messages in a format the
-# Pulsar consumer side can read. Setting at the NAMESPACE level so all topics
-# in the namespace inherit it, including the auto-created filtered-* private
-# topics that spawned filters publish into.
-echo -e "${BLUE}🔧 Step 1b — set kafkaEntryFormat=pulsar_non_batched on $SOURCE_NS${NC}"
-PA namespaces set-property "$SOURCE_NS" \
-    --key kafkaEntryFormat \
-    --value pulsar_non_batched 2>&1 | grep -vE '^$' || true
-echo -e "${GREEN}  ✅ namespace property set${NC}"
 
 # ── Step 2: ensure the control topic exists (non-partitioned) ────────────────
 echo -e "${BLUE}📦 Step 2/4 — ensure control topic exists${NC}"

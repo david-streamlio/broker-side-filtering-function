@@ -46,13 +46,38 @@ Two ways to run the same demo content:
 
 | | **Cloud-mode** (`docker-compose.yml`) | **Local-mode** (`docker-compose.local.yml`) |
 |---|---|---|
-| Pulsar | SN Cloud serverless cluster (real auth, KoP on SASL_SSL :9093) | `streamnative/sn-pulsar:4.0.5` standalone, KoP PLAINTEXT :9092, anonymous auth |
+| Pulsar | SN Cloud serverless cluster (real auth, KoP on SASL_SSL :9093) | `streamnative/sn-platform:4.0.10.1` standalone, KoP PLAINTEXT :9092, anonymous auth |
 | Bring-up | `cd infra/terraform && ./recreate.sh` first, then `docker compose up` | `docker compose -f docker-compose.local.yml up --build` |
 | Cluster cost | Real SN Cloud charges while running | Free; runs on your laptop |
 | Exercises | The auth + RBAC chain that production hits | Only the runtime application logic |
 | Use when | Validating end-to-end against real cluster semantics | Fast iteration on UI / multi-query app / queries.yaml |
 
 `bootstrap.sh` + `MultiQueryDemo.java` + the observability UI auto-detect the auth mode from the absence of `PULSAR_TOKEN_FILE` / `KAFKA_PASSWORD` env vars — same images run in both modes.
+
+### ⚠️ Known limitation: local-mode KoP entry format
+
+Local-mode brings the **entire pipeline up** — cluster, orchestrator,
+spawned filters, ShadowTraffic, observability UI — but the **spawned filter
+cannot decode the source messages** on the public `streamnative/sn-platform`
+image. ShadowTraffic produces via the Kafka protocol; KoP stores those as
+batched Pulsar entries; the orchestrator's spawned selector-filter is a
+plain Pulsar consumer that errors with
+`SingleMessageMetadata: Some required fields are missing` and discards
+every message (filter `receivedTotal` stays 0).
+
+The cloud-mode fix — setting the `kafkaEntryFormat=pulsar_non_batched`
+namespace property — IS applied by `bootstrap.sh` and confirmed present
+(`pulsar-admin namespaces get-properties public/default` shows it), but the
+KoP version bundled in the public `sn-platform` images doesn't honor that
+value. SN Cloud's KoP does (cloud-mode works end-to-end — that's the demo's
+delivery path).
+
+Net: use **local-mode** for fast iteration on the multi-query app, the
+queries, and the observability UI (all of which work against the partial
+pipeline). Use **cloud-mode** for any end-to-end validation that needs the
+filter to actually process messages. Resolving the local-mode KoP gap likely
+requires a newer/SN-patched KoP build than the public images ship; tracked
+as a follow-up, not a blocker.
 
 ## Bootstrap service
 

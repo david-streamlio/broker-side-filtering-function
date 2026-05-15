@@ -24,9 +24,15 @@ services:
     # slower startup (~10s extra) but otherwise transparent.
     platform: linux/amd64
     container_name: stock-demo-pulsar
-    command: >
-      sh -c "bin/apply-config-from-env.py conf/standalone.conf &&
-             bin/pulsar standalone --advertised-address pulsar"
+    command:
+      - /bin/bash
+      - -c
+      - |
+        bin/apply-config-from-env.py conf/standalone.conf && \
+        echo '=== KoP-relevant lines in standalone.conf ===' && \
+        grep -iE 'kafkaEntryFormat|brokerEntryMetadata|exposingBrokerEntry' conf/standalone.conf && \
+        echo '=== starting standalone ===' && \
+        bin/pulsar standalone --advertised-address pulsar
     environment:
       # KoP — Kafka-on-Pulsar protocol handler. The streamnative/sn-platform
       # image ships the KoP NAR in protocols/. The PULSAR_PREFIX_ keys are
@@ -37,14 +43,15 @@ services:
       PULSAR_PREFIX_kafkaAdvertisedListeners:                 "PLAINTEXT://pulsar:9092"
       PULSAR_PREFIX_kafkaEnableMultiTenantMetadata:           "true"
       PULSAR_PREFIX_kafkaTransactionCoordinatorEnabled:       "false"
-      # Forces KoP to unpack incoming Kafka batches into individual Pulsar
-      # entries at storage time. Without this, the orchestrator's spawned
-      # selector-filter (a regular Pulsar consumer) errors with
-      # `IllegalStateException: Some required fields are missing` on every
-      # batched message and discards the entire ledger entry. Setting at
-      # the broker level (vs per-namespace via bootstrap.sh) so it applies
-      # before any topic is created — no ordering / timing risk.
-      PULSAR_PREFIX_kafkaEntryFormat:                         "pulsar_non_batched"
+      # NOTE: kafkaEntryFormat=pulsar_non_batched is NOT set here. At the
+      # *broker* level, kafkaEntryFormat only accepts `pulsar` / `kafka`;
+      # `pulsar_non_batched` is recognized only as a NAMESPACE-level property.
+      # bootstrap.sh sets it on public/default via `namespaces set-property`
+      # before the source topic is created so the topic inherits it. (An
+      # earlier revision set it as broker config here — KoP silently fell
+      # back to the default `pulsar` and every Kafka batch was stored as a
+      # Pulsar batch, breaking the spawned filter's plain Pulsar consumer
+      # with `SingleMessageMetadata: Some required fields are missing`.)
       # KoP computes Kafka offsets from broker-entry index metadata. Without
       # the AppendIndexMetadataInterceptor enabled, every fetch fails with
       # "No BrokerEntryMetadata found" and consumers get empty batches.
