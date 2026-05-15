@@ -109,14 +109,13 @@ services:
     env_file:
       - license.env
     volumes:
-      - ./shadowtraffic/stock-quotes.json:/etc/shadowtraffic/stock-quotes.json:ro
-    entrypoint: ["/bin/sh", "-c"]
-    # No SASL — pulsar:9092 is PLAINTEXT in local mode.
-    command: >
-      'export SHADOWTRAFFIC_VAR_topic="persistent://public/default/stock-quotes";
-       export SHADOWTRAFFIC_VAR_bootstrap="pulsar:9092";
-       export SHADOWTRAFFIC_VAR_throttle_ms="5";
-       shadowtraffic --config /etc/shadowtraffic/stock-quotes.json'
+      # stock-quotes.local.json has the topic + bootstrap values hardcoded for
+      # the standalone broker. ShadowTraffic doesn't do env-var substitution on
+      # its config, so we mount a non-templated copy in local mode.
+      - ./shadowtraffic/stock-quotes.local.json:/etc/shadowtraffic/stock-quotes.json:ro
+    # Use the image's default entrypoint (which knows where the shadowtraffic
+    # binary lives) — just pass the config-file flag as the command.
+    command: ["--config", "/etc/shadowtraffic/stock-quotes.json"]
 
   multi-query-app:
     build:
