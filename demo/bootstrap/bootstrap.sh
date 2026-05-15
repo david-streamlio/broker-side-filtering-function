@@ -86,6 +86,20 @@ else
     echo -e "${RED}  ❌ failed:${NC}"; echo "$OUT"; exit 1
 fi
 
+# ── Step 1b: set kafkaEntryFormat=pulsar_non_batched on the source namespace ─
+# KoP defaults to a batched entry format. The orchestrator's spawned filter
+# functions are regular Pulsar consumers — they can't decode KoP-batched
+# entries and the broker logs BatchDeSerializeError on every consume. Setting
+# this property tells KoP to store incoming Kafka messages in a format the
+# Pulsar consumer side can read. Setting at the NAMESPACE level so all topics
+# in the namespace inherit it, including the auto-created filtered-* private
+# topics that spawned filters publish into.
+echo -e "${BLUE}🔧 Step 1b — set kafkaEntryFormat=pulsar_non_batched on $SOURCE_NS${NC}"
+PA namespaces set-property "$SOURCE_NS" \
+    --key kafkaEntryFormat \
+    --value pulsar_non_batched 2>&1 | grep -vE '^$' || true
+echo -e "${GREEN}  ✅ namespace property set${NC}"
+
 # ── Step 2: ensure the control topic exists (non-partitioned) ────────────────
 echo -e "${BLUE}📦 Step 2/4 — ensure control topic exists${NC}"
 if OUT=$(PA topics create "$DEMO_CONTROL_TOPIC" 2>&1); then
