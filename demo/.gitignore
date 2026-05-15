@@ -1,0 +1,8 @@
+# Never commit local config / secrets
+.env
+license.env
+
+# Token files dropped to disk by infra/terraform/recreate.sh during cloud-mode
+# bring-up. The terraform .gitignore already covers infra/terraform/*.token;
+# this one is a belt-and-suspenders for any token that drifts up to demo/.
+*.token

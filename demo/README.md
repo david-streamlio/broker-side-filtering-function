@@ -75,11 +75,16 @@ Idempotent — all four steps treat "already exists" / "already granted" as succ
 
 ## Running (local-mode)
 
-Fastest path — no SN Cloud account needed:
+Fastest path — no SN Cloud account needed. First, set up your ShadowTraffic license:
 
 ```bash
-export SHADOWTRAFFIC_LICENSE_ID=<your-id>
-export SHADOWTRAFFIC_LICENSE_KEY=<your-key>
+cp license.env.example license.env
+# edit license.env: paste in the six LICENSE_* values from your ShadowTraffic account
+```
+
+Then bring the stack up:
+
+```bash
 docker compose -f docker-compose.local.yml up --build
 ```
 
@@ -87,12 +92,17 @@ Pulsar standalone takes ~30s to come up; orchestrator-deploy + bootstrap run in 
 
 ## Running (cloud-mode)
 
-Copy `.env.example` to `.env` and fill in your cluster details:
+Copy `.env.example` to `.env` and fill in your cluster details, and `license.env.example` to `license.env` for the ShadowTraffic license:
 
 ```bash
 cp .env.example .env
 # edit .env: PULSAR_SERVICE_URL, KAFKA_USERNAME, PULSAR_TOKEN_PATH, etc.
+
+cp license.env.example license.env
+# edit license.env: paste in your six LICENSE_* values
 ```
+
+Both `.env` and `license.env` are gitignored.
 
 Then:
 

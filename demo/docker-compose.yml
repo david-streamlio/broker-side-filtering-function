@@ -57,9 +57,12 @@ services:
     depends_on:
       bootstrap:
         condition: service_completed_successfully
-    environment:
-      LICENSE_ID:  "${SHADOWTRAFFIC_LICENSE_ID:?set in .env}"
-      LICENSE_KEY: "${SHADOWTRAFFIC_LICENSE_KEY:?set in .env}"
+    # License vars (LICENSE_ID, LICENSE_EMAIL, LICENSE_ORGANIZATION,
+    # LICENSE_EDITION, LICENSE_EXPIRATION, LICENSE_SIGNATURE) come from
+    # license.env in this directory — see license.env.example for the shape.
+    # license.env is gitignored so the actual values never get committed.
+    env_file:
+      - license.env
     volumes:
       - ./shadowtraffic/stock-quotes.json:/etc/shadowtraffic/stock-quotes.json:ro
       - ${PULSAR_TOKEN_PATH:?set in .env}:/var/run/secrets/pulsar.token:ro
