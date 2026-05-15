@@ -37,6 +37,14 @@ services:
       PULSAR_PREFIX_kafkaAdvertisedListeners:                 "PLAINTEXT://pulsar:9092"
       PULSAR_PREFIX_kafkaEnableMultiTenantMetadata:           "true"
       PULSAR_PREFIX_kafkaTransactionCoordinatorEnabled:       "false"
+      # Forces KoP to unpack incoming Kafka batches into individual Pulsar
+      # entries at storage time. Without this, the orchestrator's spawned
+      # selector-filter (a regular Pulsar consumer) errors with
+      # `IllegalStateException: Some required fields are missing` on every
+      # batched message and discards the entire ledger entry. Setting at
+      # the broker level (vs per-namespace via bootstrap.sh) so it applies
+      # before any topic is created — no ordering / timing risk.
+      PULSAR_PREFIX_kafkaEntryFormat:                         "pulsar_non_batched"
       # Functions — required for the orchestrator + spawned selector-filters.
       PULSAR_PREFIX_functionsWorkerEnabled:                   "true"
       PULSAR_PREFIX_allowAutoTopicCreation:                   "true"
