@@ -7,12 +7,16 @@
 FROM maven:3.9.9-eclipse-temurin-17 AS builder
 WORKDIR /build
 
-# Bring in the full parent reactor so the demo module can reference its parent
-# pom. Copy `pom.xml` + `common/` + `sdk/` + the demo module; the rest of the
-# repo is unnecessary for this image.
+# Bring in the full parent reactor. Maven needs every `<module>` declared in
+# the parent pom to be discoverable, even if `-pl demo/multi-query-app -am`
+# only builds a subset — otherwise the build errors with
+# "child module .../pom.xml does not exist". functions/ and perf/ are small
+# enough that copying them is cheaper than maintaining a stripped-down pom.
 COPY pom.xml ./
 COPY common ./common
 COPY sdk ./sdk
+COPY functions ./functions
+COPY perf ./perf
 COPY demo/multi-query-app ./demo/multi-query-app
 
 # Warm the dep cache against the demo module only.
