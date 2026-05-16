@@ -25,7 +25,8 @@
 #                     per-client Auth0 client-grant was never provisioned.
 #                     Get one as a Super Admin:
 #                       snctl -O $ORG auth get-token <cluster>-instance --login
-#   PULSAR_ADMIN      path to pulsar-admin (default: pulsar-admin)
+#   PULSAR_IMAGE      pulsar-admin Docker image for Phase 7 (default:
+#                     apachepulsar/pulsar:4.0.10). No host pulsar-admin needed.
 #   PULSAR_CLUSTER    cluster name (default: stock-demo — matches variables.tf)
 #   RESET=1           undeploy the orchestrator before re-running Phase 7
 
@@ -42,7 +43,7 @@ elapsed() { local label="$1" start="$2"; printf "  ${BLUE}⏱${NC}  %s: %ds\n" "
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$TF_DIR"
 
-PULSAR_ADMIN="${PULSAR_ADMIN:-pulsar-admin}"
+PULSAR_IMAGE="${PULSAR_IMAGE:-apachepulsar/pulsar:4.0.10}"
 PULSAR_CLUSTER="${PULSAR_CLUSTER:-stock-demo}"
 SELECTOR_REPO="${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
 SELECTOR_REL="${SELECTOR_REL:-v1.0.0-rc3}"
@@ -56,7 +57,7 @@ section "Phase 0 — Pre-flight"
 # Step B apply prompts interactively (breaks unattended runs).
 export TF_VAR_organization="$ORG"
 [[ -f "$TF_DIR/streamnative-key.json" ]]        || fail "streamnative-key.json not found in $TF_DIR (download from SN Cloud console)"
-command -v "$PULSAR_ADMIN" > /dev/null 2>&1     || fail "pulsar-admin not found — set PULSAR_ADMIN or add to PATH"
+command -v docker > /dev/null 2>&1              || fail "docker not found — Phase 7 runs pulsar-admin via $PULSAR_IMAGE (no host pulsar-admin needed)"
 command -v curl   > /dev/null 2>&1              || fail "curl not found"
 command -v terraform > /dev/null 2>&1           || fail "terraform not found"
 command -v python3   > /dev/null 2>&1           || fail "python3 not found (used to parse terraform JSON output)"
@@ -250,6 +251,23 @@ OF_TOKEN=$(cat "$TF_DIR/orchestrator-function.token")
 section "Phase 7 — Deploy orchestrator + selector-filter"
 PHASE7_START=$(date +%s)
 
+# pulsar-admin runs in a throwaway container — this project never requires a
+# working host pulsar-admin (the Apache source checkout commonly on PATH is an
+# unbuilt tree that dies with ClassNotFoundException; bootstrap.sh / local-mode
+# already dockerize it). NAR + rendered-config paths live under
+# /tmp/selector-filter-release and are bind-mounted at the same path so they
+# resolve identically inside the container.
+mkdir -p /tmp/selector-filter-release
+pa() {
+  docker run --rm \
+    -v /tmp/selector-filter-release:/tmp/selector-filter-release:ro \
+    "$PULSAR_IMAGE" \
+    bin/pulsar-admin --admin-url "$ADMIN_URL" \
+    --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
+    --auth-params "token:$OF_TOKEN" \
+    "$@"
+}
+
 # Set kafkaEntryFormat=pulsar_non_batched as the namespace default on public/default
 # so spawned filter functions can decode Kafka-produced records, AND on the
 # stock-quotes source topic so ShadowTraffic's Kafka producer entries are
@@ -264,10 +282,7 @@ curl -sf -X PUT \
   || warn "Could not set kafkaEntryFormat (may already be set)"
 
 echo "  Setting namespace-default kafkaEntryFormat on public/default…"
-"$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-  --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-  --auth-params "token:$OF_TOKEN" \
-  namespaces set-property --key kafkaEntryFormat --value pulsar_non_batched \
+pa namespaces set-property --key kafkaEntryFormat --value pulsar_non_batched \
   public/default \
   && ok "Namespace property set" \
   || warn "Could not set namespace property"
@@ -309,10 +324,7 @@ ok "NARs ready"
 # instances of this function on demand by referencing the package URL.
 PKG_URL="function://stock-demo/filtering/selector-filter@${SF_VER}"
 echo "  Uploading selector-filter as Pulsar package ${PKG_URL}…"
-"$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-  --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-  --auth-params "token:$OF_TOKEN" \
-  packages upload "$PKG_URL" \
+pa packages upload "$PKG_URL" \
   --path "$FILT_NAR" \
   --description "selector-filter ${SELECTOR_REL}" \
   && ok "selector-filter package uploaded" \
@@ -320,33 +332,24 @@ echo "  Uploading selector-filter as Pulsar package ${PKG_URL}…"
 
 # Reset path — undeploy orchestrator before recreating it.
 if [[ "${RESET:-0}" == "1" ]]; then
-  "$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-    --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-    --auth-params "token:$OF_TOKEN" \
-    functions delete --tenant stock-demo --namespace filtering --name orchestrator 2>/dev/null \
+  pa functions delete --tenant stock-demo --namespace filtering --name orchestrator 2>/dev/null \
     && ok "Orchestrator deleted (RESET=1)" \
     || warn "Orchestrator was not running"
 fi
 
 # Deploy orchestrator function (if not already running).
-FUNCS_LIST=$("$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-  --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-  --auth-params "token:$OF_TOKEN" \
-  functions list --tenant stock-demo --namespace filtering 2>&1 || true)
+FUNCS_LIST=$(pa functions list --tenant stock-demo --namespace filtering 2>&1 || true)
 
 if echo "$FUNCS_LIST" | grep -q "^orchestrator$"; then
   ok "Orchestrator already deployed — skipping (export RESET=1 to redeploy)"
 else
-  TMP_CFG=$(mktemp -t orchestrator-XXXXXX.yaml)
+  TMP_CFG="/tmp/selector-filter-release/orchestrator-config.$$.yaml"
   sed -e "s|@1.0|@${SF_VER}|g" \
       -e "s|\${PULSAR_ADMIN_URL}|${ADMIN_URL}|g" \
       -e "s|\${PULSAR_ADMIN_TOKEN}|${OF_TOKEN}|g" \
       "$TF_DIR/../pulsar-functions/orchestrator-function-config.yaml" > "$TMP_CFG"
 
-  "$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-    --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-    --auth-params "token:$OF_TOKEN" \
-    functions create \
+  pa functions create \
     --function-config-file "$TMP_CFG" \
     --jar "$ORCH_NAR"
 
