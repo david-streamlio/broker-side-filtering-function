@@ -161,24 +161,33 @@ for name, token in tokens.items():
     terraform state rm "$r" 2>/dev/null && echo "  removed: $r" || echo "  skipped: $r"
   done
   ok "Stale Pulsar state cleared"
-
-  # ── Phase 5: Terraform Step B ──────────────────────────────────────────────
-  section "Phase 5 — Terraform Step B (tenant, namespaces, topics, permissions)"
-  PHASE5_START=$(date +%s)
-
-  INSTANCE_NAME=$(terraform output -json pulsar_instance | python3 -c \
-    "import sys,json; print(json.load(sys.stdin)['value']['name'])")
-
-  export TF_VAR_pulsar_web_service_url="$ADMIN_URL"
-  export TF_VAR_pulsar_token=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
-    --key-file "$TF_DIR/streamnative-key.json")
-
-  terraform apply -auto-approve
-  elapsed "Terraform Step B" $PHASE5_START
-  ok "Pulsar resources created"
 else
-  ok "Cluster already up — skipping Phases 2-5"
+  ok "Cluster already up — skipping Phases 2-4 (provisioning + stale-state clear)"
 fi
+
+# ── Phase 5: Terraform Step B ────────────────────────────────────────────────
+# ALWAYS runs — deliberately OUTSIDE the CLUSTER_UP gate. Step B is fully
+# idempotent (`terraform apply` reconciles tenant/namespaces/topics/permissions
+# and is a no-op when they already exist). Keeping it gated meant a partial run
+# that died after Phase 4 but before Step B left the cluster
+# provisioned-but-empty, and the re-run then skipped Step B entirely because
+# the cluster now reports "up".
+section "Phase 5 — Terraform Step B (tenant, namespaces, topics, permissions)"
+PHASE5_START=$(date +%s)
+
+# Instance name is deterministic: main.tf sets name = "${var.cluster_name}-instance".
+# Don't round-trip through `terraform output -json pulsar_instance` — a targeted
+# Phase-2 apply doesn't persist that output, so it returns {} and the old
+# python parse died with KeyError: 'value'.
+INSTANCE_NAME="${TF_VAR_cluster_name:-stock-demo}-instance"
+
+export TF_VAR_pulsar_web_service_url="$ADMIN_URL"
+export TF_VAR_pulsar_token=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
+  --key-file "$TF_DIR/streamnative-key.json")
+
+terraform apply -auto-approve
+elapsed "Terraform Step B" $PHASE5_START
+ok "Pulsar resources created"
 
 # ── Phase 6: Token export (already done above on first run; re-export for safety) ──
 section "Phase 6 — Token export"
