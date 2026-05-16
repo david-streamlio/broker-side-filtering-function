@@ -182,8 +182,26 @@ PHASE5_START=$(date +%s)
 INSTANCE_NAME="${TF_VAR_cluster_name:-stock-demo}-instance"
 
 export TF_VAR_pulsar_web_service_url="$ADMIN_URL"
-export TF_VAR_pulsar_token=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
-  --key-file "$TF_DIR/streamnative-key.json")
+
+# SN Cloud's auth server needs time after instance creation before it will
+# mint an instance-scoped token (aud=urn:sn:pulsar:$ORG:$INSTANCE_NAME) for
+# the provisioning SA — it returns an opaque "could not exchange client
+# credentials" until that audience has propagated. A full run masks this
+# because the long Phase-2 cluster-provisioning loop burns the propagation
+# window; the cluster-already-up skip path hits Phase 5 minutes after
+# instance creation and races it. The old `export VAR=$(snctl …)` form also
+# swallowed snctl's non-zero exit, stuffing the error string into the token
+# (=> uniform 401 on every Step B op). Retry until a real JWT comes back.
+attempt=1
+until PULSAR_TOKEN=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
+        --key-file "$TF_DIR/streamnative-key.json" 2>/dev/null) \
+      && [[ "$PULSAR_TOKEN" == eyJ* ]]; do
+  warn "Instance auth not propagated yet (attempt $attempt/30) — snctl auth get-token rejected for $INSTANCE_NAME; retrying in 60s…"
+  attempt=$(( attempt + 1 ))
+  [[ $attempt -gt 30 ]] && fail "Could not mint a Pulsar token for $INSTANCE_NAME after 30 attempts (~30 min). Verify streamnative-key.json's SA can mint instance tokens: snctl -O $ORG auth get-token $INSTANCE_NAME --key-file streamnative-key.json"
+  sleep 60
+done
+export TF_VAR_pulsar_token="$PULSAR_TOKEN"
 
 terraform apply -auto-approve
 elapsed "Terraform Step B" $PHASE5_START
