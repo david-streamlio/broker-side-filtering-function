@@ -264,9 +264,14 @@ pa() {
     "$PULSAR_IMAGE" \
     bin/pulsar-admin --admin-url "$ADMIN_URL" \
     --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-    --auth-params "token:$OF_TOKEN" \
+    --auth-params "token:${PA_AUTH_TOKEN:-$OF_TOKEN}" \
     "$@"
 }
+# Tenant/namespace-property admin (kafkaEntryFormat) requires a tenant-admin /
+# superuser — the orchestrator-function SA ($OF_TOKEN) only has function +
+# package rights and 401s ("Don't have permission to administrate resources on
+# this tenant"). $TF_VAR_pulsar_token is the instance superuser token minted in
+# Phase 5 (operator --login or the provisioning key). Use it for those ops.
 
 # Set kafkaEntryFormat=pulsar_non_batched as the namespace default on public/default
 # so spawned filter functions can decode Kafka-produced records, AND on the
@@ -274,7 +279,7 @@ pa() {
 # parseable by the broker-side filter.
 echo "  Setting kafkaEntryFormat=pulsar_non_batched on persistent://public/default/stock-quotes…"
 curl -sf -X PUT \
-  -H "Authorization: Bearer $OF_TOKEN" \
+  -H "Authorization: Bearer $TF_VAR_pulsar_token" \
   -H "Content-Type: application/json" \
   -d '{"kafkaEntryFormat":"pulsar_non_batched"}' \
   "$ADMIN_URL/admin/v2/persistent/public/default/stock-quotes/properties" \
@@ -282,8 +287,8 @@ curl -sf -X PUT \
   || warn "Could not set kafkaEntryFormat (may already be set)"
 
 echo "  Setting namespace-default kafkaEntryFormat on public/default…"
-pa namespaces set-property --key kafkaEntryFormat --value pulsar_non_batched \
-  public/default \
+PA_AUTH_TOKEN="$TF_VAR_pulsar_token" pa namespaces set-property \
+  --key kafkaEntryFormat --value pulsar_non_batched public/default \
   && ok "Namespace property set" \
   || warn "Could not set namespace property"
 
