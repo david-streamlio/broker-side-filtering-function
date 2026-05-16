@@ -20,6 +20,11 @@
 #   SELECTOR_REL      Release tag (default: v1.0.0-rc3)
 #
 # Optional env:
+#   PULSAR_TOKEN      pre-minted instance-scoped superuser JWT for Step B.
+#                     Bypasses the key-file mint — required on instances whose
+#                     per-client Auth0 client-grant was never provisioned.
+#                     Get one as a Super Admin:
+#                       snctl -O $ORG auth get-token <cluster>-instance --login
 #   PULSAR_ADMIN      path to pulsar-admin (default: pulsar-admin)
 #   PULSAR_CLUSTER    cluster name (default: stock-demo — matches variables.tf)
 #   RESET=1           undeploy the orchestrator before re-running Phase 7
@@ -183,25 +188,41 @@ INSTANCE_NAME="${TF_VAR_cluster_name:-stock-demo}-instance"
 
 export TF_VAR_pulsar_web_service_url="$ADMIN_URL"
 
-# SN Cloud's auth server needs time after instance creation before it will
-# mint an instance-scoped token (aud=urn:sn:pulsar:$ORG:$INSTANCE_NAME) for
-# the provisioning SA — it returns an opaque "could not exchange client
-# credentials" until that audience has propagated. A full run masks this
-# because the long Phase-2 cluster-provisioning loop burns the propagation
-# window; the cluster-already-up skip path hits Phase 5 minutes after
-# instance creation and races it. The old `export VAR=$(snctl …)` form also
-# swallowed snctl's non-zero exit, stuffing the error string into the token
-# (=> uniform 401 on every Step B op). Retry until a real JWT comes back.
-attempt=1
-until PULSAR_TOKEN=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
-        --key-file "$TF_DIR/streamnative-key.json" 2>/dev/null) \
-      && [[ "$PULSAR_TOKEN" == eyJ* ]]; do
-  warn "Instance auth not propagated yet (attempt $attempt/30) — snctl auth get-token rejected for $INSTANCE_NAME; retrying in 60s…"
-  attempt=$(( attempt + 1 ))
-  [[ $attempt -gt 30 ]] && fail "Could not mint a Pulsar token for $INSTANCE_NAME after 30 attempts (~30 min). Verify streamnative-key.json's SA can mint instance tokens: snctl -O $ORG auth get-token $INSTANCE_NAME --key-file streamnative-key.json"
-  sleep 60
-done
-export TF_VAR_pulsar_token="$PULSAR_TOKEN"
+# Step B needs an instance-scoped superuser token. Two ways to get one:
+#
+#   1. PULSAR_TOKEN env override (operator-supplied). Use when the key-file
+#      M2M mint can't work: SN Cloud registers each instance as its own Auth0
+#      resource server (urn:sn:pulsar:$ORG:$INSTANCE), and the SA's OAuth2
+#      *client* needs a per-instance "client-grant" to get a token for it.
+#      That grant is provisioned out-of-band and is NOT created by Super
+#      Admin status, by the service-account/cluster binding, or by anything
+#      in this script — a brand-new instance simply has no grant for this
+#      client, so the key-file mint returns "client is not authorized to
+#      access resource server … create a client-grant". The fix that works
+#      without that grant: mint interactively as a Super Admin through
+#      snctl's own first-party client —
+#        export PULSAR_TOKEN=$(snctl -O $ORG auth get-token $INSTANCE_NAME --login)
+#      and re-run. We accept it here verbatim.
+#
+#   2. Key-file mint (default). Works on instances where the client-grant
+#      already exists. Retried because a freshly-granted instance still
+#      needs a short while for the grant to propagate.
+if [[ -n "${PULSAR_TOKEN:-}" ]]; then
+  [[ "$PULSAR_TOKEN" == eyJ* ]] || fail "PULSAR_TOKEN is set but is not a JWT (expected eyJ…). Mint one with: snctl -O $ORG auth get-token $INSTANCE_NAME --login"
+  ok "Using operator-supplied PULSAR_TOKEN (key-file mint bypassed)"
+  export TF_VAR_pulsar_token="$PULSAR_TOKEN"
+else
+  attempt=1
+  until PT=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
+          --key-file "$TF_DIR/streamnative-key.json" 2>/dev/null) \
+        && [[ "$PT" == eyJ* ]]; do
+    warn "Instance token not available yet (attempt $attempt/30) — snctl auth get-token rejected for $INSTANCE_NAME; retrying in 60s… (if this is a brand-new instance the client-grant may be missing — see PULSAR_TOKEN override above)"
+    attempt=$(( attempt + 1 ))
+    [[ $attempt -gt 30 ]] && fail "Could not mint a Pulsar token for $INSTANCE_NAME after 30 attempts (~30 min). Likely a missing Auth0 client-grant for this SA's client on the instance. Bypass with: export PULSAR_TOKEN=\$(snctl -O $ORG auth get-token $INSTANCE_NAME --login) and re-run."
+    sleep 60
+  done
+  export TF_VAR_pulsar_token="$PT"
+fi
 
 terraform apply -auto-approve
 elapsed "Terraform Step B" $PHASE5_START
