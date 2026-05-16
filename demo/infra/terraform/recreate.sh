@@ -20,7 +20,13 @@
 #   SELECTOR_REL      Release tag (default: v1.0.0-rc3)
 #
 # Optional env:
-#   PULSAR_ADMIN      path to pulsar-admin (default: pulsar-admin)
+#   PULSAR_TOKEN      pre-minted instance-scoped superuser JWT for Step B.
+#                     Bypasses the key-file mint — required on instances whose
+#                     per-client Auth0 client-grant was never provisioned.
+#                     Get one as a Super Admin:
+#                       snctl -O $ORG auth get-token <cluster>-instance --login
+#   PULSAR_IMAGE      pulsar-admin Docker image for Phase 7 (default:
+#                     apachepulsar/pulsar:4.0.10). No host pulsar-admin needed.
 #   PULSAR_CLUSTER    cluster name (default: stock-demo — matches variables.tf)
 #   RESET=1           undeploy the orchestrator before re-running Phase 7
 
@@ -37,7 +43,7 @@ elapsed() { local label="$1" start="$2"; printf "  ${BLUE}⏱${NC}  %s: %ds\n" "
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$TF_DIR"
 
-PULSAR_ADMIN="${PULSAR_ADMIN:-pulsar-admin}"
+PULSAR_IMAGE="${PULSAR_IMAGE:-apachepulsar/pulsar:4.0.10}"
 PULSAR_CLUSTER="${PULSAR_CLUSTER:-stock-demo}"
 SELECTOR_REPO="${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
 SELECTOR_REL="${SELECTOR_REL:-v1.0.0-rc3}"
@@ -46,8 +52,12 @@ SELECTOR_REL="${SELECTOR_REL:-v1.0.0-rc3}"
 section "Phase 0 — Pre-flight"
 
 [[ -n "${ORG:-}" ]]                             || fail "ORG env var not set — export ORG=<your-sn-cloud-org-id>"
+# var.organization has no default (forces an explicit org). Map ORG -> the
+# terraform var here so neither the Phase-2 targeted apply nor the Phase-5
+# Step B apply prompts interactively (breaks unattended runs).
+export TF_VAR_organization="$ORG"
 [[ -f "$TF_DIR/streamnative-key.json" ]]        || fail "streamnative-key.json not found in $TF_DIR (download from SN Cloud console)"
-command -v "$PULSAR_ADMIN" > /dev/null 2>&1     || fail "pulsar-admin not found — set PULSAR_ADMIN or add to PATH"
+command -v docker > /dev/null 2>&1              || fail "docker not found — Phase 7 runs pulsar-admin via $PULSAR_IMAGE (no host pulsar-admin needed)"
 command -v curl   > /dev/null 2>&1              || fail "curl not found"
 command -v terraform > /dev/null 2>&1           || fail "terraform not found"
 command -v python3   > /dev/null 2>&1           || fail "python3 not found (used to parse terraform JSON output)"
@@ -99,11 +109,16 @@ if [[ "$CLUSTER_UP" == "false" ]]; then
     -target=streamnative_rolebinding.stock_demo_app_consumer_group_reader
   )
 
+  # Serverless instance/cluster provisioning takes ~10-15 min. The provider
+  # returns CONTINUE_RETRY_READ_PULSAR_INSTANCE / "cluster not found" fast
+  # (it exhausts its own internal poll budget and errors rather than
+  # blocking), so each attempt is short — the loop, not the provider, is
+  # what actually waits out provisioning. 30 attempts * 60s = ~30 min ceiling.
   attempt=1
   until terraform apply -auto-approve "${TF_TARGETS[@]}" 2>&1; do
-    warn "Terraform timed out (attempt $attempt) — retrying in 60s…"
+    warn "Instance/cluster still provisioning (attempt $attempt/30) — retrying in 60s…"
     attempt=$(( attempt + 1 ))
-    [[ $attempt -gt 5 ]] && fail "Cluster not ready after 5 attempts"
+    [[ $attempt -gt 30 ]] && fail "Instance/cluster not queryable after 30 attempts (~30 min) — check the SN Cloud console for the stock-demo instance state"
     sleep 60
   done
   elapsed "Terraform Step A" $PHASE2_START
@@ -156,24 +171,73 @@ for name, token in tokens.items():
     terraform state rm "$r" 2>/dev/null && echo "  removed: $r" || echo "  skipped: $r"
   done
   ok "Stale Pulsar state cleared"
-
-  # ── Phase 5: Terraform Step B ──────────────────────────────────────────────
-  section "Phase 5 — Terraform Step B (tenant, namespaces, topics, permissions)"
-  PHASE5_START=$(date +%s)
-
-  INSTANCE_NAME=$(terraform output -json pulsar_instance | python3 -c \
-    "import sys,json; print(json.load(sys.stdin)['value']['name'])")
-
-  export TF_VAR_pulsar_web_service_url="$ADMIN_URL"
-  export TF_VAR_pulsar_token=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
-    --key-file "$TF_DIR/streamnative-key.json")
-
-  terraform apply -auto-approve
-  elapsed "Terraform Step B" $PHASE5_START
-  ok "Pulsar resources created"
 else
-  ok "Cluster already up — skipping Phases 2-5"
+  ok "Cluster already up — skipping Phases 2-4 (provisioning + stale-state clear)"
 fi
+
+# ── Phase 5: Terraform Step B ────────────────────────────────────────────────
+# ALWAYS runs — deliberately OUTSIDE the CLUSTER_UP gate. Step B is fully
+# idempotent (`terraform apply` reconciles tenant/namespaces/topics/permissions
+# and is a no-op when they already exist). Keeping it gated meant a partial run
+# that died after Phase 4 but before Step B left the cluster
+# provisioned-but-empty, and the re-run then skipped Step B entirely because
+# the cluster now reports "up".
+section "Phase 5 — Terraform Step B (tenant, namespaces, topics, permissions)"
+PHASE5_START=$(date +%s)
+
+# Instance name is deterministic: main.tf sets name = "${var.cluster_name}-instance".
+# Don't round-trip through `terraform output -json pulsar_instance` — a targeted
+# Phase-2 apply doesn't persist that output, so it returns {} and the old
+# python parse died with KeyError: 'value'.
+INSTANCE_NAME="${TF_VAR_cluster_name:-stock-demo}-instance"
+
+export TF_VAR_pulsar_web_service_url="$ADMIN_URL"
+
+# Step B needs an instance-scoped superuser token. Two ways to get one:
+#
+#   1. PULSAR_TOKEN env override (operator-supplied). Use when the key-file
+#      M2M mint can't work: SN Cloud registers each instance as its own Auth0
+#      resource server (urn:sn:pulsar:$ORG:$INSTANCE), and the SA's OAuth2
+#      *client* needs a per-instance "client-grant" to get a token for it.
+#      That grant is provisioned out-of-band and is NOT created by Super
+#      Admin status, by the service-account/cluster binding, or by anything
+#      in this script — a brand-new instance simply has no grant for this
+#      client, so the key-file mint returns "client is not authorized to
+#      access resource server … create a client-grant". The fix that works
+#      without that grant: mint interactively as a Super Admin through
+#      snctl's own first-party client —
+#        export PULSAR_TOKEN=$(snctl -O $ORG auth get-token $INSTANCE_NAME --login)
+#      and re-run. We accept it here verbatim.
+#
+#   2. Key-file mint (default). Works on instances where the client-grant
+#      already exists. Retried because a freshly-granted instance still
+#      needs a short while for the grant to propagate.
+if [[ -n "${PULSAR_TOKEN:-}" ]]; then
+  # `snctl auth get-token --login` interleaves a browser-launch banner with
+  # the token on stdout (only a still-cached session emits the bare token),
+  # so $(…) capture is usually banner + token. Extract the JWT defensively
+  # rather than requiring PULSAR_TOKEN to *start* with eyJ — three
+  # base64url segments separated by dots; take the last match.
+  PT=$(printf '%s' "$PULSAR_TOKEN" | grep -oE 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' | tail -1)
+  [[ -n "$PT" ]] || fail "PULSAR_TOKEN is set but no JWT (eyJ….….…) found in it. Mint with: snctl -O $ORG auth get-token $INSTANCE_NAME --login (complete the browser auth; pass the whole output or just the token line)"
+  ok "Using operator-supplied PULSAR_TOKEN (JWT extracted; key-file mint bypassed)"
+  export TF_VAR_pulsar_token="$PT"
+else
+  attempt=1
+  until PT=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
+          --key-file "$TF_DIR/streamnative-key.json" 2>/dev/null) \
+        && [[ "$PT" == eyJ* ]]; do
+    warn "Instance token not available yet (attempt $attempt/30) — snctl auth get-token rejected for $INSTANCE_NAME; retrying in 60s… (if this is a brand-new instance the client-grant may be missing — see PULSAR_TOKEN override above)"
+    attempt=$(( attempt + 1 ))
+    [[ $attempt -gt 30 ]] && fail "Could not mint a Pulsar token for $INSTANCE_NAME after 30 attempts (~30 min). Likely a missing Auth0 client-grant for this SA's client on the instance. Bypass with: export PULSAR_TOKEN=\$(snctl -O $ORG auth get-token $INSTANCE_NAME --login) and re-run."
+    sleep 60
+  done
+  export TF_VAR_pulsar_token="$PT"
+fi
+
+terraform apply -auto-approve
+elapsed "Terraform Step B" $PHASE5_START
+ok "Pulsar resources created"
 
 # ── Phase 6: Token export (already done above on first run; re-export for safety) ──
 section "Phase 6 — Token export"
@@ -187,13 +251,35 @@ OF_TOKEN=$(cat "$TF_DIR/orchestrator-function.token")
 section "Phase 7 — Deploy orchestrator + selector-filter"
 PHASE7_START=$(date +%s)
 
+# pulsar-admin runs in a throwaway container — this project never requires a
+# working host pulsar-admin (the Apache source checkout commonly on PATH is an
+# unbuilt tree that dies with ClassNotFoundException; bootstrap.sh / local-mode
+# already dockerize it). NAR + rendered-config paths live under
+# /tmp/selector-filter-release and are bind-mounted at the same path so they
+# resolve identically inside the container.
+mkdir -p /tmp/selector-filter-release
+pa() {
+  docker run --rm \
+    -v /tmp/selector-filter-release:/tmp/selector-filter-release:ro \
+    "$PULSAR_IMAGE" \
+    bin/pulsar-admin --admin-url "$ADMIN_URL" \
+    --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
+    --auth-params "token:${PA_AUTH_TOKEN:-$OF_TOKEN}" \
+    "$@"
+}
+# Tenant/namespace-property admin (kafkaEntryFormat) requires a tenant-admin /
+# superuser — the orchestrator-function SA ($OF_TOKEN) only has function +
+# package rights and 401s ("Don't have permission to administrate resources on
+# this tenant"). $TF_VAR_pulsar_token is the instance superuser token minted in
+# Phase 5 (operator --login or the provisioning key). Use it for those ops.
+
 # Set kafkaEntryFormat=pulsar_non_batched as the namespace default on public/default
 # so spawned filter functions can decode Kafka-produced records, AND on the
 # stock-quotes source topic so ShadowTraffic's Kafka producer entries are
 # parseable by the broker-side filter.
 echo "  Setting kafkaEntryFormat=pulsar_non_batched on persistent://public/default/stock-quotes…"
 curl -sf -X PUT \
-  -H "Authorization: Bearer $OF_TOKEN" \
+  -H "Authorization: Bearer $TF_VAR_pulsar_token" \
   -H "Content-Type: application/json" \
   -d '{"kafkaEntryFormat":"pulsar_non_batched"}' \
   "$ADMIN_URL/admin/v2/persistent/public/default/stock-quotes/properties" \
@@ -201,37 +287,49 @@ curl -sf -X PUT \
   || warn "Could not set kafkaEntryFormat (may already be set)"
 
 echo "  Setting namespace-default kafkaEntryFormat on public/default…"
-"$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-  --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-  --auth-params "token:$OF_TOKEN" \
-  namespaces set-property --key kafkaEntryFormat --value pulsar_non_batched \
-  public/default \
+PA_AUTH_TOKEN="$TF_VAR_pulsar_token" pa namespaces set-property \
+  --key kafkaEntryFormat --value pulsar_non_batched public/default \
   && ok "Namespace property set" \
   || warn "Could not set namespace property"
 
-# Download orchestrator + selector-filter NARs from the GitHub release.
-echo "  Downloading orchestrator + selector-filter NARs (release: $SELECTOR_REL)…"
-mkdir -p /tmp/selector-filter-release
+# Locate orchestrator + selector-filter NARs.
+# Preferred: NARs pre-downloaded on the host (gh has private-repo auth — plain
+# curl from this script does not). Mirrors the local-mode fix:
+#   gh release download v$SF_VER \
+#     --repo david-streamlio/broker-side-filtering-function \
+#     --dir demo/local/nars --pattern '*.nar'
+# Fallback: unauthenticated curl (works only if the release repo is public).
 SF_VER="${SELECTOR_REL#v}"
+mkdir -p /tmp/selector-filter-release
 ORCH_NAR="/tmp/selector-filter-release/selector-filter-orchestrator-${SF_VER}.nar"
 FILT_NAR="/tmp/selector-filter-release/selector-filter-function-${SF_VER}.nar"
 
-curl -sfL -o "$ORCH_NAR" \
-  "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-orchestrator-${SF_VER}.nar" \
-  || fail "Failed to download orchestrator NAR from ${SELECTOR_REPO} ${SELECTOR_REL}"
-curl -sfL -o "$FILT_NAR" \
-  "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-function-${SF_VER}.nar" \
-  || fail "Failed to download selector-filter NAR"
-ok "NARs downloaded"
+# demo/local/nars relative to this script: recreate.sh lives in
+# demo/infra/terraform, so ../../local/nars.
+HOST_NARS="$TF_DIR/../../local/nars"
+HOST_ORCH="$HOST_NARS/selector-filter-orchestrator-${SF_VER}.nar"
+HOST_FILT="$HOST_NARS/selector-filter-function-${SF_VER}.nar"
+
+if [[ -f "$HOST_ORCH" && -f "$HOST_FILT" ]]; then
+  echo "  Using host-downloaded NARs from $HOST_NARS"
+  cp "$HOST_ORCH" "$ORCH_NAR"
+  cp "$HOST_FILT" "$FILT_NAR"
+else
+  echo "  Host NARs not found at $HOST_NARS — falling back to direct download (public repo only)…"
+  curl -sfL -o "$ORCH_NAR" \
+    "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-orchestrator-${SF_VER}.nar" \
+    || fail "Failed to download orchestrator NAR. For a private repo, pre-download with: gh release download ${SELECTOR_REL} --repo ${SELECTOR_REPO} --dir demo/local/nars --pattern '*.nar'"
+  curl -sfL -o "$FILT_NAR" \
+    "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-function-${SF_VER}.nar" \
+    || fail "Failed to download selector-filter NAR. See the gh release download hint above."
+fi
+ok "NARs ready"
 
 # Upload selector-filter NAR as a Pulsar package — the orchestrator spawns
 # instances of this function on demand by referencing the package URL.
 PKG_URL="function://stock-demo/filtering/selector-filter@${SF_VER}"
 echo "  Uploading selector-filter as Pulsar package ${PKG_URL}…"
-"$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-  --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-  --auth-params "token:$OF_TOKEN" \
-  packages upload "$PKG_URL" \
+pa packages upload "$PKG_URL" \
   --path "$FILT_NAR" \
   --description "selector-filter ${SELECTOR_REL}" \
   && ok "selector-filter package uploaded" \
@@ -239,33 +337,24 @@ echo "  Uploading selector-filter as Pulsar package ${PKG_URL}…"
 
 # Reset path — undeploy orchestrator before recreating it.
 if [[ "${RESET:-0}" == "1" ]]; then
-  "$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-    --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-    --auth-params "token:$OF_TOKEN" \
-    functions delete --tenant stock-demo --namespace filtering --name orchestrator 2>/dev/null \
+  pa functions delete --tenant stock-demo --namespace filtering --name orchestrator 2>/dev/null \
     && ok "Orchestrator deleted (RESET=1)" \
     || warn "Orchestrator was not running"
 fi
 
 # Deploy orchestrator function (if not already running).
-FUNCS_LIST=$("$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-  --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-  --auth-params "token:$OF_TOKEN" \
-  functions list --tenant stock-demo --namespace filtering 2>&1 || true)
+FUNCS_LIST=$(pa functions list --tenant stock-demo --namespace filtering 2>&1 || true)
 
 if echo "$FUNCS_LIST" | grep -q "^orchestrator$"; then
   ok "Orchestrator already deployed — skipping (export RESET=1 to redeploy)"
 else
-  TMP_CFG=$(mktemp -t orchestrator-XXXXXX.yaml)
+  TMP_CFG="/tmp/selector-filter-release/orchestrator-config.$$.yaml"
   sed -e "s|@1.0|@${SF_VER}|g" \
       -e "s|\${PULSAR_ADMIN_URL}|${ADMIN_URL}|g" \
       -e "s|\${PULSAR_ADMIN_TOKEN}|${OF_TOKEN}|g" \
       "$TF_DIR/../pulsar-functions/orchestrator-function-config.yaml" > "$TMP_CFG"
 
-  "$PULSAR_ADMIN" --admin-url "$ADMIN_URL" \
-    --auth-plugin org.apache.pulsar.client.impl.auth.AuthenticationToken \
-    --auth-params "token:$OF_TOKEN" \
-    functions create \
+  pa functions create \
     --function-config-file "$TMP_CFG" \
     --jar "$ORCH_NAR"
 
