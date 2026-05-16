@@ -42,12 +42,6 @@ variable "pulsar_token" {
   sensitive   = true
 }
 
-variable "provisioner_sa_name" {
-  description = "Name of the SA in streamnative-key.json (the part before '@' in client_email). Bound to the cluster so it gets an Auth0 client-grant for the instance — required for Phase 5's `snctl auth get-token` to mint the Step B pulsar-provider token on a fresh instance. recreate.sh auto-derives and exports this; empty disables the binding."
-  type        = string
-  default     = ""
-}
-
 variable "sa_domain" {
   description = "Auth domain for Pulsar SA principals — <sa-name>@<sa_domain> is the role used by every pulsar_permission_grant. Leave empty to auto-derive as <organization>.auth.streamnative.cloud (production). Override for staging (typically <organization>.auth.sncloud-stg.dev)."
   type        = string
