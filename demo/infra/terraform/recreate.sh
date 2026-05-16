@@ -51,6 +51,10 @@ SELECTOR_REL="${SELECTOR_REL:-v1.0.0-rc3}"
 section "Phase 0 — Pre-flight"
 
 [[ -n "${ORG:-}" ]]                             || fail "ORG env var not set — export ORG=<your-sn-cloud-org-id>"
+# var.organization has no default (forces an explicit org). Map ORG -> the
+# terraform var here so neither the Phase-2 targeted apply nor the Phase-5
+# Step B apply prompts interactively (breaks unattended runs).
+export TF_VAR_organization="$ORG"
 [[ -f "$TF_DIR/streamnative-key.json" ]]        || fail "streamnative-key.json not found in $TF_DIR (download from SN Cloud console)"
 command -v "$PULSAR_ADMIN" > /dev/null 2>&1     || fail "pulsar-admin not found — set PULSAR_ADMIN or add to PATH"
 command -v curl   > /dev/null 2>&1              || fail "curl not found"
