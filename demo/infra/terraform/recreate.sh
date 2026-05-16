@@ -208,9 +208,15 @@ export TF_VAR_pulsar_web_service_url="$ADMIN_URL"
 #      already exists. Retried because a freshly-granted instance still
 #      needs a short while for the grant to propagate.
 if [[ -n "${PULSAR_TOKEN:-}" ]]; then
-  [[ "$PULSAR_TOKEN" == eyJ* ]] || fail "PULSAR_TOKEN is set but is not a JWT (expected eyJ…). Mint one with: snctl -O $ORG auth get-token $INSTANCE_NAME --login"
-  ok "Using operator-supplied PULSAR_TOKEN (key-file mint bypassed)"
-  export TF_VAR_pulsar_token="$PULSAR_TOKEN"
+  # `snctl auth get-token --login` interleaves a browser-launch banner with
+  # the token on stdout (only a still-cached session emits the bare token),
+  # so $(…) capture is usually banner + token. Extract the JWT defensively
+  # rather than requiring PULSAR_TOKEN to *start* with eyJ — three
+  # base64url segments separated by dots; take the last match.
+  PT=$(printf '%s' "$PULSAR_TOKEN" | grep -oE 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' | tail -1)
+  [[ -n "$PT" ]] || fail "PULSAR_TOKEN is set but no JWT (eyJ….….…) found in it. Mint with: snctl -O $ORG auth get-token $INSTANCE_NAME --login (complete the browser auth; pass the whole output or just the token line)"
+  ok "Using operator-supplied PULSAR_TOKEN (JWT extracted; key-file mint bypassed)"
+  export TF_VAR_pulsar_token="$PT"
 else
   attempt=1
   until PT=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
