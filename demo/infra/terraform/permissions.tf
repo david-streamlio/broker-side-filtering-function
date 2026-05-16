@@ -31,6 +31,25 @@ resource "streamnative_service_account_binding" "orchestrator_function" {
   cluster_name         = var.cluster_name
 }
 
+# Provisioning SA (the one in streamnative-key.json). Phase 5 mints the Step B
+# pulsar-provider token AS this SA via `snctl auth get-token`. On a brand-new
+# instance that SA has NO Auth0 client-grant for
+# urn:sn:pulsar:<org>:<cluster>-instance, so the OAuth client-credentials
+# exchange returns access_denied ("you need to create a client-grant
+# associated to this API") — no amount of retrying fixes it. Binding the SA to
+# the cluster via the streamnative control-plane provider (which authenticates
+# with the key file, NOT an instance token — so no chicken-and-egg) is what
+# creates that client-grant. Without this, recreate.sh only works against an
+# org where the grant was already established out-of-band (e.g. tradewise).
+# count-guarded so an empty provisioner_sa_name is a no-op.
+resource "streamnative_service_account_binding" "provisioner" {
+  count                = var.provisioner_sa_name != "" ? 1 : 0
+  organization         = var.organization
+  service_account_name = var.provisioner_sa_name
+  cluster_name         = var.cluster_name
+  depends_on           = [streamnative_pulsar_cluster.stock_demo]
+}
+
 # ── Locals ────────────────────────────────────────────────────────────────────
 # Pulsar principal = <sa-name>@<sa_domain>
 #   Production:  <org-id>.auth.streamnative.cloud         (auto-derived)
