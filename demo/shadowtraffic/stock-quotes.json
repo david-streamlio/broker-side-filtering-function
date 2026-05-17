@@ -2,19 +2,7 @@
   "generators": [
     {
       "topic": "${topic}",
-      "key": {
-        "_gen": "oneOf",
-        "choices": [
-          "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AMD", "ADBE", "INTC",
-          "JPM", "BAC", "WFC", "C", "GS", "MS", "V", "MA", "AXP", "BLK",
-          "JNJ", "PFE", "MRK", "UNH", "ABT", "TMO", "LLY", "ABBV",
-          "WMT", "HD", "NKE", "MCD", "KO", "SBUX", "PEP", "COST",
-          "XOM", "CVX", "COP",
-          "BA", "CAT", "GE", "HON"
-        ]
-      },
-      "value": {
-        "seq":      { "_gen": "sequentialInteger" },
+      "vars": {
         "exchange": { "_gen": "oneOf", "choices": ["NYSE", "NASDAQ"] },
         "sector":   { "_gen": "oneOf", "choices": ["tech", "finance", "healthcare", "consumer", "energy", "industrial"] },
         "price":    { "_gen": "uniformDistribution", "bounds": [50.0, 500.0] },
@@ -36,6 +24,35 @@
         "volume":   { "_gen": "uniformDistribution", "bounds": [100000, 50000000] },
         "side":     { "_gen": "oneOf", "choices": ["B", "S"] }
       },
+      "key": {
+        "_gen": "oneOf",
+        "choices": [
+          "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AMD", "ADBE", "INTC",
+          "JPM", "BAC", "WFC", "C", "GS", "MS", "V", "MA", "AXP", "BLK",
+          "JNJ", "PFE", "MRK", "UNH", "ABT", "TMO", "LLY", "ABBV",
+          "WMT", "HD", "NKE", "MCD", "KO", "SBUX", "PEP", "COST",
+          "XOM", "CVX", "COP",
+          "BA", "CAT", "GE", "HON"
+        ]
+      },
+      "value": {
+        "seq":      { "_gen": "sequentialInteger" },
+        "exchange": { "_gen": "var", "var": "exchange" },
+        "sector":   { "_gen": "var", "var": "sector" },
+        "price":    { "_gen": "var", "var": "price" },
+        "bid":      { "_gen": "var", "var": "bid" },
+        "ask":      { "_gen": "var", "var": "ask" },
+        "bidSize":  { "_gen": "var", "var": "bidSize" },
+        "askSize":  { "_gen": "var", "var": "askSize" },
+        "spread":   { "_gen": "var", "var": "spread" },
+        "volume":   { "_gen": "var", "var": "volume" },
+        "side":     { "_gen": "var", "var": "side" }
+      },
+      "headers": [
+        { "key": "exchange", "value": { "_gen": "var", "var": "exchange" } },
+        { "key": "sector",   "value": { "_gen": "var", "var": "sector" } },
+        { "key": "side",     "value": { "_gen": "var", "var": "side" } }
+      ],
       "localConfigs": {
         "throttleMs": ${throttle_ms}
       }
@@ -47,7 +64,12 @@
       "producerConfigs": {
         "bootstrap.servers": "${bootstrap}",
         "key.serializer":   "org.apache.kafka.common.serialization.StringSerializer",
-        "value.serializer": "io.shadowtraffic.kafka.serdes.JsonSerializer"
+        "value.serializer": "io.shadowtraffic.kafka.serdes.JsonSerializer",
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism":    "PLAIN",
+        "sasl.jaas.config":  "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${username}\" password=\"token:${kafka_token}\";",
+        "enable.idempotence": "false",
+        "acks": "1"
       }
     }
   }

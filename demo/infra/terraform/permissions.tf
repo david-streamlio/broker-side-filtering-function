@@ -54,6 +54,20 @@ resource "streamnative_rolebinding" "stock_demo_app_consumer_group_reader" {
   service_account_names = [streamnative_service_account.stock_demo_app.name]
 }
 
+# Producing over KoP needs the SN Cloud Kafka-layer authorization, separate
+# from the Pulsar produce grant in pulsar_permission_grant.app_public_default
+# (which alone yields Kafka TopicAuthorizationException — the Pulsar ACL is
+# satisfied but the KoP authorizer isn't). namespace-operator is the
+# ClusterRole that confers Kafka topic produce/consume, mirroring TradeWise's
+# coinbase_connector_namespace_operator. ShadowTraffic produces stock-quotes
+# as this SA; consumer-group-reader above only covers Kafka group ops.
+resource "streamnative_rolebinding" "stock_demo_app_namespace_operator" {
+  organization          = var.organization
+  name                  = "${var.cluster_name}-app-namespace-operator"
+  cluster_role_name     = "namespace-operator"
+  service_account_names = [streamnative_service_account.stock_demo_app.name]
+}
+
 # ── Permission Grants (pulsar provider) ───────────────────────────────────────
 
 # stock_demo_app — produce + consume + packages on public/default. Covers:

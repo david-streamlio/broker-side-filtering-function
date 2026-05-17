@@ -90,25 +90,42 @@ echo -e "${BLUE}🔧 Step 1/4 — set kafkaEntryFormat=pulsar_non_batched on $SO
 PA namespaces set-property "$SOURCE_NS" \
     --key kafkaEntryFormat \
     --value pulsar_non_batched 2>&1 | grep -vE '^$' || true
-echo -e "${GREEN}  ✅ namespace property set${NC}"
+# In cloud-mode the demo SA is not tenant-admin and 401s here — that's fine,
+# recreate.sh already set this property with the superuser token before the
+# compose stack starts. Non-fatal either way.
+echo -e "${GREEN}  ✅ namespace property set (or already set out-of-band)${NC}"
 
 # ── Step 1b: ensure the source topic exists as a partitioned topic ───────────
 # Created AFTER the namespace property above so it inherits pulsar_non_batched.
 echo -e "${BLUE}📦 Step 1b — ensure source topic exists${NC}"
-if OUT=$(PA topics create-partitioned-topic "$DEMO_SOURCE_TOPIC" -p "$DEMO_SOURCE_PARTITIONS" 2>&1); then
+# Check existence first via a metadata read (the demo SA can do this with its
+# produce/consume grant). In cloud-mode recreate.sh's Step B already created
+# this topic with the superuser token; the demo SA then 403s on
+# create-partitioned-topic ("Unauthorized to validateTopicPolicyOperation …
+# PARTITION") because it lacks partition-policy write — that is NOT a failure,
+# the topic is already there. Only hard-fail if it's genuinely absent and
+# creatable but the create errored for another reason.
+if PA topics get-partitioned-topic-metadata "$DEMO_SOURCE_TOPIC" >/dev/null 2>&1; then
+    echo -e "${YELLOW}  ↻ source topic already exists (managed out-of-band)${NC}"
+elif OUT=$(PA topics create-partitioned-topic "$DEMO_SOURCE_TOPIC" -p "$DEMO_SOURCE_PARTITIONS" 2>&1); then
     echo -e "${GREEN}  ✅ created partitioned source topic${NC}"
-elif echo "$OUT" | grep -qE 'already exists|409'; then
-    echo -e "${YELLOW}  ↻ source topic already exists${NC}"
+elif echo "$OUT" | grep -qE 'already exists|409|Unauthorized to validateTopicPolicyOperation|Don.t have permission to administrate'; then
+    echo -e "${YELLOW}  ↻ source topic exists / managed out-of-band — skipping create${NC}"
 else
     echo -e "${RED}  ❌ failed:${NC}"; echo "$OUT"; exit 1
 fi
 
 # ── Step 2: ensure the control topic exists (non-partitioned) ────────────────
 echo -e "${BLUE}📦 Step 2/4 — ensure control topic exists${NC}"
-if OUT=$(PA topics create "$DEMO_CONTROL_TOPIC" 2>&1); then
+# Same idempotency as Step 1b: recreate.sh's Step B pre-creates filter-requests
+# in stock-demo/filtering; the demo SA can read its stats but can't admin-create
+# it, so tolerate the out-of-band-managed case.
+if PA topics stats "$DEMO_CONTROL_TOPIC" >/dev/null 2>&1; then
+    echo -e "${YELLOW}  ↻ control topic already exists (managed out-of-band)${NC}"
+elif OUT=$(PA topics create "$DEMO_CONTROL_TOPIC" 2>&1); then
     echo -e "${GREEN}  ✅ created control topic${NC}"
-elif echo "$OUT" | grep -qE 'already exists|409'; then
-    echo -e "${YELLOW}  ↻ control topic already exists${NC}"
+elif echo "$OUT" | grep -qE 'already exists|409|Unauthorized to validateTopicPolicyOperation|Don.t have permission to administrate'; then
+    echo -e "${YELLOW}  ↻ control topic exists / managed out-of-band — skipping create${NC}"
 else
     echo -e "${RED}  ❌ failed:${NC}"; echo "$OUT"; exit 1
 fi
