@@ -6,3 +6,5 @@ terraform.tfstate.backup
 .terraform/
 .terraform.lock.hcl
 terraform.tfvars
+# terraform-provider-streamnative per-run auth cache (config + credentials)
+.streamnative_*/

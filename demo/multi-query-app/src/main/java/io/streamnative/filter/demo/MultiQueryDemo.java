@@ -8,9 +8,14 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.client.api.AuthenticationFactory;
+import org.apache.pulsar.client.api.PulsarClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
@@ -81,9 +86,34 @@ public final class MultiQueryDemo {
         // bootstrapped on every Pulsar cluster AND is KoP's default
         // kafkaNamespace, so Kafka clients can also read the filtered topics
         // via SASL/PLAINTEXT on :9092 / :9093.
-        Session session = Session.builder()
+        // Build the Pulsar client + admin ourselves so auth (and any
+        // failover/TLS tuning) lives in one place, then inject them into the
+        // Session. The SDK's serviceUrl()/adminUrl() path builds an
+        // *unauthenticated* client — which fails immediately on SN Cloud
+        // ("Failed to authenticate"). SessionBuilder.pulsarClient()/
+        // pulsarAdmin() take pre-built clients; Session tracks
+        // ownsPulsarClient/ownsPulsarAdmin and will NOT close injected ones,
+        // so we own their lifecycle (closed in the shutdown hook below).
+        String tokenFile = env("PULSAR_TOKEN_FILE");
+        java.util.function.Supplier<String> tokenSupplier = () -> {
+            try {
+                return Files.readString(Path.of(tokenFile)).trim();
+            } catch (IOException e) {
+                throw new IllegalStateException(
+                        "cannot read PULSAR_TOKEN_FILE=" + tokenFile, e);
+            }
+        };
+        PulsarClient pulsarClient = PulsarClient.builder()
                 .serviceUrl(env("PULSAR_SERVICE_URL"))
-                .adminUrl(env("PULSAR_ADMIN_URL"))
+                .authentication(AuthenticationFactory.token(tokenSupplier))
+                .build();
+        PulsarAdmin pulsarAdmin = PulsarAdmin.builder()
+                .serviceHttpUrl(env("PULSAR_ADMIN_URL"))
+                .authentication(AuthenticationFactory.token(tokenSupplier))
+                .build();
+        Session session = Session.builder()
+                .pulsarClient(pulsarClient)
+                .pulsarAdmin(pulsarAdmin)
                 .controlTopic(controlTopic)
                 .privateTopicTenant("public")
                 .privateTopicNamespace("default")
@@ -143,6 +173,9 @@ public final class MultiQueryDemo {
                     Thread.currentThread().interrupt();
                 }
                 try { session.close(); } catch (Exception ignored) {}
+                // Session does not own these (we injected them) — close them.
+                try { pulsarAdmin.close(); } catch (Exception ignored) {}
+                try { pulsarClient.close(); } catch (Exception ignored) {}
             }, "multi-query-demo-shutdown"));
 
             logger.info("Demo running with {} active consumers. Press Ctrl-C to exit.", consumers.size());

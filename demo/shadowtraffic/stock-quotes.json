@@ -47,7 +47,12 @@
       "producerConfigs": {
         "bootstrap.servers": "${bootstrap}",
         "key.serializer":   "org.apache.kafka.common.serialization.StringSerializer",
-        "value.serializer": "io.shadowtraffic.kafka.serdes.JsonSerializer"
+        "value.serializer": "io.shadowtraffic.kafka.serdes.JsonSerializer",
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism":    "PLAIN",
+        "sasl.jaas.config":  "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${username}\" password=\"token:${kafka_token}\";",
+        "enable.idempotence": "false",
+        "acks": "1"
       }
     }
   }

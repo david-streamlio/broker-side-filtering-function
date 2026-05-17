@@ -107,6 +107,7 @@ if [[ "$CLUSTER_UP" == "false" ]]; then
     -target=streamnative_apikey.stock_demo_app
     -target=streamnative_apikey.orchestrator_function
     -target=streamnative_rolebinding.stock_demo_app_consumer_group_reader
+    -target=streamnative_rolebinding.stock_demo_app_namespace_operator
   )
 
   # Serverless instance/cluster provisioning takes ~10-15 min. The provider

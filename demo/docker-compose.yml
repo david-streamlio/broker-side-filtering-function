@@ -66,30 +66,34 @@ services:
     volumes:
       - ./shadowtraffic/stock-quotes.json:/etc/shadowtraffic/stock-quotes.json:ro
       - ${PULSAR_TOKEN_PATH:?set in .env}:/var/run/secrets/pulsar.token:ro
-    # ShadowTraffic templates ${topic}, ${bootstrap}, and ${throttle_ms} from
-    # env vars; we pass them via --env-prefix so the JSON is portable.
-    command:
-      - "--config=/etc/shadowtraffic/stock-quotes.json"
-      - "--watch"
-    # Need the SA token as the SASL password — passed as a runtime template var.
-    # ShadowTraffic doesn't natively read a file, so we wrap the entrypoint to
-    # inject the value into the producer's sasl.jaas.config.
-    # (For simplicity in v1 of the demo, configure shadowtraffic with the token
-    # inline via SHADOWTRAFFIC_KAFKA_SASL_JAAS_CONFIG below.)
+    # The shadowtraffic image's real entrypoint is
+    # `java -jar /home/shadowtraffic.jar` — there is NO `shadowtraffic` binary
+    # on PATH (local-mode works precisely because it does NOT override the
+    # entrypoint; it just passes --config). Cloud-mode needs SASL_SSL + the SA
+    # token though, and the token is a mounted FILE — so a thin /bin/sh wrapper
+    # renders the config placeholders (incl. the token) into concrete JSON,
+    # then exec's the REAL jar entrypoint on the rendered file.
     entrypoint: ["/bin/sh", "-c"]
-    # The entrypoint reads the mounted token, substitutes the production-style
-    # sasl.jaas.config string, and exec's the shadowtraffic binary. We use
-    # SHADOWTRAFFIC_VAR_* env mapping for the ${topic}, ${bootstrap}, ${throttle_ms}
-    # template variables already in stock-quotes.json.
-    command: >
-      'export TOKEN=$(cat /var/run/secrets/pulsar.token);
-       export SHADOWTRAFFIC_VAR_topic="${DEMO_SOURCE_TOPIC:-persistent://public/default/stock-quotes}";
-       export SHADOWTRAFFIC_VAR_bootstrap="${KAFKA_BOOTSTRAP}";
-       export SHADOWTRAFFIC_VAR_throttle_ms="5";
-       shadowtraffic --config /etc/shadowtraffic/stock-quotes.json
-         --kafka-producer-config security.protocol=SASL_SSL
-         --kafka-producer-config sasl.mechanism=PLAIN
-         --kafka-producer-config "sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${KAFKA_USERNAME}\" password=\"token:$$TOKEN\";"'
+    command:
+      - |
+        TOKEN="$$(cat /var/run/secrets/pulsar.token)"
+        # ShadowTraffic 1.18.2 strict-parses the file as JSON BEFORE any
+        # substitution and has no placeholder templating of its own — the bare
+        # unquoted throttle-ms placeholder made the file invalid JSON
+        # ("Unrecognized token '$'"). The working local file just hardcodes
+        # values. So render the placeholders to a concrete JSON here (busybox
+        # sed; [$] = literal $, which also dodges compose interpolation), then
+        # run ShadowTraffic on the rendered file.
+        sed -e "s|[$]{topic}|${DEMO_SOURCE_TOPIC:-persistent://public/default/stock-quotes}|g" \
+            -e "s|[$]{bootstrap}|${KAFKA_BOOTSTRAP}|g" \
+            -e "s|[$]{throttle_ms}|5|g" \
+            -e "s|[$]{username}|${KAFKA_USERNAME}|g" \
+            -e "s|[$]{kafka_token}|$$TOKEN|g" \
+            /etc/shadowtraffic/stock-quotes.json > /tmp/stock-quotes.rendered.json
+        exec java -Djava.security.manager=allow -Dfile.encoding=UTF-8 \
+          -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 \
+          -XX:MaxRAMPercentage=65.0 -jar /home/shadowtraffic.jar \
+          --config /tmp/stock-quotes.rendered.json
 
   multi-query-app:
     build:
