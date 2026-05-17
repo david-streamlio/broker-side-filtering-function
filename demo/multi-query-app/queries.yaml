@@ -3,10 +3,16 @@
 #
 # - `id` is a human-friendly label only. The SDK generates the actual queryId at
 #   subscribe time; the demo app prints both so operators can correlate.
-# - `selector` is JMS-style. The orchestrator's selector-filter function parses
-#   these and rejects malformed ones with `filter.queries.bad_sum`, which the UI
-#   surfaces as the `selector-compile-fail` diagnostic flag.
-# - `bad-syntax-demo` is intentionally broken to make that flag fire on cue.
+# - `selector` is JMS-style, evaluated against the message KEY (`__key__`) and
+#   message PROPERTIES only — never the JSON body. ShadowTraffic emits the
+#   filterable fields (exchange/sector/side) as Kafka headers, which KoP maps to
+#   Pulsar message properties. Numeric selectors are intentionally avoided:
+#   KoP delivers every property as a String and JMS numeric comparison on a
+#   String property is UNKNOWN (no match) per spec — so the demo sticks to key
+#   membership and string-equality/IN, which model real watchlist/segment
+#   filtering well without that footgun.
+# - `bad-syntax-demo` is intentionally broken to make the
+#   `selector-compile-fail` diagnostic flag fire on cue.
 
 queries:
   - id: tech-titans
@@ -25,18 +31,17 @@ queries:
     selector: "sector = 'healthcare'"
     # 1 of 6 sectors → ~83% drop
 
-  - id: large-block-trades
-    selector: "bidSize >= 1000 OR askSize >= 1000"
-    # weighted-choice produces 1000/5000 ~10% of the time per side; ~20% match
-    # → ~80% drop
+  - id: nyse-sells
+    selector: "exchange = 'NYSE' AND side = 'S'"
+    # 50% venue × 50% side ≈ 25% match → ~75% drop
 
-  - id: tight-spreads
-    selector: "spread < 0.05"
-    # only the smallest spreads → ~10% match → ~90% drop
+  - id: energy-or-industrial
+    selector: "sector IN ('energy','industrial')"
+    # 2 of 6 sectors ≈ 33% match → ~67% drop
 
-  - id: high-value-stocks
-    selector: "price > 300"
-    # uniform [50, 500] → ~44% match → ~56% drop
+  - id: sell-side-tech
+    selector: "side = 'S' AND sector = 'tech'"
+    # 50% × 17% ≈ 8% match → ~92% drop
 
   - id: buy-side-finance
     selector: "side = 'B' AND sector = 'finance'"
