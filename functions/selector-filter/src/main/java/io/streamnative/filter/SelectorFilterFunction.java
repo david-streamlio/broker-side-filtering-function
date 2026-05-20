@@ -24,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class SelectorFilterFunction implements Function<byte[], CompletableFuture<Void>> {
 
@@ -37,6 +38,12 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
      */
     static final String CFG_PROCESSING_TIME_METRIC = "enable-processing-time-metric";
     static final long LOG_FREQUENCY = 100_000L;
+    /** Warn when a single sendAsync() takes longer than this. */
+    static final long SLOW_SEND_WARN_MS  = 5_000L;
+    /** Log an ERROR (not just a WARN) for extremely stalled sends. */
+    static final long SLOW_SEND_ERROR_MS = 30_000L;
+    /** Heartbeat log interval — shows function health even when messages aren't flowing. */
+    static final long HEARTBEAT_INTERVAL_MS = 30_000L;
 
     // Message-count metrics. Per Prometheus convention these are monotonic counters; rates are
     // computed at the monitoring layer (e.g. rate(filter_messages_in[1m])).
@@ -72,8 +79,13 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private final ConcurrentMap<String, CompiledQuery> compiled = new ConcurrentHashMap<>();
-    private final AtomicLong filteredCount = new AtomicLong();
-    private final AtomicLong droppedCount = new AtomicLong();
+    private final AtomicLong filteredCount   = new AtomicLong();
+    private final AtomicLong droppedCount    = new AtomicLong();
+    private final AtomicLong messagesIn      = new AtomicLong();
+    /** Number of sendAsync() calls currently in-flight (not yet completed). */
+    private final AtomicInteger pendingSends = new AtomicInteger();
+    /** Epoch-ms of the last heartbeat log emission. */
+    private final AtomicLong lastHeartbeatMs = new AtomicLong(0);
 
     private volatile TableView<byte[]> controlTopicView;
     private volatile Context boundContext;
@@ -111,10 +123,16 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
         // Cheap branch: if the metric is disabled, no nanoTime call at all.
         final long startNanos = processingTimeMetricEnabled ? System.nanoTime() : 0L;
+        final long startMs    = System.currentTimeMillis();
 
+        long inCount = messagesIn.incrementAndGet();
         int payloadBytes = payload == null ? 0 : payload.length;
         ctx.recordMetric(METRIC_MESSAGES_IN, 1.0);
         ctx.recordMetric(METRIC_BYTES_IN, payloadBytes);
+
+        // Periodic heartbeat — fires regardless of throughput so operators can tell
+        // the function is alive even when it is stuck waiting on a send.
+        emitHeartbeat(ctx);
 
         Record<?> record = ctx.getCurrentRecord();
 
@@ -123,6 +141,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         }
 
         MessageBindings bindings = MessageBindings.from(record);
+        final String msgKey = bindings.getKey();
 
         List<CompletableFuture<?>> sends = new ArrayList<>();
         Map<String, String> forwardProperties = null;
@@ -140,11 +159,28 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                 if (forwardProperties != null && !forwardProperties.isEmpty()) {
                     builder = builder.properties(forwardProperties);
                 }
-                String recordKey = bindings.getKey();
-                if (recordKey != null) {
-                    builder = builder.key(recordKey);
+                if (msgKey != null) {
+                    builder = builder.key(msgKey);
                 }
-                sends.add(builder.sendAsync());
+                final String outputTopic = cq.outputTopic();
+                pendingSends.incrementAndGet();
+                CompletableFuture<?> send = builder.sendAsync()
+                        .whenComplete((r, e) -> {
+                            pendingSends.decrementAndGet();
+                            long elapsedMs = System.currentTimeMillis() - startMs;
+                            if (e != null) {
+                                LOG.error("[send-failure] topic={} key={} elapsedMs={}: {}",
+                                        outputTopic, msgKey, elapsedMs, e.getMessage());
+                            } else if (elapsedMs >= SLOW_SEND_ERROR_MS) {
+                                LOG.error("[send-stall] topic={} key={} elapsedMs={} — broker may be unreachable or topic missing; "
+                                        + "this blocks flow-control permits and will zombie the function",
+                                        outputTopic, msgKey, elapsedMs);
+                            } else if (elapsedMs >= SLOW_SEND_WARN_MS) {
+                                LOG.warn("[send-slow] topic={} key={} elapsedMs={} pending={}",
+                                        outputTopic, msgKey, elapsedMs, pendingSends.get());
+                            }
+                        });
+                sends.add(send);
             }
         }
 
@@ -157,7 +193,8 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                 .whenComplete((v, err) -> {
                     if (err != null) {
                         ctx.recordMetric(METRIC_SEND_FAILURES, 1.0);
-                        LOG.warn("Send failed for one or more output topics; failing record", err);
+                        LOG.warn("[send-fail] one or more sends failed for key={} fanout={}; failing record",
+                                msgKey, fanout, err);
                         record.fail();
                     } else {
                         record.ack();
@@ -166,13 +203,31 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                         ctx.recordMetric(METRIC_BYTES_OUT, (double) payloadBytes * fanout);
                         long c = filteredCount.addAndGet(fanout);
                         if (c % LOG_FREQUENCY < fanout) {
-                            LOG.info("Filtered {} messages (dropped={}, active queries={})",
-                                    c, droppedCount.get(), compiled.size());
+                            LOG.info("Filtered {} messages (in={} dropped={} active-queries={})",
+                                    c, inCount, droppedCount.get(), compiled.size());
                         }
                     }
                     recordProcessingTime(ctx, startNanos);
                 })
                 .thenApply(v -> null);
+    }
+
+    /**
+     * Emits a heartbeat log at most once per {@link #HEARTBEAT_INTERVAL_MS}.
+     * Visible even when the function is stuck waiting on pending sends — the key
+     * signal for detecting the zombie pattern where availablePermits → 0.
+     */
+    private void emitHeartbeat(Context ctx) {
+        long now = System.currentTimeMillis();
+        long last = lastHeartbeatMs.get();
+        if (now - last >= HEARTBEAT_INTERVAL_MS && lastHeartbeatMs.compareAndSet(last, now)) {
+            int pending = pendingSends.get();
+            LOG.info("[heartbeat] in={} matched={} dropped={} queries={} pending-sends={}{}",
+                    messagesIn.get(), filteredCount.get(), droppedCount.get(),
+                    compiled.size(), pending,
+                    pending > 0 ? " *** SENDS BLOCKED — flow-control will stall ***" : "");
+            ctx.recordMetric("filter.pending.sends", pending);
+        }
     }
 
     private CompletableFuture<Void> ackAsDropped(Context ctx, Record<?> record, int payloadBytes, long startNanos) {
