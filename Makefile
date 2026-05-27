@@ -48,3 +48,41 @@ tf-validate: ## terraform init + validate across all wrappers (offline-friendly 
 	terraform -chdir=deploy/terraform/sn-cloud validate
 	terraform -chdir=deploy/terraform/pulsar-helm init -backend=false >/dev/null
 	terraform -chdir=deploy/terraform/pulsar-helm validate
+
+# ---------------------------------------------------------------- combined demo
+# One-command bring-up of the filtering stack + the broker-side-filter-observability
+# UI (http://localhost:3200). Pinned to the v1.0.0 GA; override SELECTOR_REL /
+# OBSERVABILITY_IMAGE_TAG to run a different release.
+
+SELECTOR_REPO ?= david-streamlio/broker-side-filtering-function
+SELECTOR_REL  ?= v1.0.0
+
+.PHONY: demo-nars
+demo-nars: ## Fetch the v1.0.0 orchestrator + filter NARs into demo/local/nars (local-mode prereq)
+	rm -f demo/local/nars/*.nar
+	gh release download $(SELECTOR_REL) --repo $(SELECTOR_REPO) --dir demo/local/nars --pattern '*.nar'
+
+.PHONY: demo-local
+demo-local: demo-nars ## Local-mode stock-quotes demo (Pulsar standalone + observability UI on :3200)
+	docker compose -f demo/docker-compose.local.yml up --build
+
+.PHONY: demo-local-parcels
+demo-local-parcels: demo-nars ## Local-mode logistics/parcels demo (3 source topics + observability UI)
+	docker compose -f demo/docker-compose.parcels.local.yml up --build
+
+.PHONY: demo-cloud
+demo-cloud: ## Cloud-mode stock-quotes demo against SN Cloud (needs demo/.env + token; run recreate.sh first)
+	@[ -f demo/.env ] || { echo "ERROR: demo/.env not found — cp demo/.env.example demo/.env and fill it in" >&2; exit 1; }
+	docker compose -f demo/docker-compose.yml up --build
+
+.PHONY: demo-cloud-parcels
+demo-cloud-parcels: ## Cloud-mode logistics/parcels demo against SN Cloud (needs demo/.env + token)
+	@[ -f demo/.env ] || { echo "ERROR: demo/.env not found — cp demo/.env.example demo/.env and fill it in" >&2; exit 1; }
+	docker compose -f demo/docker-compose.parcels.yml up --build
+
+.PHONY: demo-down
+demo-down: ## Tear down any running demo stack (all four compose files; safe if not up)
+	-docker compose -f demo/docker-compose.local.yml down -v
+	-docker compose -f demo/docker-compose.parcels.local.yml down -v
+	-docker compose -f demo/docker-compose.yml down -v
+	-docker compose -f demo/docker-compose.parcels.yml down -v
