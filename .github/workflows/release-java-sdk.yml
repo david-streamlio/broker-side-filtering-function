@@ -1,0 +1,44 @@
+name: Release Java SDK
+
+# On every v* tag, publishes the release (non-SNAPSHOT) Java SDK JARs to GitHub Packages
+# so downstream consumers (e.g. Trade-Wise-app) can depend on a pinned release version
+# instead of the SNAPSHOTs that ride main pushes (publish-snapshots.yml).
+#
+# Only the distributable SDK modules are deployed here — common + the two Java SDKs. The
+# function NARs are NOT pushed to Packages; their canonical distribution is the GitHub
+# Release (release-nars.yml), which runs in parallel on the same tag.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  deploy:
+    name: mvn deploy SDK release → GitHub Packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Set POM version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mvn -B versions:set -DnewVersion="${VERSION}" -DgenerateBackupPoms=false
+
+      - name: Deploy SDK release JARs
+        run: mvn -B -DskipTests -pl common,sdk/java/pulsar,sdk/java/kafka -am deploy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
