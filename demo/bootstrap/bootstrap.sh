@@ -9,9 +9,16 @@
 #
 # Required env (the docker-compose service sets these from .env):
 #   PULSAR_ADMIN_URL      — https://pc-<id>.<region>.snio.cloud (or http://pulsar:8080 for local)
-#   DEMO_SOURCE_TOPIC     — full FQN, e.g. persistent://public/default/stock-quotes
 #   DEMO_CONTROL_TOPIC    — full FQN, e.g. persistent://public/default/filter-requests
-#   DEMO_SOURCE_PARTITIONS — number of partitions for the source topic (default 1)
+#   DEMO_SOURCE_PARTITIONS — number of partitions per source topic (default 1)
+#
+# Source topics — one of:
+#   DEMO_SOURCE_TOPICS    — comma-separated list of FQNs (multi-topic mode), or
+#   DEMO_SOURCE_TOPIC     — single FQN, e.g. persistent://public/default/stock-quotes
+# When DEMO_SOURCE_TOPICS is set it takes precedence; DEMO_SOURCE_TOPIC is then
+# ignored. Namespace-level ops (kafkaEntryFormat, grants, auto-topic-creation)
+# are deduped — running the parcel demo's three topics in public/default
+# applies each namespace op exactly once.
 #
 # Optional env (skipped in local-mode):
 #   PULSAR_TOKEN_FILE     — path inside the container to the SA's JWT. When unset
@@ -26,10 +33,34 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 PULSAR_ADMIN_URL="${PULSAR_ADMIN_URL:?required}"
 PULSAR_TOKEN_FILE="${PULSAR_TOKEN_FILE:-}"
-DEMO_SOURCE_TOPIC="${DEMO_SOURCE_TOPIC:?required}"
 DEMO_CONTROL_TOPIC="${DEMO_CONTROL_TOPIC:?required}"
 DEMO_SA_PRINCIPAL="${DEMO_SA_PRINCIPAL:-}"
 DEMO_SOURCE_PARTITIONS="${DEMO_SOURCE_PARTITIONS:-1}"
+
+# Resolve the source-topic list: DEMO_SOURCE_TOPICS wins if set, otherwise
+# fall back to the single-topic DEMO_SOURCE_TOPIC. Exactly one must be present.
+if [[ -n "${DEMO_SOURCE_TOPICS:-}" ]]; then
+    IFS=',' read -r -a _RAW_SOURCE_TOPICS <<< "$DEMO_SOURCE_TOPICS"
+elif [[ -n "${DEMO_SOURCE_TOPIC:-}" ]]; then
+    _RAW_SOURCE_TOPICS=("$DEMO_SOURCE_TOPIC")
+else
+    echo "Set either DEMO_SOURCE_TOPICS (comma-separated) or DEMO_SOURCE_TOPIC (single FQN)" >&2
+    exit 1
+fi
+
+# Trim whitespace around each entry; reject empty entries (stray commas).
+SOURCE_TOPICS=()
+for t in "${_RAW_SOURCE_TOPICS[@]}"; do
+    t="${t#"${t%%[![:space:]]*}"}"   # ltrim
+    t="${t%"${t##*[![:space:]]}"}"   # rtrim
+    if [[ -n "$t" ]]; then
+        SOURCE_TOPICS+=("$t")
+    fi
+done
+if [[ ${#SOURCE_TOPICS[@]} -eq 0 ]]; then
+    echo "DEMO_SOURCE_TOPICS resolved to an empty list — at least one topic FQN required" >&2
+    exit 1
+fi
 
 # Auth mode auto-detect: if a token file path was supplied and the file exists,
 # run authenticated (cloud / production). Otherwise assume the broker accepts
@@ -65,19 +96,34 @@ parse_namespace() {
     echo "$rest" | awk -F'/' '{print $1"/"$2}'
 }
 
-SOURCE_NS=$(parse_namespace "$DEMO_SOURCE_TOPIC")
+# Build the deduped list of unique source namespaces. Namespace-level admin
+# ops (kafkaEntryFormat, grants, auto-topic-creation) only need to run once
+# per unique namespace — the parcel demo's three topics all share public/default.
+declare -A _SEEN_NS
+SOURCE_NAMESPACES=()
+for t in "${SOURCE_TOPICS[@]}"; do
+    ns=$(parse_namespace "$t")
+    if [[ -z "${_SEEN_NS[$ns]:-}" ]]; then
+        _SEEN_NS[$ns]=1
+        SOURCE_NAMESPACES+=("$ns")
+    fi
+done
 CONTROL_NS=$(parse_namespace "$DEMO_CONTROL_TOPIC")
 
 echo -e "${BLUE}🚀 Multi-query demo bootstrap${NC}"
 echo "  Admin URL:       $PULSAR_ADMIN_URL"
 echo "  Auth mode:       $AUTH_MODE"
-echo "  Source topic:    $DEMO_SOURCE_TOPIC  (ns=$SOURCE_NS, partitions=$DEMO_SOURCE_PARTITIONS)"
+echo "  Source topics ($DEMO_SOURCE_PARTITIONS partition(s) each):"
+for t in "${SOURCE_TOPICS[@]}"; do
+    echo "    - $t"
+done
+echo "  Source namespaces (deduped): ${SOURCE_NAMESPACES[*]}"
 echo "  Control topic:   $DEMO_CONTROL_TOPIC  (ns=$CONTROL_NS)"
 [[ "$AUTH_MODE" == "token" ]] && echo "  Demo SA:         $DEMO_SA_PRINCIPAL"
 echo ""
 
-# ── Step 1: set kafkaEntryFormat=pulsar_non_batched on the source namespace ──
-# MUST run before the source topic is created. KoP defaults to a batched
+# ── Step 1: set kafkaEntryFormat=pulsar_non_batched on each source namespace ─
+# MUST run before the source topics are created. KoP defaults to a batched
 # entry format; the orchestrator's spawned filter functions are regular
 # Pulsar consumers that can't decode KoP-batched entries (broker logs
 # `SingleMessageMetadata: Some required fields are missing` and discards
@@ -86,39 +132,44 @@ echo ""
 # and BEFORE topic creation so the topic inherits it at create time
 # (changing it after a topic exists doesn't retroactively re-encode, and
 # KoP may have cached the topic's effective format).
-echo -e "${BLUE}🔧 Step 1/4 — set kafkaEntryFormat=pulsar_non_batched on $SOURCE_NS${NC}"
-PA namespaces set-property "$SOURCE_NS" \
-    --key kafkaEntryFormat \
-    --value pulsar_non_batched 2>&1 | grep -vE '^$' || true
-# In cloud-mode the demo SA is not tenant-admin and 401s here — that's fine,
-# recreate.sh already set this property with the superuser token before the
-# compose stack starts. Non-fatal either way.
-echo -e "${GREEN}  ✅ namespace property set (or already set out-of-band)${NC}"
+for ns in "${SOURCE_NAMESPACES[@]}"; do
+    echo -e "${BLUE}🔧 Step 1 — set kafkaEntryFormat=pulsar_non_batched on $ns${NC}"
+    PA namespaces set-property "$ns" \
+        --key kafkaEntryFormat \
+        --value pulsar_non_batched 2>&1 | grep -vE '^$' || true
+    # In cloud-mode the demo SA is not tenant-admin and 401s here — that's fine,
+    # recreate.sh already set this property with the superuser token before the
+    # compose stack starts. Non-fatal either way.
+    echo -e "${GREEN}  ✅ namespace property set (or already set out-of-band)${NC}"
+done
 
-# ── Step 1b: ensure the source topic exists as a partitioned topic ───────────
-# Created AFTER the namespace property above so it inherits pulsar_non_batched.
-echo -e "${BLUE}📦 Step 1b — ensure source topic exists${NC}"
-# Check existence first via a metadata read (the demo SA can do this with its
-# produce/consume grant). In cloud-mode recreate.sh's Step B already created
-# this topic with the superuser token; the demo SA then 403s on
-# create-partitioned-topic ("Unauthorized to validateTopicPolicyOperation …
-# PARTITION") because it lacks partition-policy write — that is NOT a failure,
-# the topic is already there. Only hard-fail if it's genuinely absent and
-# creatable but the create errored for another reason.
-if PA topics get-partitioned-topic-metadata "$DEMO_SOURCE_TOPIC" >/dev/null 2>&1; then
-    echo -e "${YELLOW}  ↻ source topic already exists (managed out-of-band)${NC}"
-elif OUT=$(PA topics create-partitioned-topic "$DEMO_SOURCE_TOPIC" -p "$DEMO_SOURCE_PARTITIONS" 2>&1); then
-    echo -e "${GREEN}  ✅ created partitioned source topic${NC}"
-elif echo "$OUT" | grep -qE 'already exists|409|Unauthorized to validateTopicPolicyOperation|Don.t have permission to administrate'; then
-    echo -e "${YELLOW}  ↻ source topic exists / managed out-of-band — skipping create${NC}"
-else
-    echo -e "${RED}  ❌ failed:${NC}"; echo "$OUT"; exit 1
-fi
+# ── Step 1b: ensure each source topic exists as a partitioned topic ──────────
+# Created AFTER the namespace property above so each one inherits
+# pulsar_non_batched.
+for t in "${SOURCE_TOPICS[@]}"; do
+    echo -e "${BLUE}📦 Step 1b — ensure source topic exists: $t${NC}"
+    # Check existence first via a metadata read (the demo SA can do this with its
+    # produce/consume grant). In cloud-mode recreate.sh's Step B may already have
+    # created the topic with the superuser token; the demo SA then 403s on
+    # create-partitioned-topic ("Unauthorized to validateTopicPolicyOperation …
+    # PARTITION") because it lacks partition-policy write — that is NOT a failure,
+    # the topic is already there. Only hard-fail if it's genuinely absent and
+    # creatable but the create errored for another reason.
+    if PA topics get-partitioned-topic-metadata "$t" >/dev/null 2>&1; then
+        echo -e "${YELLOW}  ↻ source topic already exists (managed out-of-band)${NC}"
+    elif OUT=$(PA topics create-partitioned-topic "$t" -p "$DEMO_SOURCE_PARTITIONS" 2>&1); then
+        echo -e "${GREEN}  ✅ created partitioned source topic${NC}"
+    elif echo "$OUT" | grep -qE 'already exists|409|Unauthorized to validateTopicPolicyOperation|Don.t have permission to administrate'; then
+        echo -e "${YELLOW}  ↻ source topic exists / managed out-of-band — skipping create${NC}"
+    else
+        echo -e "${RED}  ❌ failed:${NC}"; echo "$OUT"; exit 1
+    fi
+done
 
 # ── Step 2: ensure the control topic exists (non-partitioned) ────────────────
-echo -e "${BLUE}📦 Step 2/4 — ensure control topic exists${NC}"
-# Same idempotency as Step 1b: recreate.sh's Step B pre-creates filter-requests
-# in stock-demo/filtering; the demo SA can read its stats but can't admin-create
+echo -e "${BLUE}📦 Step 2 — ensure control topic exists${NC}"
+# Same idempotency as Step 1b: recreate.sh's Step B pre-creates the control
+# topic in cloud mode; the demo SA can read its stats but can't admin-create
 # it, so tolerate the out-of-band-managed case.
 if PA topics stats "$DEMO_CONTROL_TOPIC" >/dev/null 2>&1; then
     echo -e "${YELLOW}  ↻ control topic already exists (managed out-of-band)${NC}"
@@ -130,39 +181,49 @@ else
     echo -e "${RED}  ❌ failed:${NC}"; echo "$OUT"; exit 1
 fi
 
-# ── Step 3: grant produce+consume on the source namespace ────────────────────
-# Covers ShadowTraffic publishing to stock-quotes + the SDK reading from any
-# private filtered-* topics the orchestrator creates inside the same namespace.
-# Skipped in no-auth mode — anonymous already has all access on standalone.
+# ── Step 3: grant produce+consume on every source namespace + control ns ─────
+# Covers ShadowTraffic publishing to the source topics + the SDK reading from
+# any private filtered-* topics the orchestrator creates inside the same
+# namespace. Skipped in no-auth mode — anonymous already has all access on
+# standalone. The control-namespace grant only fires when it differs from
+# the source namespaces (it usually doesn't — they all default to public/default).
 if [[ "$AUTH_MODE" == "token" && -n "$DEMO_SA_PRINCIPAL" ]]; then
-    echo -e "${BLUE}🔐 Step 3/4 — grant produce+consume on $SOURCE_NS to $DEMO_SA_PRINCIPAL${NC}"
-    PA namespaces grant-permission "$SOURCE_NS" \
-        --role "$DEMO_SA_PRINCIPAL" \
-        --actions produce,consume 2>&1 | grep -vE '^$' || true
-    echo -e "${GREEN}  ✅ grant applied${NC}"
+    for ns in "${SOURCE_NAMESPACES[@]}"; do
+        echo -e "${BLUE}🔐 Step 3 — grant produce+consume on $ns to $DEMO_SA_PRINCIPAL${NC}"
+        PA namespaces grant-permission "$ns" \
+            --role "$DEMO_SA_PRINCIPAL" \
+            --actions produce,consume 2>&1 | grep -vE '^$' || true
+        echo -e "${GREEN}  ✅ grant applied${NC}"
+    done
 
-    # ── Step 3b: same on the control namespace (typically same as source) ────
-    if [[ "$CONTROL_NS" != "$SOURCE_NS" ]]; then
-        echo -e "${BLUE}🔐 Step 3b/4 — grant produce+consume on $CONTROL_NS to $DEMO_SA_PRINCIPAL${NC}"
+    # Control namespace: grant only if it isn't already covered above.
+    CONTROL_NS_COVERED=""
+    for ns in "${SOURCE_NAMESPACES[@]}"; do
+        if [[ "$ns" == "$CONTROL_NS" ]]; then CONTROL_NS_COVERED=1; break; fi
+    done
+    if [[ -z "$CONTROL_NS_COVERED" ]]; then
+        echo -e "${BLUE}🔐 Step 3b — grant produce+consume on $CONTROL_NS to $DEMO_SA_PRINCIPAL${NC}"
         PA namespaces grant-permission "$CONTROL_NS" \
             --role "$DEMO_SA_PRINCIPAL" \
             --actions produce,consume 2>&1 | grep -vE '^$' || true
         echo -e "${GREEN}  ✅ grant applied${NC}"
     fi
 else
-    echo -e "${YELLOW}⏭  Step 3/4 — skipping permission grants (no-auth mode)${NC}"
+    echo -e "${YELLOW}⏭  Step 3 — skipping permission grants (no-auth mode)${NC}"
 fi
 
-# ── Step 4: enable auto-topic-creation on the source namespace ───────────────
+# ── Step 4: enable auto-topic-creation on each source namespace ──────────────
 # Belt-and-suspenders: the orchestrator's spawned filters publish to
 # filtered-<uuid> private topics in this namespace by default. Some SN Cloud
 # clusters disable broker-default auto-create; setting partitioned/1 here makes
 # the override explicit and matches the deploy-connector pattern that fixed the
 # Coinbase pipeline.
-echo -e "${BLUE}⚙️  Step 4/4 — enable auto-topic-creation on $SOURCE_NS${NC}"
-PA namespaces set-topic-auto-creation "$SOURCE_NS" \
-    --type partitioned --partitions 1 2>&1 | grep -vE '^$' || true
-echo -e "${GREEN}  ✅ auto-topic-creation enabled${NC}"
+for ns in "${SOURCE_NAMESPACES[@]}"; do
+    echo -e "${BLUE}⚙️  Step 4 — enable auto-topic-creation on $ns${NC}"
+    PA namespaces set-auto-topic-creation "$ns" \
+        --enable --type partitioned --num-partitions 1 2>&1 | grep -vE '^$' || true
+    echo -e "${GREEN}  ✅ auto-topic-creation enabled${NC}"
+done
 
 echo ""
 echo -e "${GREEN}🎉 Bootstrap complete. Ready for shadowtraffic + multi-query-app.${NC}"

@@ -2,6 +2,7 @@ package io.streamnative.filter.demo;
 
 import io.streamnative.filter.client.FilterControl;
 import io.streamnative.filter.client.Session;
+import io.streamnative.filter.client.kafka.FilterableKafkaConsumerBuilder;
 import io.streamnative.filter.client.kafka.FilterableKafkaConsumers;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -68,6 +69,10 @@ public final class MultiQueryDemo {
     public static void main(String[] args) throws Exception {
         Path queriesPath = Paths.get(System.getenv().getOrDefault(
                 "DEMO_QUERIES_PATH", "/app/queries.yaml"));
+        // Per-query topics in queries.yaml take precedence (see
+        // QueryConfig.Query#topics). DEMO_SOURCE_TOPIC remains the fallback
+        // when a query does not specify its own topics — preserves the
+        // single-topic stock-quotes flow without edits.
         String sourceTopic = System.getenv().getOrDefault(
                 "DEMO_SOURCE_TOPIC", "persistent://public/default/stock-quotes");
         String controlTopic = System.getenv().getOrDefault(
@@ -94,7 +99,12 @@ public final class MultiQueryDemo {
         // pulsarAdmin() take pre-built clients; Session tracks
         // ownsPulsarClient/ownsPulsarAdmin and will NOT close injected ones,
         // so we own their lifecycle (closed in the shutdown hook below).
-        String tokenFile = env("PULSAR_TOKEN_FILE");
+        // Auth mode auto-selects, mirroring buildKafkaProps: when
+        // PULSAR_TOKEN_FILE is set we authenticate the Pulsar client + admin
+        // with that JWT (SN Cloud / production); when it's absent we build
+        // unauthenticated clients (local Pulsar standalone with anonymous auth).
+        String tokenFile = System.getenv("PULSAR_TOKEN_FILE");
+        boolean usePulsarAuth = tokenFile != null && !tokenFile.isBlank();
         java.util.function.Supplier<String> tokenSupplier = () -> {
             try {
                 return Files.readString(Path.of(tokenFile)).trim();
@@ -103,14 +113,14 @@ public final class MultiQueryDemo {
                         "cannot read PULSAR_TOKEN_FILE=" + tokenFile, e);
             }
         };
-        PulsarClient pulsarClient = PulsarClient.builder()
-                .serviceUrl(env("PULSAR_SERVICE_URL"))
-                .authentication(AuthenticationFactory.token(tokenSupplier))
-                .build();
-        PulsarAdmin pulsarAdmin = PulsarAdmin.builder()
-                .serviceHttpUrl(env("PULSAR_ADMIN_URL"))
-                .authentication(AuthenticationFactory.token(tokenSupplier))
-                .build();
+        var clientBuilder = PulsarClient.builder().serviceUrl(env("PULSAR_SERVICE_URL"));
+        var adminBuilder = PulsarAdmin.builder().serviceHttpUrl(env("PULSAR_ADMIN_URL"));
+        if (usePulsarAuth) {
+            clientBuilder.authentication(AuthenticationFactory.token(tokenSupplier));
+            adminBuilder.authentication(AuthenticationFactory.token(tokenSupplier));
+        }
+        PulsarClient pulsarClient = clientBuilder.build();
+        PulsarAdmin pulsarAdmin = adminBuilder.build();
         Session session = Session.builder()
                 .pulsarClient(pulsarClient)
                 .pulsarAdmin(pulsarAdmin)
@@ -131,9 +141,17 @@ public final class MultiQueryDemo {
         try {
             for (QueryConfig.Query q : config.queries()) {
                 try {
-                    Consumer<String, String> consumer = FilterableKafkaConsumers
-                            .<String, String>newConsumer(session, kafkaProps)
-                            .topic(sourceTopic)
+                    FilterableKafkaConsumerBuilder<String, String> builder =
+                            FilterableKafkaConsumers.<String, String>newConsumer(session, kafkaProps);
+                    List<String> queryTopics;
+                    if (q.topics().isEmpty()) {
+                        builder.topic(sourceTopic);
+                        queryTopics = List.of(sourceTopic);
+                    } else {
+                        builder.topics(q.topics());
+                        queryTopics = q.topics();
+                    }
+                    Consumer<String, String> consumer = builder
                             .selector(q.selector())
                             .subscribe();
                     consumers.add(consumer);
@@ -141,8 +159,8 @@ public final class MultiQueryDemo {
                     // io.streamnative.filter.client.FilterControl — cast to read
                     // the orchestrator-assigned queryId for correlation with the UI.
                     String queryId = ((FilterControl) consumer).queryId();
-                    logger.info("Registered '{}' as queryId={}  (selector: {})",
-                            q.id(), queryId, q.selector());
+                    logger.info("Registered '{}' as queryId={}  (topics: {})  (selector: {})",
+                            q.id(), queryId, queryTopics, q.selector());
                     pool.submit(() -> drainLoop(q.id(), queryId, consumer, logSampleEvery, shutdownLatch));
                 } catch (Exception e) {
                     // Don't take the whole demo down for one bad query — the

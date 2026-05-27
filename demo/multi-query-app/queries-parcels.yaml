@@ -1,0 +1,93 @@
+# Logistics demo queries — parcel-shipments + parcel-scans + parcel-exceptions.
+#
+# The schema is intentionally three topics so the orchestrator spawns three
+# distinct selector-filter instances (one per input topic) and the
+# observability UI can show fan-out across them.
+#
+# - `id` is a human-friendly label only. The SDK generates the actual queryId
+#   at subscribe time; the demo app prints both so operators can correlate.
+# - `topics` (optional, list of FQNs) overrides the env default DEMO_SOURCE_TOPIC.
+#   When set, the SDK registers the query against every listed topic and the
+#   composed selector adds `__topic__ IN (...)` automatically.
+# - `selector` is JMS-style, evaluated against the message KEY (`__key__`) and
+#   message PROPERTIES only — never the JSON body. ShadowTraffic emits the
+#   filterable fields (carrier/service_level/origin_region/dest_region/
+#   customer_tier/scan_type/exception_type/severity) as Kafka headers, which
+#   KoP maps to Pulsar message properties. Numeric selectors are intentionally
+#   avoided: KoP delivers every property as a String and JMS numeric comparison
+#   on a String property is UNKNOWN (no match) per spec.
+# - `bad-syntax-demo` is intentionally broken to make the
+#   `selector-compile-fail` diagnostic flag fire on cue.
+
+queries:
+
+  # ── Wide net: half the world is North America. Operator-side QA dashboard. ──
+  - id: all-na-scans
+    topics: [ "persistent://public/default/parcel-scans" ]
+    selector: "origin_region IN ('NA_WEST','NA_EAST')"
+    # 60% match → ~40% drop
+
+  # ── FedEx exception desk: every FedEx exception, any severity. ───────────────
+  - id: fedex-exceptions
+    topics: [ "persistent://public/default/parcel-exceptions" ]
+    selector: "carrier = 'FEDEX'"
+    # 25% match → ~75% drop
+
+  # ── BUSINESS-tier customer portal: shipments, scans, AND exceptions. ─────────
+  # First multi-topic query. The orchestrator fans QueryMessage out to all
+  # three spawned filter instances; the SDK reads the union via one KafkaConsumer.
+  - id: business-tier-feed
+    topics:
+      - "persistent://public/default/parcel-shipments"
+      - "persistent://public/default/parcel-scans"
+      - "persistent://public/default/parcel-exceptions"
+    selector: "customer_tier = 'BUSINESS'"
+    # 25% match → ~75% drop, across all three topics
+
+  # ── EU-bound originations: customs broker's pre-clearance worklist. ──────────
+  - id: eu-bound-shipments
+    topics: [ "persistent://public/default/parcel-shipments" ]
+    selector: "dest_region = 'EU'"
+    # 20% match → ~80% drop
+
+  # ── APAC origin scan stream: regional network operations console. ────────────
+  - id: apac-origin-scans
+    topics: [ "persistent://public/default/parcel-scans" ]
+    selector: "origin_region = 'APAC'"
+    # 15% match → ~85% drop
+
+  # ── Last-mile-only scan feed: drives the customer-facing tracking widget. ───
+  - id: last-mile-scans
+    topics: [ "persistent://public/default/parcel-scans" ]
+    selector: "scan_type IN ('OUT_FOR_DELIVERY','DELIVERED')"
+    # 10% + 5% = 15% match → ~85% drop
+
+  # ── UPS priority shipments only: account-management dashboard. ───────────────
+  - id: ups-priority
+    topics: [ "persistent://public/default/parcel-shipments" ]
+    selector: "carrier = 'UPS' AND service_level IN ('EXPRESS','OVERNIGHT')"
+    # 30% × 35% ≈ 10.5% match → ~89% drop
+
+  # ── Dispatch watchlist: 5 specific tracking numbers, all event types. ────────
+  # Second multi-topic query, with a __key__ IN watchlist instead of a property
+  # filter. Mirrors the real-world "give me everything about THIS parcel"
+  # ops-desk pattern.
+  - id: dispatch-watchlist
+    topics:
+      - "persistent://public/default/parcel-shipments"
+      - "persistent://public/default/parcel-scans"
+      - "persistent://public/default/parcel-exceptions"
+    selector: "__key__ IN ('TRK000001','TRK000007','TRK000013','TRK000023','TRK000041')"
+    # 5/50 keys = 10% match → ~90% drop, across all three topics
+
+  # ── CRITICAL-severity exceptions: paging-eligible incidents only. ────────────
+  - id: critical-exceptions
+    topics: [ "persistent://public/default/parcel-exceptions" ]
+    selector: "severity = 'CRITICAL'"
+    # 5% match → ~95% drop
+
+  # ── Intentional fail: fires `selector-compile-fail` diagnostic in the UI. ────
+  - id: bad-syntax-demo
+    topics: [ "persistent://public/default/parcel-scans" ]
+    selector: "this is not a valid selector ("
+    # intentionally bad — fires selector-compile-fail in the observability UI

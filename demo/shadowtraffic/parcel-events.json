@@ -1,0 +1,278 @@
+{
+  "generators": [
+    {
+      "topic": "${topic_shipments}",
+      "vars": {
+        "carrier":        { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 30, "value": "UPS"   },
+                              { "weight": 25, "value": "FEDEX" },
+                              { "weight": 25, "value": "DHL"   },
+                              { "weight": 20, "value": "USPS"  }
+                          ] },
+        "service_level":  { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 60, "value": "GROUND"       },
+                              { "weight": 25, "value": "EXPRESS"      },
+                              { "weight": 10, "value": "OVERNIGHT"    },
+                              { "weight":  5, "value": "INTERNATIONAL"}
+                          ] },
+        "origin_region":  { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 30, "value": "NA_WEST" },
+                              { "weight": 30, "value": "NA_EAST" },
+                              { "weight": 20, "value": "EU"      },
+                              { "weight": 15, "value": "APAC"    },
+                              { "weight":  5, "value": "LATAM"   }
+                          ] },
+        "dest_region":    { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 30, "value": "NA_WEST" },
+                              { "weight": 30, "value": "NA_EAST" },
+                              { "weight": 20, "value": "EU"      },
+                              { "weight": 15, "value": "APAC"    },
+                              { "weight":  5, "value": "LATAM"   }
+                          ] },
+        "customer_tier":  { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 60, "value": "STANDARD" },
+                              { "weight": 25, "value": "BUSINESS" },
+                              { "weight": 15, "value": "PREMIUM"  }
+                          ] },
+        "package_class":  { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 30, "value": "ENVELOPE"  },
+                              { "weight": 50, "value": "SMALL_BOX" },
+                              { "weight": 15, "value": "LARGE_BOX" },
+                              { "weight":  5, "value": "PALLET"    }
+                          ] },
+        "declared_value": { "_gen": "uniformDistribution", "bounds": [10.0, 5000.0] },
+        "weight_kg":      { "_gen": "uniformDistribution", "bounds": [0.1, 50.0] }
+      },
+      "key": {
+        "_gen": "oneOf",
+        "choices": [
+          "TRK000001","TRK000002","TRK000003","TRK000004","TRK000005",
+          "TRK000006","TRK000007","TRK000008","TRK000009","TRK000010",
+          "TRK000011","TRK000012","TRK000013","TRK000014","TRK000015",
+          "TRK000016","TRK000017","TRK000018","TRK000019","TRK000020",
+          "TRK000021","TRK000022","TRK000023","TRK000024","TRK000025",
+          "TRK000026","TRK000027","TRK000028","TRK000029","TRK000030",
+          "TRK000031","TRK000032","TRK000033","TRK000034","TRK000035",
+          "TRK000036","TRK000037","TRK000038","TRK000039","TRK000040",
+          "TRK000041","TRK000042","TRK000043","TRK000044","TRK000045",
+          "TRK000046","TRK000047","TRK000048","TRK000049","TRK000050"
+        ]
+      },
+      "value": {
+        "seq":            { "_gen": "sequentialInteger" },
+        "event_type":     "SHIPMENT_CREATED",
+        "carrier":        { "_gen": "var", "var": "carrier" },
+        "service_level":  { "_gen": "var", "var": "service_level" },
+        "origin_region":  { "_gen": "var", "var": "origin_region" },
+        "dest_region":    { "_gen": "var", "var": "dest_region" },
+        "customer_tier":  { "_gen": "var", "var": "customer_tier" },
+        "package_class":  { "_gen": "var", "var": "package_class" },
+        "declared_value": { "_gen": "var", "var": "declared_value" },
+        "weight_kg":      { "_gen": "var", "var": "weight_kg" }
+      },
+      "headers": [
+        { "key": "carrier",       "value": { "_gen": "var", "var": "carrier"       } },
+        { "key": "service_level", "value": { "_gen": "var", "var": "service_level" } },
+        { "key": "origin_region", "value": { "_gen": "var", "var": "origin_region" } },
+        { "key": "dest_region",   "value": { "_gen": "var", "var": "dest_region"   } },
+        { "key": "customer_tier", "value": { "_gen": "var", "var": "customer_tier" } },
+        { "key": "package_class", "value": { "_gen": "var", "var": "package_class" } }
+      ],
+      "localConfigs": {
+        "throttleMs": 25
+      }
+    },
+
+    {
+      "topic": "${topic_scans}",
+      "vars": {
+        "carrier":        { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 30, "value": "UPS"   },
+                              { "weight": 25, "value": "FEDEX" },
+                              { "weight": 25, "value": "DHL"   },
+                              { "weight": 20, "value": "USPS"  }
+                          ] },
+        "service_level":  { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 60, "value": "GROUND"       },
+                              { "weight": 25, "value": "EXPRESS"      },
+                              { "weight": 10, "value": "OVERNIGHT"    },
+                              { "weight":  5, "value": "INTERNATIONAL"}
+                          ] },
+        "origin_region":  { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 30, "value": "NA_WEST" },
+                              { "weight": 30, "value": "NA_EAST" },
+                              { "weight": 20, "value": "EU"      },
+                              { "weight": 15, "value": "APAC"    },
+                              { "weight":  5, "value": "LATAM"   }
+                          ] },
+        "dest_region":    { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 30, "value": "NA_WEST" },
+                              { "weight": 30, "value": "NA_EAST" },
+                              { "weight": 20, "value": "EU"      },
+                              { "weight": 15, "value": "APAC"    },
+                              { "weight":  5, "value": "LATAM"   }
+                          ] },
+        "customer_tier":  { "_gen": "weightedOneOf", "choices": [
+                              { "weight": 60, "value": "STANDARD" },
+                              { "weight": 25, "value": "BUSINESS" },
+                              { "weight": 15, "value": "PREMIUM"  }
+                          ] },
+        "scan_type":      { "_gen": "weightedOneOf", "choices": [
+                              { "weight":  5, "value": "PICKUP"           },
+                              { "weight": 30, "value": "SORT"             },
+                              { "weight": 25, "value": "DEPART"           },
+                              { "weight": 25, "value": "ARRIVE"           },
+                              { "weight": 10, "value": "OUT_FOR_DELIVERY" },
+                              { "weight":  5, "value": "DELIVERED"        }
+                          ] },
+        "hub_id":         { "_gen": "oneOf", "choices": [
+                              "HUB-LAX","HUB-JFK","HUB-MEM","HUB-ATL","HUB-ORD",
+                              "HUB-CDG","HUB-FRA","HUB-LHR","HUB-HKG","HUB-NRT"
+                          ] }
+      },
+      "key": {
+        "_gen": "oneOf",
+        "choices": [
+          "TRK000001","TRK000002","TRK000003","TRK000004","TRK000005",
+          "TRK000006","TRK000007","TRK000008","TRK000009","TRK000010",
+          "TRK000011","TRK000012","TRK000013","TRK000014","TRK000015",
+          "TRK000016","TRK000017","TRK000018","TRK000019","TRK000020",
+          "TRK000021","TRK000022","TRK000023","TRK000024","TRK000025",
+          "TRK000026","TRK000027","TRK000028","TRK000029","TRK000030",
+          "TRK000031","TRK000032","TRK000033","TRK000034","TRK000035",
+          "TRK000036","TRK000037","TRK000038","TRK000039","TRK000040",
+          "TRK000041","TRK000042","TRK000043","TRK000044","TRK000045",
+          "TRK000046","TRK000047","TRK000048","TRK000049","TRK000050"
+        ]
+      },
+      "value": {
+        "seq":            { "_gen": "sequentialInteger" },
+        "event_type":     "SCAN",
+        "carrier":        { "_gen": "var", "var": "carrier" },
+        "service_level":  { "_gen": "var", "var": "service_level" },
+        "origin_region":  { "_gen": "var", "var": "origin_region" },
+        "dest_region":    { "_gen": "var", "var": "dest_region" },
+        "customer_tier":  { "_gen": "var", "var": "customer_tier" },
+        "scan_type":      { "_gen": "var", "var": "scan_type" },
+        "hub_id":         { "_gen": "var", "var": "hub_id" }
+      },
+      "headers": [
+        { "key": "carrier",       "value": { "_gen": "var", "var": "carrier"       } },
+        { "key": "service_level", "value": { "_gen": "var", "var": "service_level" } },
+        { "key": "origin_region", "value": { "_gen": "var", "var": "origin_region" } },
+        { "key": "dest_region",   "value": { "_gen": "var", "var": "dest_region"   } },
+        { "key": "customer_tier", "value": { "_gen": "var", "var": "customer_tier" } },
+        { "key": "scan_type",     "value": { "_gen": "var", "var": "scan_type"     } },
+        { "key": "hub_id",        "value": { "_gen": "var", "var": "hub_id"        } }
+      ],
+      "localConfigs": {
+        "throttleMs": 8
+      }
+    },
+
+    {
+      "topic": "${topic_exceptions}",
+      "vars": {
+        "carrier":         { "_gen": "weightedOneOf", "choices": [
+                               { "weight": 30, "value": "UPS"   },
+                               { "weight": 25, "value": "FEDEX" },
+                               { "weight": 25, "value": "DHL"   },
+                               { "weight": 20, "value": "USPS"  }
+                           ] },
+        "service_level":   { "_gen": "weightedOneOf", "choices": [
+                               { "weight": 60, "value": "GROUND"       },
+                               { "weight": 25, "value": "EXPRESS"      },
+                               { "weight": 10, "value": "OVERNIGHT"    },
+                               { "weight":  5, "value": "INTERNATIONAL"}
+                           ] },
+        "origin_region":   { "_gen": "weightedOneOf", "choices": [
+                               { "weight": 30, "value": "NA_WEST" },
+                               { "weight": 30, "value": "NA_EAST" },
+                               { "weight": 20, "value": "EU"      },
+                               { "weight": 15, "value": "APAC"    },
+                               { "weight":  5, "value": "LATAM"   }
+                           ] },
+        "dest_region":     { "_gen": "weightedOneOf", "choices": [
+                               { "weight": 30, "value": "NA_WEST" },
+                               { "weight": 30, "value": "NA_EAST" },
+                               { "weight": 20, "value": "EU"      },
+                               { "weight": 15, "value": "APAC"    },
+                               { "weight":  5, "value": "LATAM"   }
+                           ] },
+        "customer_tier":   { "_gen": "weightedOneOf", "choices": [
+                               { "weight": 60, "value": "STANDARD" },
+                               { "weight": 25, "value": "BUSINESS" },
+                               { "weight": 15, "value": "PREMIUM"  }
+                           ] },
+        "exception_type":  { "_gen": "weightedOneOf", "choices": [
+                               { "weight": 25, "value": "WEATHER_DELAY"         },
+                               { "weight": 20, "value": "ADDRESS_INVALID"       },
+                               { "weight": 20, "value": "RECIPIENT_UNAVAILABLE" },
+                               { "weight": 15, "value": "CUSTOMS_HOLD"          },
+                               { "weight": 10, "value": "DAMAGED"               },
+                               { "weight":  5, "value": "LOST"                  },
+                               { "weight":  5, "value": "MECHANICAL_FAILURE"    }
+                           ] },
+        "severity":        { "_gen": "weightedOneOf", "choices": [
+                               { "weight": 50, "value": "LOW"      },
+                               { "weight": 30, "value": "MEDIUM"   },
+                               { "weight": 15, "value": "HIGH"     },
+                               { "weight":  5, "value": "CRITICAL" }
+                           ] }
+      },
+      "key": {
+        "_gen": "oneOf",
+        "choices": [
+          "TRK000001","TRK000002","TRK000003","TRK000004","TRK000005",
+          "TRK000006","TRK000007","TRK000008","TRK000009","TRK000010",
+          "TRK000011","TRK000012","TRK000013","TRK000014","TRK000015",
+          "TRK000016","TRK000017","TRK000018","TRK000019","TRK000020",
+          "TRK000021","TRK000022","TRK000023","TRK000024","TRK000025",
+          "TRK000026","TRK000027","TRK000028","TRK000029","TRK000030",
+          "TRK000031","TRK000032","TRK000033","TRK000034","TRK000035",
+          "TRK000036","TRK000037","TRK000038","TRK000039","TRK000040",
+          "TRK000041","TRK000042","TRK000043","TRK000044","TRK000045",
+          "TRK000046","TRK000047","TRK000048","TRK000049","TRK000050"
+        ]
+      },
+      "value": {
+        "seq":            { "_gen": "sequentialInteger" },
+        "event_type":     "EXCEPTION",
+        "carrier":        { "_gen": "var", "var": "carrier" },
+        "service_level":  { "_gen": "var", "var": "service_level" },
+        "origin_region":  { "_gen": "var", "var": "origin_region" },
+        "dest_region":    { "_gen": "var", "var": "dest_region" },
+        "customer_tier":  { "_gen": "var", "var": "customer_tier" },
+        "exception_type": { "_gen": "var", "var": "exception_type" },
+        "severity":       { "_gen": "var", "var": "severity" }
+      },
+      "headers": [
+        { "key": "carrier",        "value": { "_gen": "var", "var": "carrier"        } },
+        { "key": "service_level",  "value": { "_gen": "var", "var": "service_level"  } },
+        { "key": "origin_region",  "value": { "_gen": "var", "var": "origin_region"  } },
+        { "key": "dest_region",    "value": { "_gen": "var", "var": "dest_region"    } },
+        { "key": "customer_tier",  "value": { "_gen": "var", "var": "customer_tier"  } },
+        { "key": "exception_type", "value": { "_gen": "var", "var": "exception_type" } },
+        { "key": "severity",       "value": { "_gen": "var", "var": "severity"       } }
+      ],
+      "localConfigs": {
+        "throttleMs": 100
+      }
+    }
+  ],
+  "connections": {
+    "kafka": {
+      "kind": "kafka",
+      "producerConfigs": {
+        "bootstrap.servers": "${bootstrap}",
+        "key.serializer":   "org.apache.kafka.common.serialization.StringSerializer",
+        "value.serializer": "io.shadowtraffic.kafka.serdes.JsonSerializer",
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism":    "PLAIN",
+        "sasl.jaas.config":  "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${username}\" password=\"token:${kafka_token}\";",
+        "enable.idempotence": "false",
+        "acks": "1"
+      }
+    }
+  }
+}

@@ -20,6 +20,8 @@ demo/
   README.md                            ← this file
   docker-compose.yml                   ← cloud-mode: bootstrap + shadowtraffic + multi-query-app + observability against SN Cloud
   docker-compose.local.yml             ← local-mode: pulsar-standalone + orchestrator-deploy + the four runtime services
+  docker-compose.parcels.yml           ← cloud-mode, logistics scenario: three source topics (see "Second scenario" below)
+  docker-compose.parcels.local.yml     ← local-mode, logistics scenario
   bootstrap/
     bootstrap.sh                       ← pre-flight (topics + permissions); auto-detects auth mode from PULSAR_TOKEN_FILE
   local/
@@ -27,9 +29,12 @@ demo/
     orchestrator-function-config.yaml  ← function config (tenant=public, ns=default, no admin token)
   shadowtraffic/
     stock-quotes.json                  ← generator config (templated bootstrap/topic/throttle)
+    parcel-events.json                 ← logistics generator (cloud, templated; emits Kafka headers)
+    parcel-events.local.json           ← logistics generator (local, hardcoded; no headers)
   multi-query-app/
     pom.xml                            ← parent-reactor child; produces a shaded jar
-    queries.yaml                       ← the 9 selectors (edit freely; container hot-loads on restart)
+    queries.yaml                       ← the 9 stock-quote selectors (edit freely; container hot-loads on restart)
+    queries-parcels.yaml               ← the 10 logistics selectors (single- and multi-topic)
     Dockerfile                         ← two-stage Maven → JRE 17
     src/main/java/io/streamnative/filter/demo/
       MultiQueryDemo.java              ← entrypoint; one drain-loop thread per query
@@ -161,14 +166,56 @@ Within ~20 seconds:
    - Active-queries table: 8 healthy rows + 1 row with the `selector-compile-fail` diagnostic.
    - TopicDetail on `stock-quotes` shows real messages via the peek endpoint.
 
+## Second scenario: logistics / parcels
+
+The stock-quotes scenario above runs **9 queries against one source topic**. The
+logistics scenario (`docker-compose.parcels.yml` / `.parcels.local.yml`) runs
+**10 queries across three source topics** so the orchestrator spawns three
+distinct selector-filter instances and the UI shows fan-out *across* topics:
+
+| Topic | Rate | Events |
+|---|---|---|
+| `parcel-shipments` | ~40 evt/s | new shipment / label printed |
+| `parcel-scans` | ~120 evt/s | every network scan (pickup → delivered) |
+| `parcel-exceptions` | ~10 evt/s | delivery failures, customs holds, etc. |
+
+The queries in `queries-parcels.yaml` exercise capabilities the single-topic
+scenario can't: per-query topic targeting, **multi-topic queries** (e.g.
+`business-tier-feed` and `dispatch-watchlist` read the union of all three
+topics through one consumer), `__key__ IN (...)` watchlists, and the usual
+intentional `bad-syntax-demo`. Each query's optional `topics:` list overrides
+the env default; when present, the SDK composes a `__topic__ IN (...)`
+constraint into the selector automatically.
+
+Bring it up exactly like the stock-quotes scenario, just with the `-f` flag:
+
+```bash
+# local-mode (no SN Cloud account needed)
+docker compose -f docker-compose.parcels.local.yml up --build
+
+# cloud-mode (reads the same .env; parcel topics default to public/default)
+docker compose -f docker-compose.parcels.yml up --build
+```
+
+> **Local-mode note:** as with stock-quotes, KoP in the public `sn-platform`
+> image doesn't deliver Kafka headers as Pulsar properties, so the
+> property-based selectors (`carrier`, `severity`, …) won't match locally. The
+> `__key__` / `__topic__` queries (`dispatch-watchlist`, the multi-topic
+> `business-tier-feed`) do exercise meaningfully in local mode. Use cloud-mode
+> for full coverage.
+
 ## Editing the queries
 
-`queries.yaml` is mounted into the container — edit and `docker compose restart multi-query-app` to re-register. Each entry is `{ id, selector }`:
+`queries.yaml` is mounted into the container — edit and `docker compose restart multi-query-app` to re-register. Each entry is `{ id, selector, topics? }`:
 
 ```yaml
 queries:
   - id: my-custom-slice
     selector: "sector = 'tech' AND price BETWEEN 100 AND 250"
+    # topics: optional. Omit to use DEMO_SOURCE_TOPIC; list one or more FQNs to
+    # target specific topics (the SDK adds __topic__ IN (...) to the selector).
+    # topics:
+    #   - persistent://public/default/parcel-scans
 ```
 
 Selector syntax is JMS-style. The orchestrator's selector-filter parser is the canonical evaluator — anything it rejects fires `selector-compile-fail` and surfaces in the observability UI's Diagnostic Flags panel.
