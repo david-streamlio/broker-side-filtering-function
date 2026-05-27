@@ -60,6 +60,21 @@ filter functions as SDK clients subscribe — no manual function-per-topic deplo
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+## Demo
+
+A self-contained demo combines this filtering stack (orchestrator + spawned
+selector-filters + a multi-query SDK app, fed by [ShadowTraffic](https://shadowtraffic.io/))
+with the published [observability UI](https://github.com/david-streamlio/broker-side-filter-observability).
+From the repo root:
+
+```bash
+make demo-local            # laptop-only, no SN Cloud account
+# → open http://localhost:3200
+```
+
+See **[demo/README.md](demo/README.md)** for cloud-mode, the logistics/parcels
+scenario, and all `make demo-*` targets (`make help` lists them).
+
 ## How it works (selector-filter, per-instance)
 
 1. Each spawned `selector-filter` instance subscribes to one **input topic** (or one
