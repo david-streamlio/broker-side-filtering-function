@@ -69,7 +69,7 @@ services:
     environment:
       PULSAR_ADMIN_URL: "http://pulsar:8080"
       SELECTOR_REPO:    "${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
-      SELECTOR_REL:     "${SELECTOR_REL:-v1.0.0-rc3}"
+      SELECTOR_REL:     "${SELECTOR_REL:-v1.0.0}"
       GITHUB_TOKEN:     "${GITHUB_TOKEN:-}"
     volumes:
       - ./local/orchestrator-deploy.sh:/usr/local/bin/orchestrator-deploy.sh:ro
@@ -139,7 +139,7 @@ services:
       - ./multi-query-app/queries-parcels.yaml:/app/queries.yaml:ro
 
   observability:
-    image: ghcr.io/david-streamlio/broker-side-filter-observability:latest
+    image: ghcr.io/david-streamlio/broker-side-filter-observability:${OBSERVABILITY_IMAGE_TAG:-0.1.2}
     pull_policy: missing
     container_name: parcel-demo-observability
     restart: unless-stopped

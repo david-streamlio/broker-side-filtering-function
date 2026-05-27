@@ -1,7 +1,8 @@
-# Multi-Query Stock-Quote Demo
+# Broker-Side Filter Demo — filtering + observability
 
-A scripted showcase that exercises **all** of the broker-side filter's capabilities — multiple simultaneous queries on a shared source topic, dynamic selector diversity, intentional bad selectors that trip the orchestrator's diagnostic flags — and watches the whole thing through the
-[broker-side-filter-observability](https://github.com/david-streamlio/broker-side-filter-observability) UI.
+A self-contained, one-command demo that combines this repo's broker-side filtering stack (orchestrator + spawned selector-filters + the multi-query SDK app, fed by [ShadowTraffic](https://shadowtraffic.io/)) with the published [broker-side-filter-observability](https://github.com/david-streamlio/broker-side-filter-observability) UI image — so you can watch filters spawn, queries register, and drop-% accrue live at <http://localhost:3200>.
+
+It exercises **all** of the broker-side filter's capabilities — multiple simultaneous queries on a shared source topic, dynamic selector diversity, intentional bad selectors that trip the orchestrator's diagnostic flags — across two scenarios (stock-quotes, logistics/parcels) and two modes (local, cloud). Bring any of them up with a single `make demo-*` target (see below).
 
 Unlike the TradeWise demo (which registers a single key-IN watchlist), this one runs **9 concurrent queries** on the same `stock-quotes` source so the orchestrator spawns its filter, registry, drop-% accounting, and per-query control-topic state in their full configuration.
 
@@ -96,6 +97,17 @@ container that uses `pulsar-admin` to:
 
 Idempotent — all four steps treat "already exists" / "already granted" as success. shadowtraffic + multi-query-app `depends_on` it with `condition: service_completed_successfully`, so the rest of the stack doesn't start until the cluster's ready.
 
+## Versions
+
+The combined demo is pinned to the **v1.0.0 GA** for reproducibility:
+
+| Component | Pinned to | Override with |
+|---|---|---|
+| Orchestrator + filter NARs / SDK | `v1.0.0` | `SELECTOR_REL` |
+| Observability UI image | `ghcr.io/david-streamlio/broker-side-filter-observability:0.1.2` | `OBSERVABILITY_IMAGE_TAG` |
+
+Both are env-overridable (set them in `demo/.env`, or export before `make`). The observability image reimplements the orchestrator's registry DTOs and only consumes the stable wire types from `selector-filter-common`, so `0.1.2` is compatible with the `v1.0.0` orchestrator.
+
 ## Prerequisites
 
 - A Pulsar cluster (typically SN Cloud) with KoP enabled and the broker-side-filtering-function orchestrator deployed — see the root README's bring-up section.
@@ -103,42 +115,54 @@ Idempotent — all four steps treat "already exists" / "already granted" as succ
 - A [ShadowTraffic license](https://shadowtraffic.io/account) — free tier is sufficient (capped at ~1000 msg/s).
 - Docker + docker-compose v2.
 
+The simplest bring-up is the `make demo-*` targets — **run them from the repo
+root** (they reference `demo/…` paths). `make help` lists them all.
+
+| Target | Brings up |
+|---|---|
+| `make demo-local` | local-mode stock-quotes (this section) |
+| `make demo-local-parcels` | local-mode logistics/parcels |
+| `make demo-cloud` | cloud-mode stock-quotes |
+| `make demo-cloud-parcels` | cloud-mode logistics/parcels |
+| `make demo-down` | tear down any running demo |
+
 ## Running (local-mode)
 
-Fastest path — no SN Cloud account needed. First, set up your ShadowTraffic license:
+Fastest path — no SN Cloud account needed. First, set up your ShadowTraffic license (in `demo/`):
 
 ```bash
 cp license.env.example license.env
 # edit license.env: paste in the six LICENSE_* values from your ShadowTraffic account
 ```
 
-Pre-download the orchestrator + selector-filter NARs on the host. The
-broker-side-filtering-function repo is private, and `gh` on your host already
-has the right auth — far simpler than forwarding a token into the
-orchestrator-deploy container and parsing the GitHub API there:
+Then, from the repo root:
 
 ```bash
-gh release download v1.0.0-rc3 \
+make demo-local            # stock-quotes  (or: make demo-local-parcels)
+```
+
+`make demo-local` first runs `make demo-nars` to fetch the orchestrator +
+selector-filter NARs for the pinned `SELECTOR_REL` (default `v1.0.0`) into
+`demo/local/nars/` via `gh release download` — the repo is private and your
+host `gh` already has auth, far simpler than forwarding a token into the
+container. It then `docker compose -f demo/docker-compose.local.yml up --build`.
+
+<details><summary>Manual equivalent (without make)</summary>
+
+```bash
+gh release download v1.0.0 \
   --repo david-streamlio/broker-side-filtering-function \
-  --dir local/nars \
+  --dir demo/local/nars \
   --pattern '*.nar'
+docker compose -f demo/docker-compose.local.yml up --build
 ```
-
-`local/nars/` is mounted into the orchestrator-deploy container; it uses the
-mounted NARs directly. (If the repo is ever made public, you can skip this
-step and the container falls back to downloading them itself.)
-
-Then bring the stack up:
-
-```bash
-docker compose -f docker-compose.local.yml up --build
-```
+</details>
 
 Pulsar standalone takes ~30s to come up; orchestrator-deploy + bootstrap run in series after that (~30s more); then shadowtraffic + multi-query-app + observability start. Open <http://localhost:3200> when the observability container is healthy.
 
 ## Running (cloud-mode)
 
-Copy `.env.example` to `.env` and fill in your cluster details, and `license.env.example` to `license.env` for the ShadowTraffic license:
+Copy `.env.example` to `.env` and fill in your cluster details, and `license.env.example` to `license.env` for the ShadowTraffic license (both in `demo/`):
 
 ```bash
 cp .env.example .env
@@ -150,10 +174,10 @@ cp license.env.example license.env
 
 Both `.env` and `license.env` are gitignored.
 
-Then:
+Then, from the repo root (after the cluster + orchestrator exist — see `infra/`):
 
 ```bash
-docker compose up --build
+make demo-cloud            # stock-quotes  (or: make demo-cloud-parcels)
 ```
 
 Within ~20 seconds:

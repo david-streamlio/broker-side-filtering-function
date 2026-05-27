@@ -17,7 +17,7 @@
 #   ORG               SN Cloud organization id (e.g. o-mj3r8)
 #   SELECTOR_REPO     GitHub repo to download orchestrator + filter NARs from
 #                     (default: david-streamlio/broker-side-filtering-function)
-#   SELECTOR_REL      Release tag (default: v1.0.0-rc3)
+#   SELECTOR_REL      Release tag (default: v1.0.0)
 #
 # Optional env:
 #   PULSAR_TOKEN      pre-minted instance-scoped superuser JWT for Step B.
@@ -46,7 +46,7 @@ cd "$TF_DIR"
 PULSAR_IMAGE="${PULSAR_IMAGE:-apachepulsar/pulsar:4.0.10}"
 PULSAR_CLUSTER="${PULSAR_CLUSTER:-stock-demo}"
 SELECTOR_REPO="${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
-SELECTOR_REL="${SELECTOR_REL:-v1.0.0-rc3}"
+SELECTOR_REL="${SELECTOR_REL:-v1.0.0}"
 
 # ── Phase 0: Pre-flight ───────────────────────────────────────────────────────
 section "Phase 0 — Pre-flight"
