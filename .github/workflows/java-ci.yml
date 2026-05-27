@@ -1,0 +1,71 @@
+name: Java CI
+
+# QA for the Java reactor. Two jobs:
+#
+#   build-check        — runs on every PR + main push. Compiles the whole reactor
+#                        (incl. NARs and the demo app), runs the full Surefire unit
+#                        suite (*Tests.java), packages, and skips only the Docker-bound
+#                        failsafe integration tests (*IT.java). Fast (~1-2 min, no Docker).
+#   integration-tests  — runs the testcontainers *IT suite against a Pulsar container.
+#                        Slower, so it's gated: nightly schedule, manual dispatch, or a PR
+#                        labeled `run-integration-tests`.
+#
+# Publishing of SNAPSHOTs / release artifacts lives in the publish-snapshots.yml,
+# release-nars.yml, release-java-sdk.yml and release-python.yml workflows.
+
+on:
+  pull_request:
+    paths:
+      - '**.java'
+      - '**/pom.xml'
+      - '.github/workflows/java-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - '**.java'
+      - '**/pom.xml'
+      - '.github/workflows/java-ci.yml'
+  schedule:
+    # Nightly at 07:00 UTC — exercises the integration-tests job without gating PRs on it.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  build-check:
+    name: Build + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Build + run unit tests (skip integration tests)
+        run: mvn -B verify -DskipITs
+
+  integration-tests:
+    name: Integration tests (testcontainers)
+    runs-on: ubuntu-latest
+    # Heavy (spins up Pulsar containers). Only run nightly, on manual dispatch, or
+    # when a PR is explicitly labeled — keeps regular PR feedback fast.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'run-integration-tests'))
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Run integration tests
+        run: mvn -B verify
