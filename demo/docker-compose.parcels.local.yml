@@ -1,0 +1,164 @@
+# Local-mode logistics (parcel-events) demo — same content as
+# docker-compose.parcels.yml, but runs against a local Pulsar standalone
+# container with KoP on PLAINTEXT :9092. No SN Cloud, no terraform, no SA tokens.
+#
+# Trade-off: local-mode does NOT exercise the auth + RBAC chain — the most
+# fragile part of the system on real clusters. Use it for fast iteration on
+# the multi-query app / queries / observability UI; use docker-compose.parcels.yml
+# (cloud-mode) for any test that needs to validate permissions / audience /
+# rolebinding behavior.
+#
+# Known limitation (inherited from the stock-quotes local demo): KoP in
+# standalone-broker config does not emit Kafka headers as Pulsar properties,
+# so header-based selectors (carrier, service_level, scan_type, etc.) will not
+# match in local mode. The __key__ IN (...) and __topic__ IN (...) queries
+# from queries-parcels.yaml DO work — `dispatch-watchlist` and the multi-topic
+# `business-tier-feed` (after dropping its `customer_tier` clause) are the
+# only queries that exercise meaningfully in local mode. For full coverage,
+# run docker-compose.parcels.yml against a real KoP-enabled cluster.
+#
+# Bring-up:
+#   docker compose -f docker-compose.parcels.local.yml up --build
+
+services:
+  pulsar:
+    image: streamnative/sn-platform:4.0.10.1
+    platform: linux/amd64
+    container_name: parcel-demo-pulsar
+    command:
+      - /bin/bash
+      - -c
+      - |
+        bin/apply-config-from-env.py conf/standalone.conf && \
+        echo '=== KoP-relevant lines in standalone.conf ===' && \
+        grep -iE 'kafkaEntryFormat|brokerEntryMetadata|exposingBrokerEntry' conf/standalone.conf && \
+        echo '=== starting standalone ===' && \
+        bin/pulsar standalone --advertised-address pulsar
+    environment:
+      PULSAR_PREFIX_messagingProtocols:                       "kafka"
+      PULSAR_PREFIX_protocolHandlerDirectory:                 "./protocols"
+      PULSAR_PREFIX_kafkaListeners:                           "PLAINTEXT://0.0.0.0:9092"
+      PULSAR_PREFIX_kafkaAdvertisedListeners:                 "PLAINTEXT://pulsar:9092"
+      PULSAR_PREFIX_kafkaEnableMultiTenantMetadata:           "true"
+      PULSAR_PREFIX_kafkaTransactionCoordinatorEnabled:       "false"
+      PULSAR_PREFIX_brokerEntryMetadataInterceptors:          "org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
+      PULSAR_PREFIX_exposingBrokerEntryMetadataToClientEnabled: "true"
+      PULSAR_PREFIX_functionsWorkerEnabled:                   "true"
+      PULSAR_PREFIX_allowAutoTopicCreation:                   "true"
+      PULSAR_PREFIX_allowAutoTopicCreationType:               "non-partitioned"
+      PULSAR_MEM:                                              "-Xms512m -Xmx1g -XX:MaxDirectMemorySize=1g"
+    ports:
+      - "8080:8080"
+      - "6650:6650"
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/admin/v2/clusters | grep -q standalone || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # One-shot: downloads + deploys the orchestrator function. Identical to the
+  # stock-quotes local-mode service.
+  orchestrator-deploy:
+    image: apachepulsar/pulsar:4.0.5
+    container_name: parcel-demo-orchestrator-deploy
+    depends_on:
+      pulsar:
+        condition: service_healthy
+    environment:
+      PULSAR_ADMIN_URL: "http://pulsar:8080"
+      SELECTOR_REPO:    "${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
+      SELECTOR_REL:     "${SELECTOR_REL:-v1.0.0-rc3}"
+      GITHUB_TOKEN:     "${GITHUB_TOKEN:-}"
+    volumes:
+      - ./local/orchestrator-deploy.sh:/usr/local/bin/orchestrator-deploy.sh:ro
+      - ./local/orchestrator-function-config.yaml:/etc/orchestrator-function-config.yaml:ro
+      - ./local/nars:/nars:ro
+    entrypoint: ["/bin/bash", "/usr/local/bin/orchestrator-deploy.sh"]
+
+  bootstrap:
+    image: apachepulsar/pulsar:4.0.5
+    container_name: parcel-demo-bootstrap
+    restart: "no"
+    depends_on:
+      orchestrator-deploy:
+        condition: service_completed_successfully
+    environment:
+      PULSAR_ADMIN_URL:       "http://pulsar:8080"
+      # All three parcel topics in one comma-separated list. bootstrap.sh
+      # dedupes namespaces so the kafkaEntryFormat / auto-topic-creation
+      # steps run once on public/default rather than three times.
+      DEMO_SOURCE_TOPICS:     "persistent://public/default/parcel-shipments,persistent://public/default/parcel-scans,persistent://public/default/parcel-exceptions"
+      DEMO_CONTROL_TOPIC:     "persistent://public/default/filter-requests"
+      DEMO_SOURCE_PARTITIONS: "1"
+      # PULSAR_TOKEN_FILE intentionally unset — bootstrap.sh auto-detects no-auth.
+    volumes:
+      - ./bootstrap/bootstrap.sh:/usr/local/bin/bootstrap.sh:ro
+    entrypoint: ["/bin/bash", "/usr/local/bin/bootstrap.sh"]
+
+  shadowtraffic:
+    image: shadowtraffic/shadowtraffic:latest
+    container_name: parcel-demo-shadowtraffic
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    env_file:
+      - license.env
+    volumes:
+      # parcel-events.local.json has all three topic FQNs + bootstrap values
+      # hardcoded for the standalone broker — no env-var substitution needed
+      # in local mode.
+      - ./shadowtraffic/parcel-events.local.json:/etc/shadowtraffic/parcel-events.json:ro
+    command: ["--config", "/etc/shadowtraffic/parcel-events.json"]
+
+  multi-query-app:
+    build:
+      context: ..
+      dockerfile: demo/multi-query-app/Dockerfile
+    container_name: parcel-demo-multi-query
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      shadowtraffic:
+        condition: service_started
+    environment:
+      PULSAR_SERVICE_URL:  "pulsar://pulsar:6650"
+      PULSAR_ADMIN_URL:    "http://pulsar:8080"
+      KAFKA_BOOTSTRAP:     "pulsar:9092"
+      # Fallback only — every query in queries-parcels.yaml specifies its own
+      # `topics:` list. Set to the shipments topic for sanity / docs alignment.
+      DEMO_SOURCE_TOPIC:   "persistent://public/default/parcel-shipments"
+      DEMO_CONTROL_TOPIC:  "persistent://public/default/filter-requests"
+      DEMO_QUERIES_PATH:   "/app/queries.yaml"
+      # KAFKA_PASSWORD intentionally unset — MultiQueryDemo's buildKafkaProps
+      # auto-detects this and uses PLAINTEXT instead of SASL_SSL.
+    volumes:
+      - ./multi-query-app/queries-parcels.yaml:/app/queries.yaml:ro
+
+  observability:
+    image: ghcr.io/david-streamlio/broker-side-filter-observability:latest
+    pull_policy: missing
+    container_name: parcel-demo-observability
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    ports:
+      - "3200:3200"
+    environment:
+      PULSAR_SERVICE_URL:         "pulsar://pulsar:6650"
+      PULSAR_ADMIN_URL:           "http://pulsar:8080"
+      STATE_TOPIC:                "persistent://public/default/orchestrator-state"
+      ORCHESTRATOR_TENANT:        "public"
+      ORCHESTRATOR_NAMESPACE:     "default"
+      ORCHESTRATOR_FUNCTION:      "orchestrator"
+      HEARTBEAT_MAX_STALE_SECONDS: "90"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:3200/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

@@ -1,0 +1,157 @@
+# Logistics (parcel-events) multi-query demo — runs against an existing SN
+# Cloud cluster (or any Pulsar with KoP enabled). Mirrors docker-compose.yml
+# (the stock-quotes demo) but drives three source topics so the orchestrator
+# spawns three distinct selector-filter instances:
+#
+#   parcel-shipments   ~40 evt/s — new shipment / label printed
+#   parcel-scans       ~120 evt/s — every network scan (pickup → delivered)
+#   parcel-exceptions  ~10 evt/s — delivery failures, customs holds, etc.
+#
+# Three services:
+#
+#   shadowtraffic     produces synthetic parcel events into all three source
+#                     topics via KoP SASL_SSL
+#   multi-query-app   registers the queries from multi-query-app/queries-parcels.yaml
+#                     through the selector-filter-client-kafka SDK and prints
+#                     samples of the records each filter forwards
+#   observability     ghcr.io/david-streamlio/broker-side-filter-observability
+#                     — live debugger UI showing every spawned filter, drop %,
+#                     and topic peek
+#
+# Required `.env` (or shell exports) before `docker compose up`:
+#
+#   PULSAR_SERVICE_URL          pulsar+ssl://pc-<id>.<region>.snio.cloud:6651
+#   PULSAR_ADMIN_URL            https://pc-<id>.<region>.snio.cloud
+#   KAFKA_BOOTSTRAP             pc-<id>.<region>.snio.cloud:9093
+#   KAFKA_USERNAME              <sa-name>
+#   STATE_TOPIC                 persistent://<tenant>/<filtering-ns>/orchestrator-state
+#   ORCHESTRATOR_TENANT         <tenant>
+#   ORCHESTRATOR_NAMESPACE      <filtering-ns>
+#   PULSAR_TOKEN_PATH           absolute path on the host to the SA token file
+#   SHADOWTRAFFIC_LICENSE_ID    your ShadowTraffic license id
+#   SHADOWTRAFFIC_LICENSE_KEY   your ShadowTraffic license key
+#   DEMO_TOPIC_SHIPMENTS        defaults to persistent://public/default/parcel-shipments
+#   DEMO_TOPIC_SCANS            defaults to persistent://public/default/parcel-scans
+#   DEMO_TOPIC_EXCEPTIONS       defaults to persistent://public/default/parcel-exceptions
+#   DEMO_CONTROL_TOPIC          defaults to persistent://public/default/filter-requests
+#
+# Note: the three source topics + control topic must already exist on the cluster
+# (or have auto-topic-creation enabled on their namespaces). The orchestrator
+# must be deployed and running before `multi-query-app` starts registering queries.
+
+services:
+  # One-shot pre-flight: ensures the source + control topics exist and the demo SA
+  # has produce+consume on the relevant namespaces. Idempotent — re-running on an
+  # already-bootstrapped cluster is a no-op. Other services wait for this to
+  # complete successfully before starting.
+  bootstrap:
+    image: apachepulsar/pulsar:4.0.5
+    container_name: parcel-demo-bootstrap
+    restart: "no"
+    environment:
+      PULSAR_ADMIN_URL:       "${PULSAR_ADMIN_URL:?set in .env}"
+      PULSAR_TOKEN_FILE:      "/var/run/secrets/pulsar.token"
+      # Multi-topic mode: comma-separated FQNs. bootstrap.sh dedupes namespaces
+      # so the kafkaEntryFormat / grant / auto-topic-creation steps run once
+      # against public/default rather than three times.
+      DEMO_SOURCE_TOPICS:     "${DEMO_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments},${DEMO_TOPIC_SCANS:-persistent://public/default/parcel-scans},${DEMO_TOPIC_EXCEPTIONS:-persistent://public/default/parcel-exceptions}"
+      DEMO_CONTROL_TOPIC:     "${DEMO_CONTROL_TOPIC:-persistent://public/default/filter-requests}"
+      DEMO_SA_PRINCIPAL:      "${DEMO_SA_PRINCIPAL:?set in .env (e.g. <sa>@<org>.auth.streamnative.cloud)}"
+      DEMO_SOURCE_PARTITIONS: "${DEMO_SOURCE_PARTITIONS:-1}"
+    volumes:
+      - ./bootstrap/bootstrap.sh:/usr/local/bin/bootstrap.sh:ro
+      - ${PULSAR_TOKEN_PATH:?set in .env}:/var/run/secrets/pulsar.token:ro
+    entrypoint: ["/bin/bash", "/usr/local/bin/bootstrap.sh"]
+
+  shadowtraffic:
+    image: shadowtraffic/shadowtraffic:latest
+    container_name: parcel-demo-shadowtraffic
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    # License vars (LICENSE_ID, LICENSE_EMAIL, LICENSE_ORGANIZATION,
+    # LICENSE_EDITION, LICENSE_EXPIRATION, LICENSE_SIGNATURE) come from
+    # license.env in this directory — see license.env.example for the shape.
+    env_file:
+      - license.env
+    volumes:
+      - ./shadowtraffic/parcel-events.json:/etc/shadowtraffic/parcel-events.json:ro
+      - ${PULSAR_TOKEN_PATH:?set in .env}:/var/run/secrets/pulsar.token:ro
+    # Same sed-render dance as the stock-quotes demo: ShadowTraffic 1.18.2
+    # strict-parses the config file as JSON BEFORE any substitution, so the
+    # template placeholders must be rendered into concrete JSON before the
+    # ShadowTraffic JAR sees the file. Throttles are hardcoded per-generator
+    # in parcel-events.json (different rates per topic), so no throttle
+    # substitution is needed here.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        TOKEN="$$(cat /var/run/secrets/pulsar.token)"
+        sed -e "s|[$]{topic_shipments}|${DEMO_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments}|g" \
+            -e "s|[$]{topic_scans}|${DEMO_TOPIC_SCANS:-persistent://public/default/parcel-scans}|g" \
+            -e "s|[$]{topic_exceptions}|${DEMO_TOPIC_EXCEPTIONS:-persistent://public/default/parcel-exceptions}|g" \
+            -e "s|[$]{bootstrap}|${KAFKA_BOOTSTRAP}|g" \
+            -e "s|[$]{username}|${KAFKA_USERNAME}|g" \
+            -e "s|[$]{kafka_token}|$$TOKEN|g" \
+            /etc/shadowtraffic/parcel-events.json > /tmp/parcel-events.rendered.json
+        exec java -Djava.security.manager=allow -Dfile.encoding=UTF-8 \
+          -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 \
+          -XX:MaxRAMPercentage=65.0 -jar /home/shadowtraffic.jar \
+          --config /tmp/parcel-events.rendered.json
+
+  multi-query-app:
+    build:
+      context: ..
+      dockerfile: demo/multi-query-app/Dockerfile
+    container_name: parcel-demo-multi-query
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      shadowtraffic:
+        condition: service_started
+    environment:
+      PULSAR_SERVICE_URL:  "${PULSAR_SERVICE_URL:?set in .env}"
+      PULSAR_ADMIN_URL:    "${PULSAR_ADMIN_URL:?set in .env}"
+      PULSAR_TOKEN_FILE:   "/var/run/secrets/pulsar.token"
+      KAFKA_BOOTSTRAP:     "${KAFKA_BOOTSTRAP:?set in .env}"
+      KAFKA_USERNAME:      "${KAFKA_USERNAME:?set in .env}"
+      KAFKA_PASSWORD_FILE: "/var/run/secrets/pulsar.token"
+      # DEMO_SOURCE_TOPIC is a fallback only — every query in queries-parcels.yaml
+      # specifies its own `topics:` list, so MultiQueryDemo never consults this
+      # default. Set it to the shipments topic for sanity / docs alignment.
+      DEMO_SOURCE_TOPIC:   "${DEMO_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments}"
+      DEMO_CONTROL_TOPIC:  "${DEMO_CONTROL_TOPIC:-persistent://public/default/filter-requests}"
+      DEMO_QUERIES_PATH:   "/app/queries.yaml"
+    volumes:
+      - ./multi-query-app/queries-parcels.yaml:/app/queries.yaml:ro
+      - ${PULSAR_TOKEN_PATH}:/var/run/secrets/pulsar.token:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      'export KAFKA_PASSWORD=$(cat /var/run/secrets/pulsar.token);
+       exec java $$JAVA_OPTS -jar /app/app.jar'
+
+  observability:
+    image: ghcr.io/david-streamlio/broker-side-filter-observability:latest
+    container_name: parcel-demo-observability
+    restart: unless-stopped
+    ports:
+      - "3200:3200"
+    environment:
+      PULSAR_SERVICE_URL:        "${PULSAR_SERVICE_URL}"
+      PULSAR_ADMIN_URL:          "${PULSAR_ADMIN_URL}"
+      PULSAR_TOKEN_FILE:         "/var/run/secrets/pulsar.token"
+      STATE_TOPIC:               "${STATE_TOPIC:?set in .env}"
+      ORCHESTRATOR_TENANT:       "${ORCHESTRATOR_TENANT:?set in .env}"
+      ORCHESTRATOR_NAMESPACE:    "${ORCHESTRATOR_NAMESPACE:?set in .env}"
+      ORCHESTRATOR_FUNCTION:     "${ORCHESTRATOR_FUNCTION:-orchestrator}"
+      HEARTBEAT_MAX_STALE_SECONDS: "${HEARTBEAT_MAX_STALE_SECONDS:-90}"
+    volumes:
+      - ${PULSAR_TOKEN_PATH}:/var/run/secrets/pulsar.token:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:3200/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
