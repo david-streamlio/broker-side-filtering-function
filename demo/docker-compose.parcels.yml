@@ -30,9 +30,9 @@
 #   PULSAR_TOKEN_PATH           absolute path on the host to the SA token file
 #   SHADOWTRAFFIC_LICENSE_ID    your ShadowTraffic license id
 #   SHADOWTRAFFIC_LICENSE_KEY   your ShadowTraffic license key
-#   DEMO_TOPIC_SHIPMENTS        defaults to persistent://public/default/parcel-shipments
-#   DEMO_TOPIC_SCANS            defaults to persistent://public/default/parcel-scans
-#   DEMO_TOPIC_EXCEPTIONS       defaults to persistent://public/default/parcel-exceptions
+#   DEMO_SOURCE_TOPIC_SHIPMENTS  defaults to persistent://public/default/parcel-shipments
+#   DEMO_SOURCE_TOPIC_SCANS      defaults to persistent://public/default/parcel-scans
+#   DEMO_SOURCE_TOPIC_EXCEPTIONS defaults to persistent://public/default/parcel-exceptions
 #   DEMO_CONTROL_TOPIC          defaults to persistent://public/default/filter-requests
 #
 # Note: the three source topics + control topic must already exist on the cluster
@@ -54,7 +54,7 @@ services:
       # Multi-topic mode: comma-separated FQNs. bootstrap.sh dedupes namespaces
       # so the kafkaEntryFormat / grant / auto-topic-creation steps run once
       # against public/default rather than three times.
-      DEMO_SOURCE_TOPICS:     "${DEMO_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments},${DEMO_TOPIC_SCANS:-persistent://public/default/parcel-scans},${DEMO_TOPIC_EXCEPTIONS:-persistent://public/default/parcel-exceptions}"
+      DEMO_SOURCE_TOPICS:     "${DEMO_SOURCE_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments},${DEMO_SOURCE_TOPIC_SCANS:-persistent://public/default/parcel-scans},${DEMO_SOURCE_TOPIC_EXCEPTIONS:-persistent://public/default/parcel-exceptions}"
       DEMO_CONTROL_TOPIC:     "${DEMO_CONTROL_TOPIC:-persistent://public/default/filter-requests}"
       DEMO_SA_PRINCIPAL:      "${DEMO_SA_PRINCIPAL:?set in .env (e.g. <sa>@<org>.auth.streamnative.cloud)}"
       DEMO_SOURCE_PARTITIONS: "${DEMO_SOURCE_PARTITIONS:-1}"
@@ -88,9 +88,9 @@ services:
     command:
       - |
         TOKEN="$$(cat /var/run/secrets/pulsar.token)"
-        sed -e "s|[$]{topic_shipments}|${DEMO_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments}|g" \
-            -e "s|[$]{topic_scans}|${DEMO_TOPIC_SCANS:-persistent://public/default/parcel-scans}|g" \
-            -e "s|[$]{topic_exceptions}|${DEMO_TOPIC_EXCEPTIONS:-persistent://public/default/parcel-exceptions}|g" \
+        sed -e "s|[$]{topic_shipments}|${DEMO_SOURCE_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments}|g" \
+            -e "s|[$]{topic_scans}|${DEMO_SOURCE_TOPIC_SCANS:-persistent://public/default/parcel-scans}|g" \
+            -e "s|[$]{topic_exceptions}|${DEMO_SOURCE_TOPIC_EXCEPTIONS:-persistent://public/default/parcel-exceptions}|g" \
             -e "s|[$]{bootstrap}|${KAFKA_BOOTSTRAP}|g" \
             -e "s|[$]{username}|${KAFKA_USERNAME}|g" \
             -e "s|[$]{kafka_token}|$$TOKEN|g" \
@@ -121,7 +121,7 @@ services:
       # DEMO_SOURCE_TOPIC is a fallback only — every query in queries-parcels.yaml
       # specifies its own `topics:` list, so MultiQueryDemo never consults this
       # default. Set it to the shipments topic for sanity / docs alignment.
-      DEMO_SOURCE_TOPIC:   "${DEMO_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments}"
+      DEMO_SOURCE_TOPIC:   "${DEMO_SOURCE_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments}"
       DEMO_CONTROL_TOPIC:  "${DEMO_CONTROL_TOPIC:-persistent://public/default/filter-requests}"
       DEMO_QUERIES_PATH:   "/app/queries.yaml"
     volumes:

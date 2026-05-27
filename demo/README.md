@@ -115,16 +115,37 @@ Both are env-overridable (set them in `demo/.env`, or export before `make`). The
 - A [ShadowTraffic license](https://shadowtraffic.io/account) — free tier is sufficient (capped at ~1000 msg/s).
 - Docker + docker-compose v2.
 
-The simplest bring-up is the `make demo-*` targets — **run them from the repo
-root** (they reference `demo/…` paths). `make help` lists them all.
+## Demo commands
 
-| Target | Brings up |
-|---|---|
-| `make demo-local` | local-mode stock-quotes (this section) |
-| `make demo-local-parcels` | local-mode logistics/parcels |
-| `make demo-cloud` | cloud-mode stock-quotes |
-| `make demo-cloud-parcels` | cloud-mode logistics/parcels |
-| `make demo-down` | tear down any running demo |
+Bring any scenario up with a single `make` target — **run from the repo root**
+(they reference `demo/…` paths); `make help` lists them. Each runs
+`docker compose … up --build -d` (**detached**) and prints the UI URL + the
+`logs -f` and stop commands.
+
+**All four use the same Kafka path** — ShadowTraffic produces over the Kafka
+protocol (KoP) and the multi-query app consumes via the Kafka SDK. They differ
+only on *scenario* (which data) and *mode* (where the broker runs):
+
+| Command | Runs | Scenario | Broker | Filters end-to-end? |
+|---|---|---|---|---|
+| `make demo-local` | `docker compose -f demo/docker-compose.local.yml up --build -d` | stock-quotes — 1 topic, 9 queries | laptop standalone | ❌ no — UI/topology only (KoP entry-format limit, see above) |
+| `make demo-local-parcels` | `… docker-compose.parcels.local.yml …` | parcels — 3 topics, 10 queries | laptop standalone | ❌ mostly no — only `__key__`/`__topic__` queries match locally |
+| `make demo-cloud` | `… docker-compose.yml …` | stock-quotes — 1 topic, 9 queries | SN Cloud | ✅ yes — real drop % |
+| `make demo-cloud-parcels` | `… docker-compose.parcels.yml …` | parcels — 3 topics, 10 queries (incl. multi-topic) | SN Cloud | ✅ yes — real drop %, fan-out across 3 topics |
+| `make demo-nars` | `gh release download $SELECTOR_REL … demo/local/nars` | — (fetches NARs; auto-run by the `demo-local*` targets) | — | — |
+| `make demo-down` | `docker compose … down -v` on all four files | — (stops/cleans whichever is up; safe if none) | — | — |
+
+Which to demo:
+- **`make demo-cloud`** — the canonical Kafka filtering demo: many queries on one topic, varied drop %, the intentional bad-selector diagnostic. Simplest to narrate.
+- **`make demo-cloud-parcels`** — richer: 3 source topics, multi-topic queries spanning all three, the orchestrator spawning several filters.
+- **`make demo-local*`** — fast, free iteration on the UI / queries / multi-query app, but the spawned filter won't forward (see the KoP limitation above); use cloud-mode to see real filtering.
+
+Stop / view logs (detached):
+
+```bash
+make demo-down                                              # stop + clean up any running stack
+docker compose -f demo/docker-compose.local.yml logs -f     # follow logs (swap in the file you started)
+```
 
 ## Running (local-mode)
 
@@ -162,23 +183,35 @@ Pulsar standalone takes ~30s to come up; orchestrator-deploy + bootstrap run in 
 
 ## Running (cloud-mode)
 
-Copy `.env.example` to `.env` and fill in your cluster details, and `license.env.example` to `license.env` for the ShadowTraffic license (both in `demo/`):
+Cloud-mode runs the broker + filtering on a real SN Cloud cluster — its KoP honors `kafkaEntryFormat=pulsar_non_batched`, so the spawned filters decode messages and you get **real end-to-end filtering** (unlike local-mode; see the limitation note above). The observability UI still runs locally on `:3200`; only the cluster is remote. **All commands below are from the repo root.**
+
+**1. Provision the SN Cloud cluster + orchestrator** — one-time, ~10–15 min (re-runs against an existing cluster take ~30s). See [`infra/README.md`](infra/README.md) for prerequisites (`terraform`, `snctl` logged in, `pulsar-admin`, and `terraform/streamnative-key.json` from the SN Cloud console):
 
 ```bash
-cp .env.example .env
-# edit .env: PULSAR_SERVICE_URL, KAFKA_USERNAME, PULSAR_TOKEN_PATH, etc.
-
-cp license.env.example license.env
-# edit license.env: paste in your six LICENSE_* values
+cd demo/infra/terraform
+export ORG=<your-sn-cloud-org-id>      # e.g. o-mj3r8
+export SELECTOR_REL=v1.0.0
+./recreate.sh                          # writes demo/.env for you (cluster, auth, topics)
+cd ../../..                            # back to repo root
 ```
 
-Both `.env` and `license.env` are gitignored.
+> On a brand-new instance, `recreate.sh` may stall at Phase 5 with *"Instance token not available yet … retrying"* — that's the SN Cloud fresh-instance client-grant gap. See **Troubleshooting** in [`infra/README.md`](infra/README.md#troubleshooting) for the one-line `PULSAR_TOKEN` fix.
 
-Then, from the repo root (after the cluster + orchestrator exist — see `infra/`):
+**2. Add the ShadowTraffic license.** `recreate.sh` already generated `demo/.env` (cluster URLs, SA principal, token path, and topic FQNs — all from terraform), so the only thing left is the license, which isn't derivable:
 
 ```bash
-make demo-cloud            # stock-quotes  (or: make demo-cloud-parcels)
+cp demo/license.env.example demo/license.env # add your six ShadowTraffic LICENSE_* values
 ```
+
+(If `demo/.env` already existed, recreate.sh wrote `demo/.env.generated` instead so it didn't clobber yours — review it and rename over `.env` to use it. Both files are gitignored.)
+
+**3. Bring up the runtime stack:**
+
+```bash
+make demo-cloud            # stock-quotes   (or: make demo-cloud-parcels)
+```
+
+**4. Tear down when done:** `make demo-down` stops the local containers; destroy the cluster (it bills while running) with `cd demo/infra/terraform && terraform destroy`.
 
 Within ~20 seconds:
 

@@ -63,10 +63,45 @@ export SELECTOR_REL=v1.0.0              # broker-side-filtering-function release
 
 Total runtime: ~10–15 minutes on a first run (cluster provisioning dominates).
 Re-runs against an existing cluster skip Phases 2–5 and complete in ~30 seconds.
-The script prints the .env values you'll need at the end.
+At the end the script **writes `../.env`** (i.e. `demo/.env`) for you, populated
+from terraform — cluster URLs, KoP bootstrap, SA principal, token path, and topic
+FQNs. (If `demo/.env` already exists it writes `demo/.env.generated` instead, so it
+never clobbers yours.) The only thing left to fill in is the ShadowTraffic license
+in `demo/license.env`.
 
 `export RESET=1 ./recreate.sh` redeploys the orchestrator function in-place
 without touching anything else.
+
+## Troubleshooting
+
+### Phase 5 stalls: `Instance token not available yet … retrying` (fresh instances)
+
+On a **brand-new instance**, Phase 5 (Terraform Step B) can get stuck in a retry loop:
+
+```
+! Instance token not available yet (attempt 1/30) — snctl auth get-token rejected
+  for stock-demo-instance; retrying in 60s… (… the client-grant may be missing …)
+```
+
+Step B needs an instance-scoped superuser JWT, which `recreate.sh` mints from
+`streamnative-key.json` by default. On a fresh instance that mint is rejected because
+the service account's Auth0 **client-grant for the instance hasn't been provisioned
+yet** — a known SN Cloud timing gap that Super Admin / role bindings don't fix.
+
+Don't wait out the ~30-min retry loop. Mint a token via the interactive `--login`
+flow (it authenticates as *your* user identity, sidestepping the missing
+client-grant) and re-run — `recreate.sh` is idempotent and resumes at Step B:
+
+```bash
+export ORG=<your-sn-cloud-org-id>        # same org as before
+export PULSAR_TOKEN=$(snctl -O "$ORG" auth get-token stock-demo-instance --login)
+# complete the browser auth, then:
+./recreate.sh
+```
+
+You should then see `✅ Using operator-supplied PULSAR_TOKEN (JWT extracted; key-file
+mint bypassed)` instead of the retry loop. `PULSAR_TOKEN` accepts either the full
+command output or just the `eyJ….….…` token line — the script extracts the JWT.
 
 ## What lives outside this directory
 

@@ -1,5 +1,7 @@
 # Never commit local config / secrets
 .env
+# .env.generated is written by infra/terraform/recreate.sh (cluster URLs + SA principal)
+.env.generated
 license.env
 
 # Token files dropped to disk by infra/terraform/recreate.sh during cloud-mode

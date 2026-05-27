@@ -63,22 +63,34 @@ demo-nars: ## Fetch the v1.0.0 orchestrator + filter NARs into demo/local/nars (
 	gh release download $(SELECTOR_REL) --repo $(SELECTOR_REPO) --dir demo/local/nars --pattern '*.nar'
 
 .PHONY: demo-local
-demo-local: demo-nars ## Local-mode stock-quotes demo (Pulsar standalone + observability UI on :3200)
-	docker compose -f demo/docker-compose.local.yml up --build
+demo-local: demo-nars ## Local-mode stock-quotes demo (detached; observability UI on :3200)
+	docker compose -f demo/docker-compose.local.yml up --build -d
+	@echo ""
+	@echo "✅ Started detached (~1-2 min to warm up). UI: http://localhost:3200"
+	@echo "   logs: docker compose -f demo/docker-compose.local.yml logs -f   |   stop: make demo-down"
 
 .PHONY: demo-local-parcels
-demo-local-parcels: demo-nars ## Local-mode logistics/parcels demo (3 source topics + observability UI)
-	docker compose -f demo/docker-compose.parcels.local.yml up --build
+demo-local-parcels: demo-nars ## Local-mode logistics/parcels demo (detached; 3 source topics + UI)
+	docker compose -f demo/docker-compose.parcels.local.yml up --build -d
+	@echo ""
+	@echo "✅ Started detached (~1-2 min to warm up). UI: http://localhost:3200"
+	@echo "   logs: docker compose -f demo/docker-compose.parcels.local.yml logs -f   |   stop: make demo-down"
 
 .PHONY: demo-cloud
-demo-cloud: ## Cloud-mode stock-quotes demo against SN Cloud (needs demo/.env + token; run recreate.sh first)
-	@[ -f demo/.env ] || { echo "ERROR: demo/.env not found — cp demo/.env.example demo/.env and fill it in" >&2; exit 1; }
-	docker compose -f demo/docker-compose.yml up --build
+demo-cloud: ## Cloud-mode stock-quotes demo against SN Cloud (detached; needs demo/.env + token)
+	@[ -f demo/.env ] || { echo "ERROR: demo/.env not found — run demo/infra/terraform/recreate.sh (it writes demo/.env)" >&2; exit 1; }
+	docker compose -f demo/docker-compose.yml up --build -d
+	@echo ""
+	@echo "✅ Started detached. UI: http://localhost:3200"
+	@echo "   logs: docker compose -f demo/docker-compose.yml logs -f   |   stop: make demo-down"
 
 .PHONY: demo-cloud-parcels
-demo-cloud-parcels: ## Cloud-mode logistics/parcels demo against SN Cloud (needs demo/.env + token)
-	@[ -f demo/.env ] || { echo "ERROR: demo/.env not found — cp demo/.env.example demo/.env and fill it in" >&2; exit 1; }
-	docker compose -f demo/docker-compose.parcels.yml up --build
+demo-cloud-parcels: ## Cloud-mode logistics/parcels demo against SN Cloud (detached; needs demo/.env + token)
+	@[ -f demo/.env ] || { echo "ERROR: demo/.env not found — run demo/infra/terraform/recreate.sh (it writes demo/.env)" >&2; exit 1; }
+	docker compose -f demo/docker-compose.parcels.yml up --build -d
+	@echo ""
+	@echo "✅ Started detached. UI: http://localhost:3200"
+	@echo "   logs: docker compose -f demo/docker-compose.parcels.yml logs -f   |   stop: make demo-down"
 
 .PHONY: demo-down
 demo-down: ## Tear down any running demo stack (all four compose files; safe if not up)
