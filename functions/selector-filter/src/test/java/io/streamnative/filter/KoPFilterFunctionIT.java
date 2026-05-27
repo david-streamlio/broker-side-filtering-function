@@ -53,8 +53,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <h2>Cross-version note</h2>
  *
- * The function NAR is built against {@code pulsar.version=4.0.10}; this IT runs against
- * {@code streamnative/sn-platform:4.2.0.6} (Pulsar 4.2). The Function SPI surfaces used here —
+ * The function NAR is built against {@code pulsar.version=4.2.1}; this IT runs against
+ * {@code streamnative/sn-platform:4.2.0.6} (same Pulsar 4.2 line). The Function SPI surfaces used here —
  * {@code Function}, {@code Context}, {@code Record.getMessage()}, {@code Message.getKeyBytes()},
  * {@code TableView.forEachAndListen} — are stable across 4.0 → 4.2.
  */

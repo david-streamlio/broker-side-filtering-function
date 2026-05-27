@@ -26,7 +26,7 @@
 #                     Get one as a Super Admin:
 #                       snctl -O $ORG auth get-token <cluster>-instance --login
 #   PULSAR_IMAGE      pulsar-admin Docker image for Phase 7 (default:
-#                     apachepulsar/pulsar:4.0.10). No host pulsar-admin needed.
+#                     apachepulsar/pulsar:4.2.1). No host pulsar-admin needed.
 #   PULSAR_CLUSTER    cluster name (default: stock-demo — matches variables.tf)
 #   RESET=1           undeploy the orchestrator before re-running Phase 7
 
@@ -43,7 +43,7 @@ elapsed() { local label="$1" start="$2"; printf "  ${BLUE}⏱${NC}  %s: %ds\n" "
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$TF_DIR"
 
-PULSAR_IMAGE="${PULSAR_IMAGE:-apachepulsar/pulsar:4.0.10}"
+PULSAR_IMAGE="${PULSAR_IMAGE:-apachepulsar/pulsar:4.2.1}"
 PULSAR_CLUSTER="${PULSAR_CLUSTER:-stock-demo}"
 SELECTOR_REPO="${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
 SELECTOR_REL="${SELECTOR_REL:-v1.0.0}"

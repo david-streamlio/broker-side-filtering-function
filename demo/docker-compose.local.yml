@@ -18,7 +18,7 @@
 
 services:
   pulsar:
-    image: streamnative/sn-platform:4.0.10.1
+    image: streamnative/sn-platform:4.2.0.6
     # streamnative/sn-platform doesn't ship a linux/arm64 manifest — force amd64
     # so Docker Desktop emulates it via Rosetta on Apple Silicon hosts. Slightly
     # slower startup (~10s extra) but otherwise transparent.
@@ -83,7 +83,7 @@ services:
   # standalone broker. Idempotent — re-running on an already-deployed cluster
   # skips the function-create step.
   orchestrator-deploy:
-    image: apachepulsar/pulsar:4.0.5
+    image: apachepulsar/pulsar:4.2.1
     container_name: stock-demo-orchestrator-deploy
     depends_on:
       pulsar:
@@ -109,7 +109,7 @@ services:
     entrypoint: ["/bin/bash", "/usr/local/bin/orchestrator-deploy.sh"]
 
   bootstrap:
-    image: apachepulsar/pulsar:4.0.5
+    image: apachepulsar/pulsar:4.2.1
     container_name: stock-demo-bootstrap
     restart: "no"
     depends_on:

@@ -85,7 +85,7 @@ class OrchestratorFunctionIT {
 
     @Container
     private static final PulsarContainer pulsar = new PulsarContainer(
-            DockerImageName.parse("apachepulsar/pulsar:4.0.10"))
+            DockerImageName.parse("apachepulsar/pulsar:4.2.1"))
             .withFunctionsWorker()
             .withStartupTimeout(java.time.Duration.ofMinutes(3));
 

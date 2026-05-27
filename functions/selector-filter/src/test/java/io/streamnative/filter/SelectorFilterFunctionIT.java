@@ -55,7 +55,7 @@ class SelectorFilterFunctionIT {
 
     @Container
     private static final PulsarContainer pulsar = new PulsarContainer(
-            DockerImageName.parse("apachepulsar/pulsar:4.0.10"))
+            DockerImageName.parse("apachepulsar/pulsar:4.2.1"))
             .withFunctionsWorker()
             .withCopyFileToContainer(MountableFile.forHostPath(NAR), NAR_DEST)
             .withStartupTimeout(java.time.Duration.ofMinutes(3));

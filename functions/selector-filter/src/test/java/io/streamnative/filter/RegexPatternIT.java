@@ -58,7 +58,7 @@ class RegexPatternIT {
 
     @Container
     private static final PulsarContainer pulsar = new PulsarContainer(
-            DockerImageName.parse("apachepulsar/pulsar:4.0.10"))
+            DockerImageName.parse("apachepulsar/pulsar:4.2.1"))
             .withFunctionsWorker()
             .withCopyFileToContainer(MountableFile.forHostPath(NAR), NAR_DEST)
             .withStartupTimeout(Duration.ofMinutes(3));
