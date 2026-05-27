@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Without a logback config, logback defaults the root logger to DEBUG, which
+  floods `docker compose logs` with Kafka / Pulsar / Netty client chatter.
+  Root is WARN here; the demo's own narration (query registration + per-query
+  drain summaries under io.streamnative.filter) stays at INFO so the useful
+  output still shows. Bump the whole thing up by setting -Droot.level=DEBUG
+  (or =ERROR for near-silence) via JAVA_OPTS.
+-->
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} -- %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Noisy third-party clients (Kafka, Pulsar, Netty) -> WARN and above only. -->
+  <root level="${root.level:-WARN}">
+    <appender-ref ref="STDOUT"/>
+  </root>
+
+  <!-- Keep the demo's own logs: "Registered '<query>' as queryId=…" + drain totals. -->
+  <logger name="io.streamnative.filter" level="INFO"/>
+</configuration>
