@@ -51,6 +51,39 @@ resource "pulsar_topic" "stock_quotes" {
   partitions = 1
 }
 
+# Parcels-demo source topics. Pre-created (rather than letting ShadowTraffic
+# auto-create them on first produce) so recreate.sh can set
+# kafkaEntryFormat=pulsar_non_batched on each topic deterministically. Without
+# the per-topic property, KoP keeps Kafka entries in the default batched
+# format and headers (carrier/origin_region/customer_tier/…) are not surfaced
+# as Pulsar message properties — every JMS selector then sees empty props,
+# evaluates to UNKNOWN, and zero messages match (the parcels-demo failure
+# mode observed 2026-05-28; namespace-default kafkaEntryFormat alone did not
+# propagate to the auto-created topics).
+resource "pulsar_topic" "parcel_shipments" {
+  tenant     = "public"
+  namespace  = "default"
+  topic_type = "persistent"
+  topic_name = "parcel-shipments"
+  partitions = 1
+}
+
+resource "pulsar_topic" "parcel_scans" {
+  tenant     = "public"
+  namespace  = "default"
+  topic_type = "persistent"
+  topic_name = "parcel-scans"
+  partitions = 1
+}
+
+resource "pulsar_topic" "parcel_exceptions" {
+  tenant     = "public"
+  namespace  = "default"
+  topic_type = "persistent"
+  topic_name = "parcel-exceptions"
+  partitions = 1
+}
+
 # Control topic — SDK-facing input topic for the orchestrator function.
 # multi-query-app publishes FilterRequest{REGISTER,MODIFY,UNREGISTER} records here;
 # the orchestrator routes them to per-input-topic selector-filter function instances.
