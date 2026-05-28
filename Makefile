@@ -105,5 +105,9 @@ demo-down: ## Tear down any running demo stack + UNREGISTER queries (graceful 30
 	-docker compose -f demo/docker-compose.parcels.yml down -v -t 30
 
 .PHONY: reset-demo-cloud
-reset-demo-cloud: ## Wipe spawned filters, old NAR packages, and demo topics on SN Cloud (destructive)
+# Depends on demo-down so shadowtraffic + multi-query-app are guaranteed-stopped
+# before topic deletion — otherwise the still-running producer would auto-recreate
+# the source topics (auto-topic-creation is on for public/default) the moment we
+# delete them, undoing the reset.
+reset-demo-cloud: demo-down ## Wipe spawned filters, old NAR packages, and demo topics on SN Cloud (destructive; auto-runs demo-down first)
 	bash demo/infra/terraform/reset-cloud.sh

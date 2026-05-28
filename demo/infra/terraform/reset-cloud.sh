@@ -4,7 +4,8 @@
 # (and the next `make demo-cloud[-parcels]`) starts from a clean baseline.
 #
 # WHAT IT DELETES (in $ORCHESTRATOR_TENANT/$ORCHESTRATOR_NAMESPACE unless noted):
-#   - spawned `selector-filter-*` functions (the orchestrator itself is KEPT)
+#   - the `orchestrator` function (recreate.sh RESET=1 redeploys it)
+#   - spawned `selector-filter-*` functions
 #   - every uploaded `selector-filter@<ver>` package version
 #   - demo data topics — source (public/default/stock-quotes + parcel-*),
 #     control (filter-requests), state (orchestrator-state)
@@ -12,7 +13,12 @@
 #
 # WHAT IT KEEPS:
 #   - the cluster, tenant, namespaces, SAs, role bindings, permission grants
-#   - the `orchestrator` function (recreate.sh RESET=1 redeploys it cleanly)
+#
+# The orchestrator is undeployed FIRST so it stops reading filter-requests and
+# writing orchestrator-state — otherwise it would auto-recreate those topics
+# (and possibly re-spawn filters) mid-reset. Local producers (shadowtraffic,
+# multi-query-app) must also be stopped first; the `make reset-demo-cloud`
+# target depends on `make demo-down` to guarantee that.
 #
 # After running, redeploy:
 #   1. SELECTOR_REL=v1.1.0 make demo-nars        # refresh the local NAR cache
@@ -94,8 +100,22 @@ _normalize_list() {
     printf '%s' "$1" | tr -d '[]",' | tr ' ' '\n' | sed '/^$/d'
 }
 
-# ── Step 1/3: spawned filter functions ────────────────────────────────────────
-section "Step 1/3 — Delete spawned selector-filter-* functions in $TENANT/$NS"
+# ── Step 1/4: undeploy the orchestrator ───────────────────────────────────────
+# Done first so the orchestrator stops reading filter-requests and writing
+# orchestrator-state — otherwise it would auto-recreate them mid-reset.
+section "Step 1/4 — Undeploy the orchestrator function ($ORCH_FN)"
+if PA functions status --tenant "$TENANT" --namespace "$NS" --name "$ORCH_FN" >/dev/null 2>&1; then
+    if PA functions delete --tenant "$TENANT" --namespace "$NS" --name "$ORCH_FN" >/dev/null 2>&1; then
+        ok "undeployed orchestrator: $TENANT/$NS/$ORCH_FN"
+    else
+        warn "could not undeploy $ORCH_FN (continuing — recreate.sh RESET=1 will retry)"
+    fi
+else
+    ok "orchestrator not running ($TENANT/$NS/$ORCH_FN) — nothing to undeploy"
+fi
+
+# ── Step 2/4: spawned filter functions ────────────────────────────────────────
+section "Step 2/4 — Delete spawned selector-filter-* functions in $TENANT/$NS"
 FN_OUT=$(PA functions list --tenant "$TENANT" --namespace "$NS" 2>&1 || true)
 FN_NAMES=$(_normalize_list "$FN_OUT")
 if [[ -z "$FN_NAMES" ]]; then
@@ -116,8 +136,8 @@ else
     done
 fi
 
-# ── Step 2/3: uploaded selector-filter package versions ──────────────────────
-section "Step 2/3 — Delete selector-filter package versions"
+# ── Step 3/4: uploaded selector-filter package versions ──────────────────────
+section "Step 3/4 — Delete selector-filter package versions"
 PKG_PATH="function://$TENANT/$NS/selector-filter"
 VERS_OUT=$(PA packages list-package-versions "$PKG_PATH" 2>&1 || true)
 VERS=$(_normalize_list "$VERS_OUT")
@@ -134,8 +154,8 @@ else
     done
 fi
 
-# ── Step 3/3: demo topics ─────────────────────────────────────────────────────
-section "Step 3/3 — Delete demo topics (recreated by bootstrap on next run)"
+# ── Step 4/4: demo topics ─────────────────────────────────────────────────────
+section "Step 4/4 — Delete demo topics (recreated by bootstrap on next run)"
 
 # Source topics — partitioned per bootstrap.sh; -f tolerates active producers/consumers.
 for t in \
