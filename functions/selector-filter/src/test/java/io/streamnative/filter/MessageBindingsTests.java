@@ -349,4 +349,122 @@ class MessageBindingsTests {
         assertThat(b.lookup("text-h")).isEqualTo("key");
         assertThat(b.lookup("bin-h")).isEqualTo("iA==");
     }
+
+    // ── JSON payload field tests ──────────────────────────────────────────────
+
+    private static byte[] json(String s) {
+        return s.getBytes(StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void jsonStringFieldIsResolved() {
+        byte[] payload = json("{\"side\":\"buy\",\"product_id\":\"BTC-USD\"}");
+        MessageBindings b = new MessageBindings("BTC", null, Map.of(), payload);
+        assertThat(b.lookup("side")).isEqualTo("buy");
+        assertThat(b.lookup("product_id")).isEqualTo("BTC-USD");
+    }
+
+    @Test
+    void jsonNumericFieldIsResolvedAsNumber() {
+        byte[] payload = json("{\"price\":77351.21,\"volume_24h\":5271.66}");
+        MessageBindings b = new MessageBindings("BTC", null, Map.of(), payload);
+        // Must be a Number so JMS numeric comparisons (price > 50000) work.
+        assertThat(b.lookup("price")).isInstanceOf(Number.class);
+        assertThat(((Number) b.lookup("price")).doubleValue()).isEqualTo(77351.21);
+    }
+
+    @Test
+    void jsonQuotedNumericStringIsCoercedToDouble() {
+        // Coinbase (and most financial APIs) encode prices as quoted decimals:
+        // "price":"77351.21" — the JSON type is string, but we coerce to Double (a
+        // standard JMS numeric type) so price > 50000 evaluates correctly.
+        byte[] payload = json("{\"price\":\"77351.21\",\"volume_24h\":\"5271.66\"}");
+        MessageBindings b = new MessageBindings("BTC", null, Map.of(), payload);
+        assertThat(b.lookup("price")).isInstanceOf(Double.class);
+        assertThat(((Number) b.lookup("price")).doubleValue()).isEqualTo(77351.21);
+    }
+
+    @Test
+    void jsonNonNumericStringStaysString() {
+        byte[] payload = json("{\"side\":\"buy\",\"product_id\":\"BTC-USD\"}");
+        MessageBindings b = new MessageBindings("BTC", null, Map.of(), payload);
+        assertThat(b.lookup("side")).isEqualTo("buy");
+        assertThat(b.lookup("product_id")).isEqualTo("BTC-USD");
+    }
+
+    @Test
+    void jsonBooleanFieldIsResolvedAsBoolean() {
+        byte[] payload = json("{\"active\":true}");
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        assertThat(b.lookup("active")).isEqualTo(Boolean.TRUE);
+    }
+
+    @Test
+    void jsonNullFieldReturnsNull() {
+        byte[] payload = json("{\"region\":null}");
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        assertThat(b.lookup("region")).isNull();
+    }
+
+    @Test
+    void absentJsonFieldReturnsNull() {
+        byte[] payload = json("{\"side\":\"buy\"}");
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        assertThat(b.lookup("price")).isNull();
+    }
+
+    @Test
+    void propertyTakesPrecedenceOverJsonField() {
+        // If both a property and a JSON field have the same name, the property wins.
+        byte[] payload = json("{\"side\":\"buy\"}");
+        MessageBindings b = new MessageBindings("k", null, Map.of("side", "sell"), payload);
+        assertThat(b.lookup("side")).isEqualTo("sell");
+    }
+
+    @Test
+    void noPayloadDoesNotBreakLookup() {
+        // Old constructor (no payload) must still return null for JSON-field names.
+        MessageBindings b = new MessageBindings("k", null, Map.of());
+        assertThat(b.lookup("price")).isNull();
+    }
+
+    @Test
+    void invalidJsonPayloadDoesNotThrow() {
+        byte[] payload = "not-json".getBytes(StandardCharsets.UTF_8);
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        assertThat(b.lookup("price")).isNull();
+    }
+
+    @Test
+    void jsonFieldSelectorEndToEnd() throws Exception {
+        // Realistic Coinbase shape: numeric values are quoted strings.
+        byte[] buy  = json("{\"side\":\"buy\",\"price\":\"77351.21\",\"volume_24h\":\"5000000\"}");
+        byte[] sell = json("{\"side\":\"sell\",\"price\":\"77351.21\",\"volume_24h\":\"5000000\"}");
+
+        SelectorEvaluator buyFilter   = SelectorEvaluator.compile("side = 'buy'");
+        SelectorEvaluator priceFilter = SelectorEvaluator.compile("price > 50000");
+        SelectorEvaluator combined    = SelectorEvaluator.compile("side = 'buy' AND price > 50000");
+
+        MessageBindings buyMsg  = new MessageBindings("BTC", null, Map.of(), buy);
+        MessageBindings sellMsg = new MessageBindings("BTC", null, Map.of(), sell);
+
+        assertThat(buyFilter.matches(buyMsg)).isTrue();
+        assertThat(buyFilter.matches(sellMsg)).isFalse();
+        assertThat(priceFilter.matches(buyMsg)).isTrue();
+        assertThat(priceFilter.matches(sellMsg)).isTrue();
+        assertThat(combined.matches(buyMsg)).isTrue();
+        assertThat(combined.matches(sellMsg)).isFalse();
+    }
+
+    @Test
+    void jsonInOperatorEndToEnd() throws Exception {
+        byte[] btc = json("{\"product_id\":\"BTC-USD\",\"price\":77000}");
+        byte[] ada = json("{\"product_id\":\"ADA-USD\",\"price\":0.45}");
+
+        SelectorEvaluator topCoins = SelectorEvaluator.compile(
+                "product_id IN ('BTC-USD', 'ETH-USD', 'SOL-USD')");
+
+        assertThat(topCoins.matches(new MessageBindings("BTC", null, Map.of(), btc))).isTrue();
+        assertThat(topCoins.matches(new MessageBindings("ADA", null, Map.of(), ada))).isFalse();
+    }
 }
