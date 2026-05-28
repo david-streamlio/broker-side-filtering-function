@@ -75,6 +75,15 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
      */
     static final String METRIC_PROCESSING_TIME_MS = "filter.processing.time.ms";
 
+    // Latency metrics: running sums + counts so the observability can compute
+    // avg latency as delta(sum)/delta(count) over any polling window.
+    // "publish" = Pulsar broker received the source message (broker-side filter latency).
+    // "event"   = original Kafka/producer timestamp on the message (true E2E including bridge).
+    static final String METRIC_LATENCY_PUBLISH_MS_SUM   = "filter.latency.publish_ms_sum";
+    static final String METRIC_LATENCY_PUBLISH_MS_COUNT = "filter.latency.publish_ms_count";
+    static final String METRIC_LATENCY_EVENT_MS_SUM     = "filter.latency.event_ms_sum";
+    static final String METRIC_LATENCY_EVENT_MS_COUNT   = "filter.latency.event_ms_count";
+
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
@@ -86,6 +95,11 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     private final AtomicInteger pendingSends = new AtomicInteger();
     /** Epoch-ms of the last heartbeat log emission. */
     private final AtomicLong lastHeartbeatMs = new AtomicLong(0);
+
+    private final AtomicLong latencyPublishMsSum   = new AtomicLong();
+    private final AtomicLong latencyPublishMsCount = new AtomicLong();
+    private final AtomicLong latencyEventMsSum     = new AtomicLong();
+    private final AtomicLong latencyEventMsCount   = new AtomicLong();
 
     private volatile TableView<byte[]> controlTopicView;
     private volatile Context boundContext;
@@ -140,7 +154,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
             return ackAsDropped(ctx, record, payloadBytes, startNanos);
         }
 
-        MessageBindings bindings = MessageBindings.from(record);
+        MessageBindings bindings = MessageBindings.from(record, payload);
         final String msgKey = bindings.getKey();
 
         List<CompletableFuture<?>> sends = new ArrayList<>();
@@ -201,6 +215,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                         ctx.recordMetric(METRIC_MESSAGES_MATCHED, 1.0);
                         ctx.recordMetric(METRIC_MESSAGES_OUT, fanout);
                         ctx.recordMetric(METRIC_BYTES_OUT, (double) payloadBytes * fanout);
+                        recordMatchLatency(ctx, record);
                         long c = filteredCount.addAndGet(fanout);
                         if (c % LOG_FREQUENCY < fanout) {
                             LOG.info("Filtered {} messages (in={} dropped={} active-queries={})",
@@ -237,6 +252,38 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         record.ack();
         recordProcessingTime(ctx, startNanos);
         return CompletableFuture.completedFuture(null);
+    }
+
+    /**
+     * Records broker-to-forward and event-to-forward latency for a matched message.
+     * Both use running sums + counts so the observability can compute averages over any window.
+     *
+     * <p>"Publish time" = when the Pulsar broker received the source message (set by the broker).
+     * "Event time" = the original Kafka/producer timestamp (set by the KoP bridge from the Kafka timestamp).
+     * Either can be 0 if not available; those messages are skipped for that metric.
+     */
+    private void recordMatchLatency(Context ctx, Record<?> record) {
+        record.getMessage().ifPresent(msg -> {
+            long now = System.currentTimeMillis();
+
+            long pt = msg.getPublishTime();
+            if (pt > 0) {
+                long latMs = now - pt;
+                if (latMs >= 0) {
+                    ctx.recordMetric(METRIC_LATENCY_PUBLISH_MS_SUM,   (double) latencyPublishMsSum.addAndGet(latMs));
+                    ctx.recordMetric(METRIC_LATENCY_PUBLISH_MS_COUNT, (double) latencyPublishMsCount.incrementAndGet());
+                }
+            }
+
+            long et = msg.getEventTime();
+            if (et > 0) {
+                long latMs = now - et;
+                if (latMs >= 0) {
+                    ctx.recordMetric(METRIC_LATENCY_EVENT_MS_SUM,   (double) latencyEventMsSum.addAndGet(latMs));
+                    ctx.recordMetric(METRIC_LATENCY_EVENT_MS_COUNT, (double) latencyEventMsCount.incrementAndGet());
+                }
+            }
+        });
     }
 
     /**

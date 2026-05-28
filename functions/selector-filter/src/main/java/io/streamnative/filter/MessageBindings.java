@@ -65,6 +65,7 @@ public final class MessageBindings {
     private final Supplier<String> keySupplier;
     private final Supplier<String> topicSupplier;
     private final Supplier<Map<String, String>> propertiesSupplier;
+    private final Supplier<byte[]> payloadSupplier;
 
     private String key;
     private boolean keyResolved;
@@ -73,6 +74,10 @@ public final class MessageBindings {
     private Map<String, String> properties;
     private boolean propertiesResolved;
 
+    // Lazily-parsed JSON payload — used when a selector references a field not found in properties.
+    private JsonNode payloadJson;
+    private boolean payloadResolved;
+
     // Lazily-built base64-decode state. The format-parse runs at most once per record; the cache
     // is populated on demand and holds one entry per base64-flagged property that has been looked
     // up so far (decoded or raw fallback).
@@ -80,28 +85,51 @@ public final class MessageBindings {
     private Set<String> base64FlaggedNames;
     private Map<String, String> decodedCache;
 
+    /** Test constructor — no payload; only key/topic/properties are bound. */
     public MessageBindings(String key, String topic, Map<String, String> properties) {
         this.keySupplier        = () -> key;
         this.topicSupplier      = () -> topic;
         this.propertiesSupplier = () -> properties == null ? Map.of() : properties;
+        this.payloadSupplier    = null;
+    }
+
+    /** Test constructor — includes raw payload bytes for JSON-field selectors. */
+    public MessageBindings(String key, String topic, Map<String, String> properties, byte[] payload) {
+        this.keySupplier        = () -> key;
+        this.topicSupplier      = () -> topic;
+        this.propertiesSupplier = () -> properties == null ? Map.of() : properties;
+        this.payloadSupplier    = () -> payload;
     }
 
     private MessageBindings(Supplier<String> keySupplier,
                             Supplier<String> topicSupplier,
-                            Supplier<Map<String, String>> propertiesSupplier) {
+                            Supplier<Map<String, String>> propertiesSupplier,
+                            Supplier<byte[]> payloadSupplier) {
         this.keySupplier        = keySupplier;
         this.topicSupplier      = topicSupplier;
         this.propertiesSupplier = propertiesSupplier;
+        this.payloadSupplier    = payloadSupplier;
     }
 
-    public static MessageBindings from(Record<?> record) {
+    /**
+     * Creates bindings for a live Pulsar record. The payload is passed explicitly so the
+     * function can resolve JSON fields (e.g. {@code side = 'buy'}, {@code price > 50000})
+     * when properties are empty — as is the case for KoP-bridged Coinbase messages.
+     */
+    public static MessageBindings from(Record<?> record, byte[] payload) {
         return new MessageBindings(
                 () -> resolveLogicalKey(record),
                 () -> TopicNames.normalize(record.getTopicName().orElse(null)),
                 () -> {
                     Map<String, String> p = record.getProperties();
                     return p == null ? Map.of() : p;
-                });
+                },
+                () -> payload);
+    }
+
+    /** Backward-compatible overload — no payload; JSON-field selectors will not match. */
+    public static MessageBindings from(Record<?> record) {
+        return from(record, null);
     }
 
     /**
@@ -162,13 +190,64 @@ public final class MessageBindings {
         }
         Map<String, String> props = getProperties();
         String raw = props.get(name);
-        if (raw == null) {
+        if (raw != null) {
+            if (isBase64Flagged(name, props)) {
+                return decodedOrRaw(name, raw);
+            }
+            return raw;
+        }
+        // Properties did not contain the name — fall through to JSON payload fields.
+        // This allows selectors like `side = 'buy'` or `price > 50000` to work against
+        // messages (e.g. KoP-bridged Coinbase tickers) whose payload is JSON but whose
+        // Pulsar properties map is empty.
+        return getJsonField(name);
+    }
+
+    /**
+     * Lazily parses the payload as a JSON object and returns the named field's value.
+     * Returns {@link Number} for numeric nodes (enabling JMS numeric comparisons like
+     * {@code price > 50000}), {@link Boolean} for boolean nodes, {@link String} otherwise.
+     * Returns {@code null} when the payload is absent, not a JSON object, or does not
+     * contain the field.
+     *
+     * <p>Many financial APIs (including Coinbase) encode prices and volumes as quoted
+     * decimals: {@code "price":"77351.21"}. This method coerces such strings to
+     * {@link Double} so numeric comparisons work correctly.
+     */
+    private Object getJsonField(String name) {
+        if (!payloadResolved) {
+            payloadResolved = true;
+            if (payloadSupplier != null) {
+                byte[] bytes = payloadSupplier.get();
+                if (bytes != null && bytes.length > 0) {
+                    try {
+                        JsonNode root = MAPPER.readTree(bytes);
+                        payloadJson = (root != null && root.isObject()) ? root : null;
+                    } catch (Exception e) {
+                        LOG.debug("Payload is not valid JSON — JSON-field selectors will not match: {}", e.toString());
+                    }
+                }
+            }
+        }
+        if (payloadJson == null) {
             return null;
         }
-        if (isBase64Flagged(name, props)) {
-            return decodedOrRaw(name, raw);
+        JsonNode node = payloadJson.get(name);
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return null;
         }
-        return raw;
+        if (node.isNumber()) {
+            return node.numberValue();
+        }
+        if (node.isBoolean()) {
+            return node.booleanValue();
+        }
+        String text = node.asText();
+        try {
+            return Double.parseDouble(text);
+        } catch (NumberFormatException ignored) {
+            return text;
+        }
     }
 
     /**
@@ -279,5 +358,10 @@ public final class MessageBindings {
     /** Test/observability hook: true iff the key binding has been resolved. */
     public boolean keyResolved() {
         return keyResolved;
+    }
+
+    /** Test/observability hook: true iff the JSON payload has been parsed (or attempted). */
+    public boolean payloadResolved() {
+        return payloadResolved;
     }
 }
