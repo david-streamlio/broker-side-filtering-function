@@ -20,6 +20,12 @@
 # multi-query-app) must also be stopped first; the `make reset-demo-cloud`
 # target depends on `make demo-down` to guarantee that.
 #
+# After deleting topics, the script also `terraform state rm`s the topic and
+# permission-grant resources so the next `recreate.sh` Step B sees a clean
+# state and CREATEs them fresh, instead of trying to UPDATE a topic that no
+# longer exists (which fails with ERROR_UPDATE_TOPIC_PARTITIONS) or hitting a
+# 409 "topic already exists" against state it doesn't know about.
+#
 # After running, redeploy:
 #   1. SELECTOR_REL=v1.1.0 make demo-nars        # refresh the local NAR cache
 #   2. cd demo/infra/terraform && SELECTOR_REL=v1.1.0 RESET=1 ./recreate.sh
@@ -101,10 +107,10 @@ _normalize_list() {
     printf '%s' "$1" | tr -d '[]",' | tr ' ' '\n' | sed '/^$/d'
 }
 
-# ── Step 1/4: undeploy the orchestrator ───────────────────────────────────────
+# ── Step 1/5: undeploy the orchestrator ───────────────────────────────────────
 # Done first so the orchestrator stops reading filter-requests and writing
 # orchestrator-state — otherwise it would auto-recreate them mid-reset.
-section "Step 1/4 — Undeploy the orchestrator function ($ORCH_FN)"
+section "Step 1/5 — Undeploy the orchestrator function ($ORCH_FN)"
 if PA functions status --tenant "$TENANT" --namespace "$NS" --name "$ORCH_FN" >/dev/null 2>&1; then
     if PA functions delete --tenant "$TENANT" --namespace "$NS" --name "$ORCH_FN" >/dev/null 2>&1; then
         ok "undeployed orchestrator: $TENANT/$NS/$ORCH_FN"
@@ -115,8 +121,8 @@ else
     ok "orchestrator not running ($TENANT/$NS/$ORCH_FN) — nothing to undeploy"
 fi
 
-# ── Step 2/4: spawned filter functions ────────────────────────────────────────
-section "Step 2/4 — Delete spawned selector-filter-* functions in $TENANT/$NS"
+# ── Step 2/5: spawned filter functions ────────────────────────────────────────
+section "Step 2/5 — Delete spawned selector-filter-* functions in $TENANT/$NS"
 FN_OUT=$(PA functions list --tenant "$TENANT" --namespace "$NS" 2>&1 || true)
 FN_NAMES=$(_normalize_list "$FN_OUT")
 if [[ -z "$FN_NAMES" ]]; then
@@ -137,8 +143,8 @@ else
     done
 fi
 
-# ── Step 3/4: uploaded selector-filter package versions ──────────────────────
-section "Step 3/4 — Delete selector-filter package versions"
+# ── Step 3/5: uploaded selector-filter package versions ──────────────────────
+section "Step 3/5 — Delete selector-filter package versions"
 PKG_PATH="function://$TENANT/$NS/selector-filter"
 VERS_OUT=$(PA packages list-package-versions "$PKG_PATH" 2>&1 || true)
 VERS=$(_normalize_list "$VERS_OUT")
@@ -155,8 +161,8 @@ else
     done
 fi
 
-# ── Step 4/4: demo topics ─────────────────────────────────────────────────────
-section "Step 4/4 — Delete demo topics (recreated by bootstrap on next run)"
+# ── Step 4/5: demo topics ─────────────────────────────────────────────────────
+section "Step 4/5 — Delete demo topics (recreated by bootstrap on next run)"
 
 # Source topics — partitioned per bootstrap.sh; -f tolerates active producers/consumers.
 for t in \
@@ -195,6 +201,48 @@ if [[ -n "$PRIV_TOPICS" ]]; then
     done
 else
     ok "no filtered-* private topics to delete"
+fi
+
+# ── Step 5/5: clear terraform state for the just-deleted resources ───────────
+# Without this, the next `recreate.sh` Step B sees stale state and either:
+#   - tries to UPDATE a topic that no longer exists → ERROR_UPDATE_TOPIC_PARTITIONS
+#   - half-applies, leaves orphans on the cluster, then on retry CREATEs into
+#     existing topics → 409 "topic already exists"
+# Same list `recreate.sh` Phase 4 clears when it detects no cluster. Tenant +
+# namespace are NOT removed (they still exist on the cluster).
+section "Step 5/5 — Clear Terraform state for deleted topic + grant resources"
+if ! command -v terraform >/dev/null 2>&1; then
+    warn "terraform not found on PATH — skipping state cleanup. The next recreate.sh may fail with stale-state errors; clear manually with: cd $TF_DIR && terraform state rm <resource>"
+elif [[ ! -f "$TF_DIR/terraform.tfstate" && ! -f "$TF_DIR/.terraform/terraform.tfstate" ]]; then
+    ok "no terraform state file present — nothing to clean"
+else
+    TF_RESOURCES=(
+        pulsar_topic.stock_quotes
+        pulsar_topic.filter_requests
+        pulsar_topic.orchestrator_state
+        pulsar_permission_grant.app_public_default
+        pulsar_permission_grant.app_filter_requests
+        pulsar_permission_grant.orchestrator_filter_deploy
+        pulsar_permission_grant.orchestrator_consume_control
+        pulsar_permission_grant.orchestrator_state_consume
+        pulsar_permission_grant.orchestrator_state_produce
+        pulsar_permission_grant.orchestrator_consume_source
+        pulsar_permission_grant.orchestrator_produce_output
+    )
+    # Intersect with what's actually in state so we don't `state rm` missing
+    # resources (which exits non-zero and would abort under `set -e`).
+    IN_STATE=$(cd "$TF_DIR" && terraform state list 2>/dev/null || true)
+    for r in "${TF_RESOURCES[@]}"; do
+        if printf '%s\n' "$IN_STATE" | grep -qxF "$r"; then
+            if (cd "$TF_DIR" && terraform state rm "$r" >/dev/null 2>&1); then
+                ok "removed from state: $r"
+            else
+                warn "could not remove from state: $r (continuing)"
+            fi
+        else
+            ok "not in state, skipping: $r"
+        fi
+    done
 fi
 
 echo
