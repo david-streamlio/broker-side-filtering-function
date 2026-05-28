@@ -218,6 +218,9 @@ elif [[ ! -f "$TF_DIR/terraform.tfstate" && ! -f "$TF_DIR/.terraform/terraform.t
 else
     TF_RESOURCES=(
         pulsar_topic.stock_quotes
+        pulsar_topic.parcel_shipments
+        pulsar_topic.parcel_scans
+        pulsar_topic.parcel_exceptions
         pulsar_topic.filter_requests
         pulsar_topic.orchestrator_state
         pulsar_permission_grant.app_public_default

@@ -275,17 +275,21 @@ pa() {
 # Phase 5 (operator --login or the provisioning key). Use it for those ops.
 
 # Set kafkaEntryFormat=pulsar_non_batched as the namespace default on public/default
-# so spawned filter functions can decode Kafka-produced records, AND on the
-# stock-quotes source topic so ShadowTraffic's Kafka producer entries are
-# parseable by the broker-side filter.
-echo "  Setting kafkaEntryFormat=pulsar_non_batched on persistent://public/default/stock-quotes…"
-curl -sf -X PUT \
-  -H "Authorization: Bearer $TF_VAR_pulsar_token" \
-  -H "Content-Type: application/json" \
-  -d '{"kafkaEntryFormat":"pulsar_non_batched"}' \
-  "$ADMIN_URL/admin/v2/persistent/public/default/stock-quotes/properties" \
-  && ok "kafkaEntryFormat set on source topic" \
-  || warn "Could not set kafkaEntryFormat (may already be set)"
+# AND on every source topic in TF, so ShadowTraffic's Kafka producer entries are
+# parseable by the broker-side filter. Per-topic is required (not just namespace
+# default) — KoP's namespace-default propagation isn't reliable for auto-created
+# topics, and the per-topic property is the deterministic switch (verified
+# 2026-05-28 against the parcels demo).
+for t in stock-quotes parcel-shipments parcel-scans parcel-exceptions; do
+  echo "  Setting kafkaEntryFormat=pulsar_non_batched on persistent://public/default/$t…"
+  curl -sf -X PUT \
+    -H "Authorization: Bearer $TF_VAR_pulsar_token" \
+    -H "Content-Type: application/json" \
+    -d '{"kafkaEntryFormat":"pulsar_non_batched"}' \
+    "$ADMIN_URL/admin/v2/persistent/public/default/$t/properties" \
+    && ok "kafkaEntryFormat set on $t" \
+    || warn "Could not set kafkaEntryFormat on $t (may already be set)"
+done
 
 echo "  Setting namespace-default kafkaEntryFormat on public/default…"
 PA_AUTH_TOKEN="$TF_VAR_pulsar_token" pa namespaces set-property \
