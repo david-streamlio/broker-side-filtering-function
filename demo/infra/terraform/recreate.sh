@@ -92,7 +92,7 @@ if [[ "$CLUSTER_UP" == "false" ]]; then
   section "Phase 2 — Terraform Step A (instance, cluster, SAs, apikeys)"
   PHASE2_START=$(date +%s)
 
-  echo "  Running terraform init…"
+  echo "  Running terraform init..."
   terraform init -input=false 2>&1 | tail -5 || fail "terraform init failed"
 
   TF_TARGETS=(
@@ -117,7 +117,7 @@ if [[ "$CLUSTER_UP" == "false" ]]; then
   # what actually waits out provisioning. 30 attempts * 60s = ~30 min ceiling.
   attempt=1
   until terraform apply -auto-approve "${TF_TARGETS[@]}" 2>&1; do
-    warn "Instance/cluster still provisioning (attempt $attempt/30) — retrying in 60s…"
+    warn "Instance/cluster still provisioning (attempt $attempt/30) — retrying in 60s..."
     attempt=$(( attempt + 1 ))
     [[ $attempt -gt 30 ]] && fail "Instance/cluster not queryable after 30 attempts (~30 min) — check the SN Cloud console for the stock-demo instance state"
     sleep 60
@@ -204,7 +204,7 @@ export TF_VAR_pulsar_web_service_url="$ADMIN_URL"
 #      Admin status, by the service-account/cluster binding, or by anything
 #      in this script — a brand-new instance simply has no grant for this
 #      client, so the key-file mint returns "client is not authorized to
-#      access resource server … create a client-grant". The fix that works
+#      access resource server ... create a client-grant". The fix that works
 #      without that grant: mint interactively as a Super Admin through
 #      snctl's own first-party client —
 #        export PULSAR_TOKEN=$(snctl -O $ORG auth get-token $INSTANCE_NAME --login)
@@ -216,11 +216,11 @@ export TF_VAR_pulsar_web_service_url="$ADMIN_URL"
 if [[ -n "${PULSAR_TOKEN:-}" ]]; then
   # `snctl auth get-token --login` interleaves a browser-launch banner with
   # the token on stdout (only a still-cached session emits the bare token),
-  # so $(…) capture is usually banner + token. Extract the JWT defensively
+  # so $(...) capture is usually banner + token. Extract the JWT defensively
   # rather than requiring PULSAR_TOKEN to *start* with eyJ — three
   # base64url segments separated by dots; take the last match.
   PT=$(printf '%s' "$PULSAR_TOKEN" | grep -oE 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' | tail -1)
-  [[ -n "$PT" ]] || fail "PULSAR_TOKEN is set but no JWT (eyJ….….…) found in it. Mint with: snctl -O $ORG auth get-token $INSTANCE_NAME --login (complete the browser auth; pass the whole output or just the token line)"
+  [[ -n "$PT" ]] || fail "PULSAR_TOKEN is set but no JWT (eyJ...........) found in it. Mint with: snctl -O $ORG auth get-token $INSTANCE_NAME --login (complete the browser auth; pass the whole output or just the token line)"
   ok "Using operator-supplied PULSAR_TOKEN (JWT extracted; key-file mint bypassed)"
   export TF_VAR_pulsar_token="$PT"
 else
@@ -228,7 +228,7 @@ else
   until PT=$(snctl -O "$ORG" auth get-token "$INSTANCE_NAME" \
           --key-file "$TF_DIR/streamnative-key.json" 2>/dev/null) \
         && [[ "$PT" == eyJ* ]]; do
-    warn "Instance token not available yet (attempt $attempt/30) — snctl auth get-token rejected for $INSTANCE_NAME; retrying in 60s… (if this is a brand-new instance the client-grant may be missing — see PULSAR_TOKEN override above)"
+    warn "Instance token not available yet (attempt $attempt/30) — snctl auth get-token rejected for $INSTANCE_NAME; retrying in 60s... (if this is a brand-new instance the client-grant may be missing — see PULSAR_TOKEN override above)"
     attempt=$(( attempt + 1 ))
     [[ $attempt -gt 30 ]] && fail "Could not mint a Pulsar token for $INSTANCE_NAME after 30 attempts (~30 min). Likely a missing Auth0 client-grant for this SA's client on the instance. Bypass with: export PULSAR_TOKEN=\$(snctl -O $ORG auth get-token $INSTANCE_NAME --login) and re-run."
     sleep 60
@@ -281,7 +281,7 @@ pa() {
 # topics, and the per-topic property is the deterministic switch (verified
 # 2026-05-28 against the parcels demo).
 for t in stock-quotes parcel-shipments parcel-scans parcel-exceptions; do
-  echo "  Setting kafkaEntryFormat=pulsar_non_batched on persistent://public/default/$t…"
+  echo "  Setting kafkaEntryFormat=pulsar_non_batched on persistent://public/default/$t..."
   curl -sf -X PUT \
     -H "Authorization: Bearer $TF_VAR_pulsar_token" \
     -H "Content-Type: application/json" \
@@ -291,7 +291,7 @@ for t in stock-quotes parcel-shipments parcel-scans parcel-exceptions; do
     || warn "Could not set kafkaEntryFormat on $t (may already be set)"
 done
 
-echo "  Setting namespace-default kafkaEntryFormat on public/default…"
+echo "  Setting namespace-default kafkaEntryFormat on public/default..."
 PA_AUTH_TOKEN="$TF_VAR_pulsar_token" pa namespaces set-property \
   --key kafkaEntryFormat --value pulsar_non_batched public/default \
   && ok "Namespace property set" \
@@ -320,7 +320,7 @@ if [[ -f "$HOST_ORCH" && -f "$HOST_FILT" ]]; then
   cp "$HOST_ORCH" "$ORCH_NAR"
   cp "$HOST_FILT" "$FILT_NAR"
 else
-  echo "  Host NARs not found at $HOST_NARS — falling back to direct download (public repo only)…"
+  echo "  Host NARs not found at $HOST_NARS — falling back to direct download (public repo only)..."
   curl -sfL -o "$ORCH_NAR" \
     "https://github.com/${SELECTOR_REPO}/releases/download/${SELECTOR_REL}/selector-filter-orchestrator-${SF_VER}.nar" \
     || fail "Failed to download orchestrator NAR. For a private repo, pre-download with: gh release download ${SELECTOR_REL} --repo ${SELECTOR_REPO} --dir demo/local/nars --pattern '*.nar'"
@@ -333,7 +333,7 @@ ok "NARs ready"
 # Upload selector-filter NAR as a Pulsar package — the orchestrator spawns
 # instances of this function on demand by referencing the package URL.
 PKG_URL="function://stock-demo/filtering/selector-filter@${SF_VER}"
-echo "  Uploading selector-filter as Pulsar package ${PKG_URL}…"
+echo "  Uploading selector-filter as Pulsar package ${PKG_URL}..."
 pa packages upload "$PKG_URL" \
   --path "$FILT_NAR" \
   --description "selector-filter ${SELECTOR_REL}" \
