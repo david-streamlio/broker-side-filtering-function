@@ -110,6 +110,10 @@ class OrchestratorIdleFilterGcIT {
         client = PulsarClient.builder().serviceUrl(pulsar.getPulsarBrokerUrl()).build();
         admin  = PulsarAdmin.builder().serviceHttpUrl(pulsar.getHttpServiceUrl()).build();
 
+        // The Pulsar 4.2 image opens its admin port before the broker finishes provisioning
+        // public/default, so creating topics immediately can fail with "Namespace not found".
+        awaitDefaultNamespace();
+
         admin.topics().createNonPartitionedTopic(SDK_INPUT_TOPIC);
         admin.topics().createNonPartitionedTopic(ORCH_STATE_TOPIC);
         admin.topics().createNonPartitionedTopic(INPUT_GC);
@@ -517,6 +521,24 @@ class OrchestratorIdleFilterGcIT {
             Thread.sleep(500);
         }
         throw new IllegalStateException("Function did not reach RUNNING within " + timeoutMs + " ms: " + name);
+    }
+
+    /**
+     * Poll until {@code public/default} is provisioned. The 4.2 testcontainer's admin port
+     * comes up before the broker finishes bootstrapping the default namespace.
+     */
+    private void awaitDefaultNamespace() throws InterruptedException {
+        for (int i = 0; i < 60; i++) {
+            try {
+                if (admin.namespaces().getNamespaces("public").contains("public/default")) {
+                    return;
+                }
+            } catch (PulsarAdminException e) {
+                // admin not fully ready yet — keep polling
+            }
+            TimeUnit.SECONDS.sleep(1);
+        }
+        throw new IllegalStateException("public/default namespace not available after 60s");
     }
 
     private static Path findFilterNar() {
