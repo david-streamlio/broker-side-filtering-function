@@ -284,10 +284,12 @@ A `--kill-after=30s` flag on `multi-query-app` will be added in a follow-up to r
 ## Cleanup
 
 ```bash
-docker compose down
+make demo-down
 ```
 
-The SDK fires UNREGISTER for every queryId on SIGTERM, so the orchestrator tombstones the matching registry entries within ~1 sweep interval. Verify with `snctl pulsar admin topics list <tenant>/<filtering-ns>` — `filtered-*` topics should disappear shortly after.
+`make demo-down` runs `docker compose down -v -t 30` across all four compose files. The **`-t 30`** matters: on SIGTERM, multi-query-app's shutdown hook closes its consumers, which makes the SDK send **UNREGISTER** for every queryId — the orchestrator then tombstones those queries and GCs the spawned `filtered-*` filter functions on the cluster. Docker's default 10s grace can SIGKILL mid-UNREGISTER and leave **orphaned filters running on the broker**; the longer grace lets the UNREGISTER land (the cloud orchestrator finishes the GC even after the local containers are gone).
+
+Verify with `snctl pulsar admin topics list <tenant>/<filtering-ns>` — `filtered-*` topics should disappear shortly after. (Filters orphaned by an earlier hard kill won't have been unregistered — clear those by re-registering + cleanly stopping, or delete the `selector-filter-*` functions directly via `pulsar-admin functions delete`.)
 
 ## Related
 
