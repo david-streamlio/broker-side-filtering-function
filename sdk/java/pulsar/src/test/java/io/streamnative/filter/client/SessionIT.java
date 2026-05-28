@@ -396,7 +396,11 @@ class SessionIT {
                 n.startsWith("selector-filter-orchestrator-") && n.endsWith(".nar"));
         if (files == null || files.length == 0) {
             throw new IllegalStateException(
-                    "Orchestrator NAR not found in " + target + ". Run 'mvn -pl functions/orchestrator package' first.");
+                    "Orchestrator NAR not found in " + target + ". The orchestrator module builds"
+                    + " AFTER this one in the reactor (it depends on selector-filter-client), so a"
+                    + " single 'mvn verify' won't have produced it yet. Build all NARs first:"
+                    + " 'mvn -DskipTests package' then 'mvn verify' (or 'mvn -pl functions/orchestrator"
+                    + " package' before running this IT in isolation).");
         }
         return files[0].toPath();
     }

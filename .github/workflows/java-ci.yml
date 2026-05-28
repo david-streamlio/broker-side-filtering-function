@@ -67,5 +67,13 @@ jobs:
           java-version: '17'
           cache: maven
 
+      # Build every module's artifacts first (no clean between steps). Some ITs
+      # reference a sibling module's NAR output — notably SessionIT (in the SDK
+      # module) deploys the orchestrator NAR, but the orchestrator depends on the
+      # SDK so it builds *after* it in the reactor. Packaging up front leaves all
+      # NARs in their target/ dirs so the failsafe phase can find them.
+      - name: Build all module artifacts (NARs)
+        run: mvn -B -DskipTests package
+
       - name: Run integration tests
-        run: mvn -B verify
+        run: mvn -B verify -Dsurefire.skip=true
