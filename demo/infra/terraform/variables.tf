@@ -24,9 +24,27 @@ variable "location" {
 }
 
 variable "tenant" {
-  description = "Pulsar tenant for the demo's filtering namespace (orchestrator state + control topics)"
+  description = "Pulsar tenant for the stock-demo SDK client (admin_roles=[stock-demo-app]). Cosmetic project organization; data topics live in public/default, control plane lives in control-plane/broker-filter."
   type        = string
   default     = "stock-demo"
+}
+
+variable "parcel_tenant" {
+  description = "Pulsar tenant for the parcels-demo SDK client (admin_roles=[parcel-demo-app]). Parallel to var.tenant — both are cosmetic; data topics still live in public/default, control plane still lives in control-plane/broker-filter."
+  type        = string
+  default     = "parcel-demo"
+}
+
+variable "control_plane_tenant" {
+  description = "Pulsar tenant that owns the filtering control plane (orchestrator, filter-requests, orchestrator-state, spawned filter functions, selector-filter package). Locked down — only the orchestrator-function SA is in admin_roles."
+  type        = string
+  default     = "control-plane"
+}
+
+variable "control_plane_namespace" {
+  description = "Pulsar namespace under control_plane_tenant. The orchestrator function and its spawned children, plus the SDK-facing filter-requests + orchestrator-state topics, all live here."
+  type        = string
+  default     = "broker-filter"
 }
 
 variable "pulsar_web_service_url" {

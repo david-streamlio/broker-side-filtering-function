@@ -10,6 +10,14 @@ resource "streamnative_apikey" "stock_demo_app" {
   expiration_time      = "90d"
 }
 
+resource "streamnative_apikey" "parcel_demo_app" {
+  organization         = var.organization
+  name                 = "${var.parcel_tenant}-app"
+  service_account_name = streamnative_service_account.parcel_demo_app.name
+  instance_name        = streamnative_pulsar_instance.stock_demo.name
+  expiration_time      = "90d"
+}
+
 resource "streamnative_apikey" "orchestrator_function" {
   organization         = var.organization
   name                 = "${var.cluster_name}-orchestrator-function"
@@ -25,6 +33,7 @@ output "apikey_tokens" {
   sensitive   = true
   value = {
     app                   = streamnative_apikey.stock_demo_app.token
+    parcel_app            = streamnative_apikey.parcel_demo_app.token
     orchestrator_function = streamnative_apikey.orchestrator_function.token
   }
 }
