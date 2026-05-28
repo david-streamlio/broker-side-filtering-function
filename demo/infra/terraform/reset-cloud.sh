@@ -230,7 +230,6 @@ else
         pulsar_permission_grant.orchestrator_state_consume
         pulsar_permission_grant.orchestrator_state_produce
         pulsar_permission_grant.orchestrator_consume_source
-        pulsar_permission_grant.orchestrator_produce_output
     )
     # Intersect with what's actually in state so we don't `state rm` missing
     # resources (which exits non-zero and would abort under `set -e`).

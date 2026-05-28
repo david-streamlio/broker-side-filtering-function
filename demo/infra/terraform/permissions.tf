@@ -123,26 +123,27 @@ resource "pulsar_permission_grant" "orchestrator_state_produce" {
   actions    = ["produce"]
 }
 
-# orchestrator_function — consume any source topic in public/default. Required
-# so spawned selector-filter functions (which inherit the orchestrator SA) can
+# orchestrator_function — consume any source topic and produce to any per-query
+# private filtered-* output topic in public/default. Required so spawned
+# selector-filter functions (which inherit the orchestrator SA) can both
 # subscribe to whichever input topics the SDK registers a query against —
 # stock-quotes for the stock-cloud demo, parcel-{shipments,scans,exceptions}
-# for the parcels demo, and any future source topics added to public/default.
-# Namespace-level (symmetric with orchestrator_produce_output below); a
-# per-topic scope here was the cause of the parcels-demo crash-loop
-# (AuthorizationException on parcel-* subscribe).
+# for the parcels demo, plus any future source topic — AND write filtered
+# matches to the SDK-managed filtered-<uuid> output topics.
+#
+# Consume and produce MUST be in the same resource. The pulsar provider keys
+# pulsar_permission_grant by (namespace, role), not by (namespace, role, action),
+# and Pulsar's namespaces/{ns}/permissions/{role} API REPLACES (not merges) the
+# role's actions on each call. Two separate resources for the same (namespace,
+# role) tuple share an id, race in apply, and only the last-applied wins on the
+# broker — silently leaving TF state with both grants intact. That bug
+# manifested as "filter receives messages but cannot create output producer"
+# (verified 2026-05-28, AuthorizationException at producer create on filtered-*).
+# Same shape as app_public_default above.
 resource "pulsar_permission_grant" "orchestrator_consume_source" {
   namespace = "public/default"
   role      = "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}"
-  actions   = ["consume"]
-}
-
-# orchestrator_function — produce to all per-query private topics in public/default.
-# Spawned selector-filter function instances write filtered records here.
-resource "pulsar_permission_grant" "orchestrator_produce_output" {
-  namespace = "public/default"
-  role      = "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}"
-  actions   = ["produce"]
+  actions   = ["consume", "produce"]
 }
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
