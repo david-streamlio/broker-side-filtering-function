@@ -123,14 +123,18 @@ resource "pulsar_permission_grant" "orchestrator_state_produce" {
   actions    = ["produce"]
 }
 
-# orchestrator_function — consume the source topic. Required so spawned
-# selector-filter functions (which inherit the orchestrator SA) can read
-# stock-quotes from public/default.
+# orchestrator_function — consume any source topic in public/default. Required
+# so spawned selector-filter functions (which inherit the orchestrator SA) can
+# subscribe to whichever input topics the SDK registers a query against —
+# stock-quotes for the stock-cloud demo, parcel-{shipments,scans,exceptions}
+# for the parcels demo, and any future source topics added to public/default.
+# Namespace-level (symmetric with orchestrator_produce_output below); a
+# per-topic scope here was the cause of the parcels-demo crash-loop
+# (AuthorizationException on parcel-* subscribe).
 resource "pulsar_permission_grant" "orchestrator_consume_source" {
-  depends_on = [pulsar_topic.stock_quotes]
-  topic      = "persistent://public/default/stock-quotes"
-  role       = "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}"
-  actions    = ["consume"]
+  namespace = "public/default"
+  role      = "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}"
+  actions   = ["consume"]
 }
 
 # orchestrator_function — produce to all per-query private topics in public/default.
