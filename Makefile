@@ -93,8 +93,13 @@ demo-cloud-parcels: ## Cloud-mode logistics/parcels demo against SN Cloud (detac
 	@echo "   logs: docker compose -f demo/docker-compose.parcels.yml logs -f   |   stop: make demo-down"
 
 .PHONY: demo-down
-demo-down: ## Tear down any running demo stack (all four compose files; safe if not up)
-	-docker compose -f demo/docker-compose.local.yml down -v
-	-docker compose -f demo/docker-compose.parcels.local.yml down -v
-	-docker compose -f demo/docker-compose.yml down -v
-	-docker compose -f demo/docker-compose.parcels.yml down -v
+# `-t 30` gives multi-query-app's JVM shutdown hook time to close its consumers,
+# which makes the SDK send UNREGISTER for every queryId before the container is
+# killed. The orchestrator then tombstones those queries and GCs the spawned
+# filter functions on the cluster — without it, docker's default 10s grace can
+# SIGKILL mid-UNREGISTER and leave orphaned filters running on the broker.
+demo-down: ## Tear down any running demo stack + UNREGISTER queries (graceful 30s stop; safe if not up)
+	-docker compose -f demo/docker-compose.local.yml down -v -t 30
+	-docker compose -f demo/docker-compose.parcels.local.yml down -v -t 30
+	-docker compose -f demo/docker-compose.yml down -v -t 30
+	-docker compose -f demo/docker-compose.parcels.yml down -v -t 30
