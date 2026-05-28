@@ -33,8 +33,8 @@
 #
 # Required env (auto-loaded from demo/.env if present):
 #   PULSAR_ADMIN_URL              SN Cloud admin URL (recreate.sh writes this)
-#   ORCHESTRATOR_TENANT           e.g. stock-demo
-#   ORCHESTRATOR_NAMESPACE        e.g. filtering
+#   ORCHESTRATOR_TENANT           e.g. control-plane (recreate.sh writes this)
+#   ORCHESTRATOR_NAMESPACE        e.g. broker-filter (recreate.sh writes this)
 #   ORCHESTRATOR_FUNCTION         orchestrator (default)
 #
 # Token (in priority order):
@@ -64,8 +64,8 @@ if [[ -f "$DEMO_DIR/.env" ]]; then
 fi
 
 PULSAR_ADMIN_URL="${PULSAR_ADMIN_URL:?required (set in env, or run recreate.sh first so it writes demo/.env)}"
-TENANT="${ORCHESTRATOR_TENANT:-stock-demo}"
-NS="${ORCHESTRATOR_NAMESPACE:-filtering}"
+TENANT="${ORCHESTRATOR_TENANT:-control-plane}"
+NS="${ORCHESTRATOR_NAMESPACE:-broker-filter}"
 ORCH_FN="${ORCHESTRATOR_FUNCTION:-orchestrator}"
 PULSAR_IMAGE="${PULSAR_IMAGE:-apachepulsar/pulsar:4.2.1}"
 
@@ -217,18 +217,23 @@ elif [[ ! -f "$TF_DIR/terraform.tfstate" && ! -f "$TF_DIR/.terraform/terraform.t
     ok "no terraform state file present — nothing to clean"
 else
     TF_RESOURCES=(
+        # Data topics (public/default)
         pulsar_topic.stock_quotes
         pulsar_topic.parcel_shipments
         pulsar_topic.parcel_scans
         pulsar_topic.parcel_exceptions
+        # Control-plane topics (control-plane/broker-filter)
         pulsar_topic.filter_requests
         pulsar_topic.orchestrator_state
+        # SDK grants
         pulsar_permission_grant.app_public_default
         pulsar_permission_grant.app_filter_requests
-        pulsar_permission_grant.orchestrator_filter_deploy
-        pulsar_permission_grant.orchestrator_consume_control
-        pulsar_permission_grant.orchestrator_state_consume
-        pulsar_permission_grant.orchestrator_state_produce
+        pulsar_permission_grant.parcel_app_public_default
+        pulsar_permission_grant.parcel_app_filter_requests
+        # Orchestrator grants — only the namespace-wide public/default consume+produce
+        # remains. The old filter_deploy / consume_control / state_consume /
+        # state_produce grants are gone (orchestrator-function SA is tenant-admin of
+        # control-plane via pulsar_tenant.control_plane.admin_roles).
         pulsar_permission_grant.orchestrator_consume_source
     )
     # Intersect with what's actually in state so we don't `state rm` missing
