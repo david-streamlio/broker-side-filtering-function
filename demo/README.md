@@ -99,14 +99,14 @@ Idempotent — all four steps treat "already exists" / "already granted" as succ
 
 ## Versions
 
-The combined demo is pinned to the **v1.0.0 GA** for reproducibility:
+The combined demo is pinned to the **v1.1.0 GA** for reproducibility:
 
 | Component | Pinned to | Override with |
 |---|---|---|
-| Orchestrator + filter NARs / SDK | `v1.0.0` | `SELECTOR_REL` |
+| Orchestrator + filter NARs / SDK | `v1.1.0` | `SELECTOR_REL` |
 | Observability UI image | `ghcr.io/david-streamlio/broker-side-filter-observability:0.1.2` | `OBSERVABILITY_IMAGE_TAG` |
 
-Both are env-overridable (set them in `demo/.env`, or export before `make`). The observability image reimplements the orchestrator's registry DTOs and only consumes the stable wire types from `selector-filter-common`, so `0.1.2` is compatible with the `v1.0.0` orchestrator.
+Both are env-overridable (set them in `demo/.env`, or export before `make`). The observability image reimplements the orchestrator's registry DTOs and only consumes the stable wire types from `selector-filter-common`, so `0.1.2` is compatible with the `v1.1.0` orchestrator.
 
 ## Prerequisites
 
@@ -133,7 +133,8 @@ only on *scenario* (which data) and *mode* (where the broker runs):
 | `make demo-cloud` | `… docker-compose.yml …` | stock-quotes — 1 topic, 9 queries | SN Cloud | ✅ yes — real drop % |
 | `make demo-cloud-parcels` | `… docker-compose.parcels.yml …` | parcels — 3 topics, 10 queries (incl. multi-topic) | SN Cloud | ✅ yes — real drop %, fan-out across 3 topics |
 | `make demo-nars` | `gh release download $SELECTOR_REL … demo/local/nars` | — (fetches NARs; auto-run by the `demo-local*` targets) | — | — |
-| `make demo-down` | `docker compose … down -v` on all four files | — (stops/cleans whichever is up; safe if none) | — | — |
+| `make demo-down` | `docker compose … down -v -t 30` on all four files | — (graceful 30s stop so the SDK UNREGISTERs; safe if none up) | — | — |
+| `make reset-demo-cloud` | `bash demo/infra/terraform/reset-cloud.sh` | — (cloud-only; wipes spawned filters, old `selector-filter` package versions, and demo topics so the next `recreate.sh` starts clean) | SN Cloud | — |
 
 Which to demo:
 - **`make demo-cloud`** — the canonical Kafka filtering demo: many queries on one topic, varied drop %, the intentional bad-selector diagnostic. Simplest to narrate.
@@ -163,7 +164,7 @@ make demo-local            # stock-quotes  (or: make demo-local-parcels)
 ```
 
 `make demo-local` first runs `make demo-nars` to fetch the orchestrator +
-selector-filter NARs for the pinned `SELECTOR_REL` (default `v1.0.0`) into
+selector-filter NARs for the pinned `SELECTOR_REL` (default `v1.1.0`) into
 `demo/local/nars/` via `gh release download` — the repo is private and your
 host `gh` already has auth, far simpler than forwarding a token into the
 container. It then `docker compose -f demo/docker-compose.local.yml up --build`.
@@ -171,7 +172,7 @@ container. It then `docker compose -f demo/docker-compose.local.yml up --build`.
 <details><summary>Manual equivalent (without make)</summary>
 
 ```bash
-gh release download v1.0.0 \
+gh release download v1.1.0 \
   --repo david-streamlio/broker-side-filtering-function \
   --dir demo/local/nars \
   --pattern '*.nar'
@@ -190,7 +191,7 @@ Cloud-mode runs the broker + filtering on a real SN Cloud cluster — its KoP ho
 ```bash
 cd demo/infra/terraform
 export ORG=<your-sn-cloud-org-id>      # e.g. o-mj3r8
-export SELECTOR_REL=v1.0.0
+export SELECTOR_REL=v1.1.0
 ./recreate.sh                          # writes demo/.env for you (cluster, auth, topics)
 cd ../../..                            # back to repo root
 ```
