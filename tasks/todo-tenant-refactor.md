@@ -1,43 +1,44 @@
-# Tenant refactor — `sn/broker-filter` control plane + parallel demo SAs
+# Tenant refactor — `internal/broker-filter` control plane + parallel demo SAs
 
-Plan-of-record for moving the orchestrator + its control/state topics out of `stock-demo/filtering` into `sn/broker-filter`, adding a parallel `parcel-demo-app` SDK SA, and renaming the orchestrator-function SA to a demo-neutral identity.
+Plan-of-record for moving the orchestrator + its control/state topics out of `stock-demo/filtering` into `internal/broker-filter`, adding a parallel `parcel-demo-app` SDK SA, and renaming the orchestrator-function SA to a demo-neutral identity.
 
 ## Goals
 
-1. **Lock down the control plane** — orchestrator, filter-requests, orchestrator-state, and spawned filter functions live in a tenant that's not commonly client-accessible. `sn` is the system tenant (transaction coordinator, audit logs, aliveness probes); adding `broker-filter` as a sibling namespace puts the filtering control plane behind a wall random clients don't normally touch.
-2. **Naming consistency** — stock-demo / parcel-demo are SDK-client demos; the orchestrator-function SA shouldn't carry either name. Rename to `broker-filter-orchestrator-function`.
+1. **Lock down the control plane** — orchestrator, filter-requests, orchestrator-state, and spawned filter functions live in `internal/broker-filter` — a new TF-managed tenant + namespace dedicated to the filtering control plane. SDK clients have explicit per-topic grants (consume + produce on `filter-requests` only); they can't reach the orchestrator-state topic, the spawned filters, or the package store. Naming `internal` (vs the original `sn` proposal) sidesteps the SN Cloud system-tenant policy entirely — we fully own this tenant.
+2. **Naming consistency** — stock-demo / parcel-demo are SDK-client demos. The orchestrator-function SA *ideally* shouldn't carry either name, but renaming an SA forces a destroy+recreate with a new JWT subject — too much operational pain (token rotation) for cosmetics. **Decision (2026-05-28): keep `stock-demo-orchestrator-function` as-is for this PR.** Future PR can rename standalone.
 3. **Per-demo SDK identity** — `stock-demo-app` and `parcel-demo-app` as parallel SAs with the same grant shape, so SDK access can be audited + revoked per demo without touching the orchestrator.
-4. **One shared orchestrator** — both demos talk to the same `sn/broker-filter/orchestrator`. Queries are namespaced by queryId, not by control topic; isolation is at the SA / grant level.
+4. **One shared orchestrator** — both demos talk to the same `internal/broker-filter/orchestrator`. Queries are namespaced by queryId, not by control topic; isolation is at the SA / grant level.
 
 ## Target shape
 
 ```
 Tenants:
-  sn          (data-source; existing system tenant — DO NOT manage in TF)
+  internal          (NEW; admin_roles=[stock-demo-orchestrator-function])
   stock-demo  (cosmetic / SDK-side; admin_roles=[stock-demo-app])
   parcel-demo (cosmetic / SDK-side; admin_roles=[parcel-demo-app])
 
 Namespaces (TF-managed):
-  sn/broker-filter   ← orchestrator + filter-requests + orchestrator-state + spawned filters
+  internal/broker-filter   ← orchestrator + filter-requests + orchestrator-state + spawned filters
                        (replaces stock-demo/filtering)
 
 Service accounts:
-  broker-filter-orchestrator-function   ← runs the orchestrator + inherited by spawned filters
+  stock-demo-orchestrator-function      ← runs the orchestrator + inherited by spawned filters
+                                          (name kept as-is; legacy from when stock was the only demo)
   stock-demo-app                        ← stock SDK client (unchanged)
   parcel-demo-app                       ← parcel SDK client (NEW)
 
 Permission grants:
-  broker-filter-orchestrator-function:
-    sn/broker-filter                                   → functions, packages, produce, consume
+  stock-demo-orchestrator-function:
+    internal/broker-filter                                   → functions, packages, produce, consume
     public/default                                     → consume, produce  (read sources, write filtered-*)
 
   stock-demo-app:
     public/default                                     → produce, consume, packages
-    sn/broker-filter/filter-requests                   → produce, consume
+    internal/broker-filter/filter-requests                   → produce, consume
 
   parcel-demo-app:
     public/default                                     → produce, consume, packages
-    sn/broker-filter/filter-requests                   → produce, consume
+    internal/broker-filter/filter-requests                   → produce, consume
 ```
 
 Source topics (`stock-quotes`, `parcel-*`) and private outputs (`filtered-<uuid>`) stay in `public/default` because KoP defaults its kafkaNamespace there — moving sources would force per-topic kafkaNamespace overrides, no win.
@@ -47,26 +48,30 @@ Source topics (`stock-quotes`, `parcel-*`) and private outputs (`filtered-<uuid>
 ### `demo/infra/terraform/`
 
 - **`topics.tf`**
+  - Add `pulsar_tenant.internal` (NEW) — `admin_roles = [stock-demo-orchestrator-function@<domain>]`, `allowed_clusters = [var.cluster_name]`. The orchestrator-function SA gets full tenant-admin perms in `internal/*`, which covers everything it needs to operate the control plane.
   - Add `pulsar_tenant.parcel_demo` mirroring `pulsar_tenant.stock_demo` (admin_roles=[parcel_demo_app]).
   - Remove `pulsar_namespace.filtering` (was `stock-demo/filtering`).
-  - Add `pulsar_namespace.broker_filter` with `tenant = "sn"`, `namespace = "broker-filter"`, same retention/TTL policies as the old `filtering` namespace.
-  - Re-point `pulsar_topic.filter_requests` and `pulsar_topic.orchestrator_state` to `sn/broker-filter/*`.
+  - Add `pulsar_namespace.broker_filter` with `tenant = pulsar_tenant.internal.tenant`, `namespace = "broker-filter"`, same retention/TTL policies as the old `filtering` namespace.
+  - Re-point `pulsar_topic.filter_requests` and `pulsar_topic.orchestrator_state` to `internal/broker-filter/*`.
   - Remove orchestrator-function from `pulsar_tenant.stock_demo.admin_roles` — it doesn't own anything in stock-demo anymore.
 
-- **`apikeys.tf`** (or wherever SAs are declared)
-  - Rename `streamnative_service_account.orchestrator_function` → `broker_filter_orchestrator_function`. Update its `name = "broker-filter-orchestrator-function"`.
+- **`permissions.tf`** (SAs + bindings + rolebindings live here)
   - Add `streamnative_service_account.parcel_demo_app` mirroring `stock_demo_app`.
-  - Add the corresponding `streamnative_apikey` + `pulsar_token` output for `parcel-demo-app.token`.
+  - Add `streamnative_service_account_binding.parcel_demo_app` mirroring `stock_demo_app`.
+  - Add `streamnative_rolebinding.parcel_demo_app_consumer_group_reader` + `_namespace_operator` (the KoP-side cluster role bindings needed for Kafka produce + group ops).
+  - `streamnative_service_account.orchestrator_function` name stays `stock-demo-orchestrator-function` per design decision above.
+- **`apikeys.tf`**
+  - Add `streamnative_apikey.parcel_demo_app` + corresponding `apikey_tokens.parcel_app` output for `parcel-demo-app.token`.
 
 - **`permissions.tf`**
   - All references to `streamnative_service_account.orchestrator_function` → `.broker_filter_orchestrator_function`.
-  - All references to `var.tenant`/`pulsar_namespace.filtering` in the orchestrator grants → `pulsar_namespace.broker_filter` (`sn/broker-filter`).
-  - Rename `orchestrator_filter_deploy` namespace to `sn/broker-filter`.
-  - Rename `orchestrator_consume_control` topic to `persistent://sn/broker-filter/filter-requests`.
-  - Rename `orchestrator_state_{consume,produce}` topics to `persistent://sn/broker-filter/orchestrator-state`.
+  - All references to `var.tenant`/`pulsar_namespace.filtering` in the orchestrator grants → `pulsar_namespace.broker_filter` (`internal/broker-filter`).
+  - Rename `orchestrator_filter_deploy` namespace to `internal/broker-filter`.
+  - Rename `orchestrator_consume_control` topic to `persistent://internal/broker-filter/filter-requests`.
+  - Rename `orchestrator_state_{consume,produce}` topics to `persistent://internal/broker-filter/orchestrator-state`.
   - `orchestrator_consume_source` (the merged consume+produce on `public/default` from PR #32) stays as-is.
   - Add `parcel_app_public_default` (mirror of `app_public_default` for the parcel SA).
-  - Add `parcel_app_filter_requests` (mirror of `app_filter_requests` re-pointed at the new `sn/broker-filter/filter-requests`).
+  - Add `parcel_app_filter_requests` (mirror of `app_filter_requests` re-pointed at the new `internal/broker-filter/filter-requests`).
   - Re-point existing `app_filter_requests` at the new control topic location.
 
 - **`variables.tf`**
@@ -74,16 +79,16 @@ Source topics (`stock-quotes`, `parcel-*`) and private outputs (`filtered-<uuid>
   - Add `var.parcel_tenant` default `parcel-demo`.
 
 - **`recreate.sh`**
-  - Phase 7 deploys orchestrator with `--tenant sn --namespace broker-filter` instead of `--tenant stock-demo --namespace filtering`.
-  - Upload `selector-filter` package URL → `function://sn/broker-filter/selector-filter@$SF_VER`.
-  - Write `demo/.env` defaults: `ORCHESTRATOR_TENANT=sn`, `ORCHESTRATOR_NAMESPACE=broker-filter`, `DEMO_CONTROL_TOPIC=persistent://sn/broker-filter/filter-requests`, `STATE_TOPIC=persistent://sn/broker-filter/orchestrator-state`.
+  - Phase 7 deploys orchestrator with `--tenant internal --namespace broker-filter` instead of `--tenant stock-demo --namespace filtering`.
+  - Upload `selector-filter` package URL → `function://internal/broker-filter/selector-filter@$SF_VER`.
+  - Write `demo/.env` defaults: `ORCHESTRATOR_TENANT=internal`, `ORCHESTRATOR_NAMESPACE=broker-filter`, `DEMO_CONTROL_TOPIC=persistent://internal/broker-filter/filter-requests`, `STATE_TOPIC=persistent://internal/broker-filter/orchestrator-state`.
   - Write both `app.token` (stock) and `parcel-app.token` files.
   - Update tenant/SA names in any echo / next-steps text.
 
 - **`reset-cloud.sh`**
   - Update `ORCH_TENANT`/`ORCH_NS` defaults sourced from `.env` (already env-driven — likely no change).
-  - Topic delete list: re-point control/state to `sn/broker-filter`.
-  - Package delete: `sn/broker-filter/selector-filter` instead of `stock-demo/filtering/selector-filter`.
+  - Topic delete list: re-point control/state to `internal/broker-filter`.
+  - Package delete: `internal/broker-filter/selector-filter` instead of `stock-demo/filtering/selector-filter`.
   - `TF_RESOURCES`:
     - Add `pulsar_topic.parcel_*` (already there from PR #30).
     - Add new `pulsar_permission_grant.parcel_app_*` entries.
@@ -93,10 +98,10 @@ Source topics (`stock-quotes`, `parcel-*`) and private outputs (`filtered-<uuid>
 ### `demo/`
 
 - **`.env.example`**
-  - `ORCHESTRATOR_TENANT=sn`
+  - `ORCHESTRATOR_TENANT=internal`
   - `ORCHESTRATOR_NAMESPACE=broker-filter`
-  - `DEMO_CONTROL_TOPIC=persistent://sn/broker-filter/filter-requests`
-  - `STATE_TOPIC=persistent://sn/broker-filter/orchestrator-state`
+  - `DEMO_CONTROL_TOPIC=persistent://internal/broker-filter/filter-requests`
+  - `STATE_TOPIC=persistent://internal/broker-filter/orchestrator-state`
   - Add `PARCEL_APP_TOKEN_PATH=…/parcel-app.token` for the parcels compose to load.
 
 - **`docker-compose.yml`** (stock)
@@ -107,18 +112,18 @@ Source topics (`stock-quotes`, `parcel-*`) and private outputs (`filtered-<uuid>
   - Same for shadowtraffic.
 
 - **`docker-compose.local.yml` + `docker-compose.parcels.local.yml`**
-  - Mirror the env-var defaults (local broker doesn't have an `sn` tenant by default — bootstrap script needs to create the namespace too if we want symmetric local/cloud).
+  - Mirror the env-var defaults (local broker doesn't have an `internal` tenant by default — bootstrap script needs to create the namespace too if we want symmetric local/cloud).
 
 - **`bootstrap/bootstrap.sh`** (local-mode broker bootstrap)
-  - Add: create the `sn` tenant if it doesn't exist, then create the `broker-filter` namespace.
-  - Update existing topic-creation calls to point at `sn/broker-filter`.
+  - Add: create the `internal` tenant if it doesn't exist, then create the `broker-filter` namespace.
+  - Update existing topic-creation calls to point at `internal/broker-filter`.
 
 - **`RUNBOOK.md`**
-  - Update step 6 (recreate.sh) description: orchestrator now lives in `sn/broker-filter`.
+  - Update step 6 (recreate.sh) description: orchestrator now lives in `internal/broker-filter`.
   - Update step 7: note that stock and parcel demos use different SDK tokens (`app.token` vs `parcel-app.token`) — the docker-compose files handle this automatically.
-  - Update step 8: admin-API curls now use `sn/broker-filter` not `stock-demo/filtering`.
+  - Update step 8: admin-API curls now use `internal/broker-filter` not `stock-demo/filtering`.
   - Update step 9: `reset-cloud.sh` behavior unchanged from operator POV.
-  - Update step 10 gotchas: note "Tenant `sn` doesn't exist" symptom for orgs without it.
+  - Update step 10 gotchas: note "Tenant `internal` doesn't exist" symptom for orgs without it.
 
 ### `Makefile`
 
@@ -140,14 +145,14 @@ cd demo/infra/terraform
 terraform state rm pulsar_namespace.filtering   # gone
 # (the old orchestrator-state + filter-requests TF state addresses unchanged; their .topic value just moved)
 
-# 4. Recreate on the NEW shape — creates sn/broker-filter namespace + parcel-demo-app SA
+# 4. Recreate on the NEW shape — creates internal/broker-filter namespace + parcel-demo-app SA
 SELECTOR_REL=v1.1.0 ./recreate.sh
 
 # 5. Bring up a demo as usual
 make demo-cloud           # or demo-cloud-parcels
 ```
 
-Step 3 is required because TF can't auto-migrate a `pulsar_namespace.filtering` (stock-demo/filtering) into `pulsar_namespace.broker_filter` (sn/broker-filter) — different resource address.
+Step 3 is required because TF can't auto-migrate a `pulsar_namespace.filtering` (stock-demo/filtering) into `pulsar_namespace.broker_filter` (internal/broker-filter) — different resource address.
 
 ## Verification
 
@@ -158,7 +163,7 @@ APP_TOKEN=$(cat demo/infra/terraform/app.token)
 BROKER=$(grep PULSAR_ADMIN_URL demo/.env | cut -d= -f2)
 
 # (a) New orchestrator location
-curl -s -H "Authorization: Bearer $APP_TOKEN" "$BROKER/admin/v3/functions/sn/broker-filter" | jq
+curl -s -H "Authorization: Bearer $APP_TOKEN" "$BROKER/admin/v3/functions/internal/broker-filter" | jq
 # → ["orchestrator","selector-filter-…","selector-filter-…",…]
 
 # (b) Old location is empty / not found
@@ -170,7 +175,7 @@ PARCEL_TOKEN=$(cat demo/infra/terraform/parcel-app.token)
 for tok in "$APP_TOKEN" "$PARCEL_TOKEN"; do
   curl -s -X POST -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
     -d '{"foo":"bar"}' \
-    "$BROKER/topics/persistent/sn/broker-filter/filter-requests"
+    "$BROKER/topics/persistent/internal/broker-filter/filter-requests"
 done
 # → both return a body-validation NPE (auth-pass), neither returns "Unauthorized to produce"
 ```
@@ -183,14 +188,18 @@ If the migration goes sideways: revert the merge commit on main, `make reset-dem
 
 ## Risks / open questions
 
-1. **`sn` tenant admin permissions** — does the operator's `PULSAR_TOKEN` (the super-admin minted via `snctl auth get-token --login`) have rights to create namespaces in `sn`? If `sn` is locked down by SN Cloud platform policy, this fails at TF apply. **Mitigation**: try it on the live cluster before merging this PR.
-2. **SA principals at cluster scope** — SN Cloud SAs are instance-scoped, not tenant-scoped; renaming an SA forces TF to destroy + recreate (new principal string, new JWT). Token files on disk change. The migration step list above accounts for this.
-3. **Local-mode `sn` tenant** — the docker-compose local mode's broker doesn't have `sn` pre-created. The bootstrap script needs to create it. Minor addition.
+1. **Stale `sn/broker-filter` namespace from earlier diagnostic** — the operator manually `PUT`-created `sn/broker-filter` while we were investigating whether `sn` was usable; that namespace is empty but present on the broker. Since we pivoted to `internal`, the stray `sn/broker-filter` should be DELETE'd before the migration to keep the cluster clean. One curl with the super-admin token:
+   ```bash
+   curl -s -X DELETE -H "Authorization: Bearer $PULSAR_TOKEN" \
+     "$PULSAR_ADMIN_URL/admin/v2/namespaces/sn/broker-filter?force=true"
+   ```
+2. **Local-mode `internal` tenant** — `bootstrap.sh` currently creates the `stock-demo` tenant for local-mode standalone brokers. Needs to also create the `internal` tenant + the `broker-filter` namespace before the orchestrator is deployed locally. Mirror of the `stock-demo/filtering` setup.
+3. **TF state migration** — `pulsar_namespace.filtering` is removed and `pulsar_namespace.broker_filter` is added at a different resource address. TF will plan a destroy of the old + create of the new. That's fine for fresh clusters; for in-flight cluster operators the migration steps already account for it (`make reset-demo-cloud` first).
 
 ## Status
 
-- [ ] User confirms plan
-- [ ] Verify `PULSAR_TOKEN` can create namespaces in `sn` (risk #1) — single curl test before any code changes
+- [x] User confirmed plan (one shared orchestrator, per-demo SDK SAs, `internal/broker-filter` control plane — locked in 2026-05-28)
+- [x] Sanity-check: PUT against the cluster returns 204 (verified 2026-05-28; namespace-create perms confirmed)
 - [ ] Implement TF changes (topics.tf, apikeys.tf, permissions.tf, variables.tf)
 - [ ] Implement script changes (recreate.sh, reset-cloud.sh, bootstrap.sh)
 - [ ] Implement runtime changes (.env.example, compose files)
