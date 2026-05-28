@@ -15,7 +15,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 PULSAR_ADMIN_URL="${PULSAR_ADMIN_URL:?required}"
 SELECTOR_REPO="${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
-SELECTOR_REL="${SELECTOR_REL:-v1.0.0}"
+SELECTOR_REL="${SELECTOR_REL:-v1.1.0}"
 SF_VER="${SELECTOR_REL#v}"
 
 echo -e "${BLUE}🚀 Local orchestrator deploy${NC}"
@@ -31,7 +31,7 @@ echo ""
 # parsed + container egress, three separate failure points.
 #
 # README documents:
-#   gh release download v1.0.0 \
+#   gh release download v1.1.0 \
 #     --repo david-streamlio/broker-side-filtering-function \
 #     --dir demo/local/nars
 #

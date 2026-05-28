@@ -51,14 +51,14 @@ tf-validate: ## terraform init + validate across all wrappers (offline-friendly 
 
 # ---------------------------------------------------------------- combined demo
 # One-command bring-up of the filtering stack + the broker-side-filter-observability
-# UI (http://localhost:3200). Pinned to the v1.0.0 GA; override SELECTOR_REL /
+# UI (http://localhost:3200). Pinned to the v1.1.0 GA; override SELECTOR_REL /
 # OBSERVABILITY_IMAGE_TAG to run a different release.
 
 SELECTOR_REPO ?= david-streamlio/broker-side-filtering-function
-SELECTOR_REL  ?= v1.0.0
+SELECTOR_REL  ?= v1.1.0
 
 .PHONY: demo-nars
-demo-nars: ## Fetch the v1.0.0 orchestrator + filter NARs into demo/local/nars (local-mode prereq)
+demo-nars: ## Fetch the v1.1.0 orchestrator + filter NARs into demo/local/nars (local-mode prereq)
 	rm -f demo/local/nars/*.nar
 	gh release download $(SELECTOR_REL) --repo $(SELECTOR_REPO) --dir demo/local/nars --pattern '*.nar'
 
@@ -103,3 +103,7 @@ demo-down: ## Tear down any running demo stack + UNREGISTER queries (graceful 30
 	-docker compose -f demo/docker-compose.parcels.local.yml down -v -t 30
 	-docker compose -f demo/docker-compose.yml down -v -t 30
 	-docker compose -f demo/docker-compose.parcels.yml down -v -t 30
+
+.PHONY: reset-demo-cloud
+reset-demo-cloud: ## Wipe spawned filters, old NAR packages, and demo topics on SN Cloud (destructive)
+	bash demo/infra/terraform/reset-cloud.sh
