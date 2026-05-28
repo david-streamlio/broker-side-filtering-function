@@ -99,6 +99,11 @@ class OrchestratorFunctionIT {
         client = PulsarClient.builder().serviceUrl(pulsar.getPulsarBrokerUrl()).build();
         admin  = PulsarAdmin.builder().serviceHttpUrl(pulsar.getHttpServiceUrl()).build();
 
+        // The Pulsar 4.2 image opens its admin port before the broker finishes provisioning
+        // public/default, so creating topics immediately can fail with "Namespace not found".
+        // Wait for the default namespace to exist first.
+        awaitDefaultNamespace();
+
         // Topics needed up-front. Filter functions auto-create their own per-function control
         // topics on spawn; auto-topic-creation needs to be on for the filter to write outputs.
         admin.topics().createNonPartitionedTopic(SDK_INPUT_TOPIC);
@@ -444,6 +449,24 @@ class OrchestratorFunctionIT {
                     "Filter NAR not found in " + target + ". Run 'mvn -pl functions/selector-filter package' first.");
         }
         return files[0].toPath();
+    }
+
+    /**
+     * Poll until {@code public/default} is provisioned. The 4.2 testcontainer's admin port
+     * comes up before the broker finishes bootstrapping the default namespace.
+     */
+    private void awaitDefaultNamespace() throws InterruptedException {
+        for (int i = 0; i < 60; i++) {
+            try {
+                if (admin.namespaces().getNamespaces("public").contains("public/default")) {
+                    return;
+                }
+            } catch (PulsarAdminException e) {
+                // admin not fully ready yet — keep polling
+            }
+            TimeUnit.SECONDS.sleep(1);
+        }
+        throw new IllegalStateException("public/default namespace not available after 60s");
     }
 
     private static Path findOrchestratorNar() {
