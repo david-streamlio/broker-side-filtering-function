@@ -45,7 +45,7 @@ services:
   # already-bootstrapped cluster is a no-op. Other services wait for this to
   # complete successfully before starting.
   bootstrap:
-    image: apachepulsar/pulsar:4.0.5
+    image: apachepulsar/pulsar:4.2.1
     container_name: parcel-demo-bootstrap
     restart: "no"
     environment:

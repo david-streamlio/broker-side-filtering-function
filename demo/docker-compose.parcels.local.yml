@@ -22,7 +22,7 @@
 
 services:
   pulsar:
-    image: streamnative/sn-platform:4.0.10.1
+    image: streamnative/sn-platform:4.2.0.6
     platform: linux/amd64
     container_name: parcel-demo-pulsar
     command:
@@ -61,7 +61,7 @@ services:
   # One-shot: downloads + deploys the orchestrator function. Identical to the
   # stock-quotes local-mode service.
   orchestrator-deploy:
-    image: apachepulsar/pulsar:4.0.5
+    image: apachepulsar/pulsar:4.2.1
     container_name: parcel-demo-orchestrator-deploy
     depends_on:
       pulsar:
@@ -78,7 +78,7 @@ services:
     entrypoint: ["/bin/bash", "/usr/local/bin/orchestrator-deploy.sh"]
 
   bootstrap:
-    image: apachepulsar/pulsar:4.0.5
+    image: apachepulsar/pulsar:4.2.1
     container_name: parcel-demo-bootstrap
     restart: "no"
     depends_on:
