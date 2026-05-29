@@ -1,44 +1,37 @@
-# ── Tenants ───────────────────────────────────────────────────────────────────
+# ── Tenant ────────────────────────────────────────────────────────────────────
 # Requires the pulsar provider (var.pulsar_web_service_url + var.pulsar_token set).
 #
-# Three tenants:
+# One tenant:
 #   control-plane  — Owns the filtering infrastructure (orchestrator, filter-
 #                    requests, orchestrator-state, spawned selector-filter
 #                    functions, selector-filter package). admin_roles is just
 #                    the orchestrator-function SA so SDK clients can't reach
 #                    in via tenant-admin shortcuts; SDK access to filter-requests
 #                    is granted explicitly per-topic in permissions.tf.
-#   stock-demo     — Cosmetic / SDK-side organization for the stock demo. The
-#                    stock-demo-app SA is its tenant admin; data still lives
-#                    in public/default per KoP's kafkaNamespace default.
-#   parcel-demo    — Parallel to stock-demo for the parcels demo.
+#
+# Why not a per-demo `stock-demo` / `parcel-demo` tenant for the SDK SAs?
+# Considered and rejected (PR after #35). They'd be empty by construction
+# because:
+#   - Data topics MUST live in public/default — KoP's default kafkaNamespace
+#     is the only place Kafka SDK clients can address topics by short name
+#     without FQN gymnastics that break kafka-console-consumer/kafkacat/Kafka
+#     Connect (kafka-clients accepts `persistent://tenant/ns/topic` literally
+#     but the rest of the ecosystem doesn't).
+#   - Per-query filtered-<uuid> outputs are created by Session.registerPrivateQuery
+#     and live alongside the source topics for the same kafkaNamespace reason.
+#   - The orchestrator + state + filter-requests + spawned filters live in
+#     control-plane/broker-filter (this file, immediately below) — locked down
+#     to the orchestrator-function SA.
+# That left two cosmetic tenants with admin_roles pointing at SAs that didn't
+# need tenant-admin anywhere; the SDK SAs work fine off namespace-level grants
+# on public/default + per-topic grants on filter-requests. Removed for
+# minimum-surface-area.
 
 resource "pulsar_tenant" "control_plane" {
   tenant           = var.control_plane_tenant
   allowed_clusters = [var.cluster_name]
   admin_roles = [
     "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}",
-  ]
-}
-
-resource "pulsar_tenant" "stock_demo" {
-  tenant           = var.tenant
-  allowed_clusters = [var.cluster_name]
-  # stock_demo_app is tenant admin so the SDK's Session.registerPrivateQuery can
-  # create per-query private output topics. The orchestrator SA is NOT here
-  # anymore (PR follows-up to PR #32 access-control rework): it owns the
-  # control-plane tenant instead, and SDK-side topics are in public/default
-  # where namespace-level grants cover it.
-  admin_roles = [
-    "${streamnative_service_account.stock_demo_app.name}@${local.sa_domain}",
-  ]
-}
-
-resource "pulsar_tenant" "parcel_demo" {
-  tenant           = var.parcel_tenant
-  allowed_clusters = [var.cluster_name]
-  admin_roles = [
-    "${streamnative_service_account.parcel_demo_app.name}@${local.sa_domain}",
   ]
 }
 

@@ -54,15 +54,14 @@ The `ORG-SLUG` between `@` and `.auth` is what you'll export next. Typical shape
 ```bash
 export TF_VAR_organization="o-abc1234"          # your org slug from step 3
 # Optional overrides — defaults are fine for most users:
-export TF_VAR_cluster_name="stock-demo"         # also used as instance name + prefix on stock SA
+export TF_VAR_cluster_name="stock-demo"         # cluster + instance name; also the stock SA's name prefix → stock-demo-app
 export TF_VAR_location="us-central1"            # GCP region
-export TF_VAR_tenant="stock-demo"               # cosmetic stock-demo project tenant
-export TF_VAR_parcel_tenant="parcel-demo"       # cosmetic parcels-demo project tenant
-export TF_VAR_control_plane_tenant="control-plane"      # locked-down tenant for orchestrator + filter-requests + state
+export TF_VAR_parcel_app_prefix="parcel-demo"   # parcels SA's name prefix → parcel-demo-app
+export TF_VAR_control_plane_tenant="control-plane"   # locked-down Pulsar tenant for orchestrator + filter-requests + state
 export TF_VAR_control_plane_namespace="broker-filter"
 ```
 
-Both demos run against the **same** cluster + control plane (`control-plane/broker-filter`); the `tenant` / `parcel_tenant` vars are cosmetic project organization only — the SDK SAs (`stock-demo-app`, `parcel-demo-app`) inherit their names from those values.
+Both demos run against the **same** cluster + control plane (`control-plane/broker-filter`). The only real Pulsar tenant created is `control-plane` (admin_roles = orchestrator-function SA only); the SDK SAs (`stock-demo-app`, `parcel-demo-app`) don't get their own tenants — they work off namespace-level grants on `public/default` + per-topic grants on `filter-requests`. See `topics.tf` header for why per-demo tenants were considered and rejected (short version: KoP's default kafkaNamespace + Kafka SDK ergonomics).
 
 ## 5. Mint the super-admin Pulsar token
 
@@ -97,7 +96,7 @@ cd ../../..
 
 Allow **~15–20 minutes** the first time (most of it is serverless instance provisioning). The script:
 
-1. `terraform apply` — creates the GCP-backed serverless cluster + three tenants (`stock-demo` and `parcel-demo` for cosmetic project organization; `control-plane` for the locked-down filtering control plane), three service accounts (`stock-demo-app` + `parcel-demo-app` for the SDK clients, `stock-demo-orchestrator-function` for the orchestrator + its spawned filters — the latter is `admin_roles` of the `control-plane` tenant), the `control-plane/broker-filter` namespace, source topics in `public/default` (stock-quotes + parcel-{shipments,scans,exceptions}), control + state topics in `control-plane/broker-filter`, and all `pulsar_permission_grant` resources.
+1. `terraform apply` — creates the GCP-backed serverless cluster + one Pulsar tenant (`control-plane`, admin_roles = orchestrator-function SA only — the SDK SAs don't have tenants of their own), three service accounts (`stock-demo-app` + `parcel-demo-app` for the SDK clients, `stock-demo-orchestrator-function` for the orchestrator + its spawned filters), the `control-plane/broker-filter` namespace, source topics in `public/default` (stock-quotes + parcel-{shipments,scans,exceptions}), control + state topics in `control-plane/broker-filter`, and all `pulsar_permission_grant` resources.
 2. Writes three token files alongside the script: `app.token` (stock-demo-app), `parcel-app.token` (parcel-demo-app), `orchestrator-function.token` — these are the SA-scoped JWTs the demo runtime uses.
 3. Sets `kafkaEntryFormat=pulsar_non_batched` per source topic and namespace-default on `public/default`, so KoP-produced Kafka headers surface as Pulsar message properties on the consumer side. (This is what makes JMS selectors like `carrier = 'UPS'` evaluate against actual data.)
 4. Downloads + uploads the pinned `selector-filter` NAR as a Pulsar package (`function://control-plane/broker-filter/selector-filter@1.1.0`).
@@ -176,7 +175,7 @@ Open the UI: **http://localhost:3200**.
 
 ### What you should *not* see (and shouldn't worry about)
 
-- **`stock-demo` and `parcel-demo` tenants have no namespaces.** That's by design — those tenants exist only to scope their respective SDK SAs (`stock-demo-app`, `parcel-demo-app`); they don't own any namespace. Source topics live in `public/default`, control plane lives in `control-plane/broker-filter`. The cosmetic tenants being "empty" in the SN Cloud console is the expected state.
+- **There are no `stock-demo` or `parcel-demo` tenants in the SN Cloud console.** The SDK SAs (`stock-demo-app`, `parcel-demo-app`) are pure identities with no tenant of their own — they work off namespace-level grants on `public/default` + per-topic grants on the `filter-requests` control topic. The string `stock-demo` you see in the SA name is just the cluster_name prefix; `parcel-demo` is the `parcel_app_prefix` label. Neither corresponds to a Pulsar tenant.
 - **`control-plane/broker-filter` is not browseable in the SN Cloud console as either SDK SA** — only `orchestrator-function@…` is `admin_roles` on that tenant. Use `orchestrator-function.token` for admin probes against `control-plane/*` (the observability container does exactly this — see step 6's third token path).
 
 ### Command-line sanity check (both demos)
@@ -236,7 +235,7 @@ Implicitly runs `make demo-down` first (graceful UNREGISTER, then SIGKILL), then
 
 **Needs `PULSAR_TOKEN`** (super-admin) set in your shell — JWT-only form, see step 5.
 
-**Survives**: cluster, three tenants, three SAs (`stock-demo-app`, `parcel-demo-app`, `stock-demo-orchestrator-function`), the three `*.token` files on disk, `pulsar_tenant.*` + `pulsar_namespace.broker_filter` Terraform resources, and the namespace itself on the broker (it ends up empty).
+**Survives**: cluster, the `control-plane` Pulsar tenant, three SAs (`stock-demo-app`, `parcel-demo-app`, `stock-demo-orchestrator-function`), the three `*.token` files on disk, `pulsar_tenant.control_plane` + `pulsar_namespace.broker_filter` Terraform resources, and the namespace itself on the broker (it ends up empty).
 
 Use when bumping `SELECTOR_REL` to a different release, or when you want a guaranteed-clean slate without burning the cluster.
 

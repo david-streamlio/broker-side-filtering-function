@@ -12,7 +12,7 @@ resource "streamnative_apikey" "stock_demo_app" {
 
 resource "streamnative_apikey" "parcel_demo_app" {
   organization         = var.organization
-  name                 = "${var.parcel_tenant}-app"
+  name                 = "${var.parcel_app_prefix}-app"
   service_account_name = streamnative_service_account.parcel_demo_app.name
   instance_name        = streamnative_pulsar_instance.stock_demo.name
   expiration_time      = "90d"

@@ -17,7 +17,7 @@ resource "streamnative_service_account" "stock_demo_app" {
 
 resource "streamnative_service_account" "parcel_demo_app" {
   organization = var.organization
-  name         = "${var.parcel_tenant}-app"
+  name         = "${var.parcel_app_prefix}-app"
 }
 
 resource "streamnative_service_account" "orchestrator_function" {
@@ -88,14 +88,14 @@ resource "streamnative_rolebinding" "stock_demo_app_namespace_operator" {
 # namespace-operator). Mirrors the KoP-side authorization the SDK + ShadowTraffic need.
 resource "streamnative_rolebinding" "parcel_demo_app_consumer_group_reader" {
   organization          = var.organization
-  name                  = "${var.parcel_tenant}-app-consumer-group-reader"
+  name                  = "${var.parcel_app_prefix}-app-consumer-group-reader"
   cluster_role_name     = "consumer-group-reader"
   service_account_names = [streamnative_service_account.parcel_demo_app.name]
 }
 
 resource "streamnative_rolebinding" "parcel_demo_app_namespace_operator" {
   organization          = var.organization
-  name                  = "${var.parcel_tenant}-app-namespace-operator"
+  name                  = "${var.parcel_app_prefix}-app-namespace-operator"
   cluster_role_name     = "namespace-operator"
   service_account_names = [streamnative_service_account.parcel_demo_app.name]
 }
