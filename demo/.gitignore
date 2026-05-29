@@ -2,6 +2,10 @@
 .env
 # .env.generated is written by infra/terraform/recreate.sh (cluster URLs + SA principal)
 .env.generated
+# .env.backup et al. — operators routinely create these (manually or via the
+# RUNBOOK step-6 swap) when migrating to a new shape; same secret content as
+# .env, never appropriate to commit. Wildcard catches any future suffix too.
+.env.*
 license.env
 
 # Token files dropped to disk by infra/terraform/recreate.sh during cloud-mode
