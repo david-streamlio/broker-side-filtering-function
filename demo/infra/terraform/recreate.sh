@@ -440,6 +440,13 @@ PARCEL_KAFKA_USERNAME=parcel-demo-app
 PARCEL_DEMO_SA_PRINCIPAL=parcel-demo-app@${ORG}.auth.streamnative.cloud
 PARCEL_PULSAR_TOKEN_PATH=$TF_DIR/parcel-app.token
 
+# Observability container token — needs read access to
+# control-plane/broker-filter/orchestrator-state (the UI's source of truth)
+# and to list spawned filters under control-plane/broker-filter. Neither SDK
+# SA has that scope; only the orchestrator-function SA is tenant-admin of
+# control-plane. Both compose files mount this same token for observability.
+ORCHESTRATOR_PULSAR_TOKEN_PATH=$TF_DIR/orchestrator-function.token
+
 # Data topics — both demos share public/default for KoP's default kafkaNamespace
 DEMO_SOURCE_TOPIC_STOCKS=persistent://public/default/stock-quotes
 DEMO_SOURCE_TOPIC_SHIPMENTS=persistent://public/default/parcel-shipments

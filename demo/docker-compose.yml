@@ -145,7 +145,13 @@ services:
       ORCHESTRATOR_FUNCTION:     "${ORCHESTRATOR_FUNCTION:-orchestrator}"
       HEARTBEAT_MAX_STALE_SECONDS: "${HEARTBEAT_MAX_STALE_SECONDS:-90}"
     volumes:
-      - ${PULSAR_TOKEN_PATH}:/var/run/secrets/pulsar.token:ro
+      # Observability needs read access to control-plane/broker-filter/
+      # orchestrator-state (the UI's source of truth) and to list spawned
+      # filters under control-plane/broker-filter. Neither SDK SA has that
+      # scope on the locked-down control-plane tenant — only the
+      # orchestrator-function SA (admin_roles of pulsar_tenant.control_plane)
+      # does. Mount that token here, not the SDK PULSAR_TOKEN_PATH.
+      - ${ORCHESTRATOR_PULSAR_TOKEN_PATH:?set in .env (recreate.sh writes it; points at orchestrator-function.token)}:/var/run/secrets/pulsar.token:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:3200/actuator/health || exit 1"]
       interval: 30s
