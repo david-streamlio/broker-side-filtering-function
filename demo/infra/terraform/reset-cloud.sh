@@ -185,16 +185,26 @@ for t in \
     fi
 done
 
-# Control + state — non-partitioned.
-for t in \
-        "persistent://$TENANT/$NS/filter-requests" \
-        "persistent://$TENANT/$NS/orchestrator-state" ; do
-    if PA topics delete "$t" -f >/dev/null 2>&1; then
-        ok "deleted topic: $t"
-    else
-        warn "skipped (not found or no permission): $t"
-    fi
-done
+# Every topic in $TENANT/$NS — covers the TF-managed filter-requests +
+# orchestrator-state PLUS the orchestrator's runtime-spawned per-filter
+# control topics (ctrl-<input-topic>-<uuid>), which aren't TF-managed and
+# nobody else tracks. Leaving any of those behind blocks the subsequent
+# namespace destroy (TF's pulsar_namespace.broker_filter delete returns
+# "Cannot delete non empty namespace"; SN Cloud has
+# forceDeleteNamespaceAllowed=false).
+NS_TOPICS_OUT=$(PA topics list "$TENANT/$NS" 2>/dev/null || true)
+NS_TOPICS=$(_normalize_list "$NS_TOPICS_OUT" | grep -E '^persistent://' || true)
+if [[ -z "$NS_TOPICS" ]]; then
+    warn "no topics listed in $TENANT/$NS (or list call failed): $NS_TOPICS_OUT"
+else
+    for t in $NS_TOPICS; do
+        if PA topics delete "$t" -f >/dev/null 2>&1; then
+            ok "deleted topic: $t"
+        else
+            warn "skipped (not found or no permission): $t"
+        fi
+    done
+fi
 
 # SDK private topics (filtered-<uuid>) in public/default — accumulate per query registration.
 PRIV_OUT=$(PA topics list public/default 2>/dev/null || true)

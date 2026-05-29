@@ -240,10 +240,23 @@ terraform apply -auto-approve
 elapsed "Terraform Step B" $PHASE5_START
 ok "Pulsar resources created"
 
-# ── Phase 6: Token export (already done above on first run; re-export for safety) ──
+# ── Phase 6: Token export (idempotent re-export, then sanity-check) ──
+# The Phase 2 export loop only runs when the cluster wasn't already up; on a
+# resumed apply (CLUSTER_UP=true above), Phase 2 is skipped and any NEW apikey
+# resource added since the last run (e.g. a new SA) would have its token only
+# in `terraform output`, not on disk. This phase re-exports unconditionally,
+# then verifies all expected tokens landed. Idempotent for repeat runs.
 section "Phase 6 — Token export"
+terraform output -json apikey_tokens 2>/dev/null | python3 -c "
+import sys, json, os
+tokens = json.load(sys.stdin)
+for name, token in tokens.items():
+    fname = name.replace('_', '-') + '.token'
+    open(fname, 'w').write(token)
+    print(f'  wrote {fname}')
+" || fail "terraform output -json apikey_tokens failed — Step B didn't write the apikey resources?"
 [[ -f "$TF_DIR/app.token" && -f "$TF_DIR/parcel-app.token" && -f "$TF_DIR/orchestrator-function.token" ]] \
-  || fail "Token files missing — re-run with the cluster up to regenerate"
+  || fail "Token files missing after re-export — check terraform output -json apikey_tokens manually"
 ok "SA tokens present (app.token, parcel-app.token, orchestrator-function.token)"
 APP_TOKEN=$(cat "$TF_DIR/app.token")
 OF_TOKEN=$(cat "$TF_DIR/orchestrator-function.token")
