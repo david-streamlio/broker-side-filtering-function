@@ -146,8 +146,16 @@ fi
 # ── Step 3/5: uploaded selector-filter package versions ──────────────────────
 section "Step 3/5 — Delete selector-filter package versions"
 PKG_PATH="function://$TENANT/$NS/selector-filter"
-VERS_OUT=$(PA packages list-package-versions "$PKG_PATH" 2>&1 || true)
-VERS=$(_normalize_list "$VERS_OUT")
+# pulsarctl's subcommand was renamed `list-package-versions` -> `list-versions`
+# at some point; using the wrong name causes pulsarctl to print a "Did you mean?"
+# help message which used to get parsed (verbatim) as a fake version list, and
+# the loop below tried to delete `selector-filter@Unmatched`, `@arguments`, etc.
+# Belt-and-suspenders: (1) use the current subcommand name, (2) only keep
+# tokens that look like an actual semver-ish version so any future rename fails
+# closed rather than fans out into garbage deletes.
+VERS_OUT=$(PA packages list-versions "$PKG_PATH" 2>&1 || true)
+VERS=$(_normalize_list "$VERS_OUT" \
+         | grep -E '^[0-9]+(\.[0-9]+)*([-+.][A-Za-z0-9_.-]+)?$' || true)
 if [[ -z "$VERS" ]]; then
     warn "no package versions listed for $PKG_PATH (or none exist)"
 else
