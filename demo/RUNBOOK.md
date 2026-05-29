@@ -54,26 +54,36 @@ The `ORG-SLUG` between `@` and `.auth` is what you'll export next. Typical shape
 ```bash
 export TF_VAR_organization="o-abc1234"          # your org slug from step 3
 # Optional overrides — defaults are fine for most users:
-export TF_VAR_cluster_name="stock-demo"         # also used as instance name; keep "stock-demo" for both demos
+export TF_VAR_cluster_name="stock-demo"         # also used as instance name + prefix on stock SA
 export TF_VAR_location="us-central1"            # GCP region
-export TF_VAR_tenant="stock-demo"               # Pulsar tenant used for filtering/* topics
+export TF_VAR_tenant="stock-demo"               # cosmetic stock-demo project tenant
+export TF_VAR_parcel_tenant="parcel-demo"       # cosmetic parcels-demo project tenant
+export TF_VAR_control_plane_tenant="control-plane"      # locked-down tenant for orchestrator + filter-requests + state
+export TF_VAR_control_plane_namespace="broker-filter"
 ```
 
-Note: the cluster/tenant default is `stock-demo` for *both* demos — the parcels demo just adds extra topics inside the same cluster. Don't change the prefix unless you understand the spawned-filter name conventions.
+Both demos run against the **same** cluster + control plane (`control-plane/broker-filter`); the `tenant` / `parcel_tenant` vars are cosmetic project organization only — the SDK SAs (`stock-demo-app`, `parcel-demo-app`) inherit their names from those values.
 
 ## 5. Mint the super-admin Pulsar token
 
 For a fresh instance, **always use `--login`** — the key-file mint path requires an Auth0 client-grant that doesn't exist for brand-new instances. (Skipping this is the most common bootstrap failure.)
 
+`snctl auth get-token --login` prints a banner BEFORE the JWT (the verification code + login flow narration). Capturing the whole stdout into `PULSAR_TOKEN` puts that banner in the Authorization header, which curl can't send. Pipe through `grep` to extract just the JWT:
+
 ```bash
-export PULSAR_TOKEN=$(snctl -O "$TF_VAR_organization" auth get-token "$TF_VAR_cluster_name-instance" --login)
+export PULSAR_TOKEN=$(snctl -O "$TF_VAR_organization" auth get-token "$TF_VAR_cluster_name-instance" --login \
+  | grep -oE 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' \
+  | tail -1)
 ```
 
 A browser window opens — sign in with the same SN Cloud account that owns the org. After the browser confirms, the JWT is written to the env var. Verify:
 
 ```bash
-echo "$PULSAR_TOKEN" | head -c 8   # should print "eyJhbGci"
+echo "len=$(printf '%s' "$PULSAR_TOKEN" | wc -c)"   # should print ~1100
+printf '%s' "$PULSAR_TOKEN" | head -c 12; echo ""    # should print "eyJhbGciOiJS"
 ```
+
+`recreate.sh` does the same defensive extraction internally (Phase 5, line ~217) — but you still need a JWT-only `PULSAR_TOKEN` for any direct curl/admin probes you might run later (see step 8).
 
 ## 6. Bootstrap the cluster (Terraform + grants + packages + orchestrator)
 
@@ -87,12 +97,12 @@ cd ../../..
 
 Allow **~15–20 minutes** the first time (most of it is serverless instance provisioning). The script:
 
-1. `terraform apply` — creates the GCP-backed serverless cluster, service accounts (`stock-demo-app` + `stock-demo-orchestrator-function`), `stock-demo/filtering` namespace, source topics in `public/default` (stock-quotes + parcel-{shipments,scans,exceptions}) and control/state topics in `stock-demo/filtering`, and all `pulsar_permission_grant` resources.
-2. Writes `app.token` and `orchestrator-function.token` files alongside the script — these are the SA-scoped JWTs the demo runtime uses.
+1. `terraform apply` — creates the GCP-backed serverless cluster + three tenants (`stock-demo` and `parcel-demo` for cosmetic project organization; `control-plane` for the locked-down filtering control plane), three service accounts (`stock-demo-app` + `parcel-demo-app` for the SDK clients, `stock-demo-orchestrator-function` for the orchestrator + its spawned filters — the latter is `admin_roles` of the `control-plane` tenant), the `control-plane/broker-filter` namespace, source topics in `public/default` (stock-quotes + parcel-{shipments,scans,exceptions}), control + state topics in `control-plane/broker-filter`, and all `pulsar_permission_grant` resources.
+2. Writes three token files alongside the script: `app.token` (stock-demo-app), `parcel-app.token` (parcel-demo-app), `orchestrator-function.token` — these are the SA-scoped JWTs the demo runtime uses.
 3. Sets `kafkaEntryFormat=pulsar_non_batched` per source topic and namespace-default on `public/default`, so KoP-produced Kafka headers surface as Pulsar message properties on the consumer side. (This is what makes JMS selectors like `carrier = 'UPS'` evaluate against actual data.)
-4. Downloads + uploads the pinned `selector-filter` NAR as a Pulsar package (`function://stock-demo/filtering/selector-filter@1.1.0`).
-5. Deploys the orchestrator function from the pinned orchestrator NAR.
-6. Writes a `demo/.env` file with all the connection URLs and token paths the docker-compose files consume.
+4. Downloads + uploads the pinned `selector-filter` NAR as a Pulsar package (`function://control-plane/broker-filter/selector-filter@1.1.0`).
+5. Deploys the orchestrator function from the pinned orchestrator NAR into `control-plane/broker-filter`.
+6. Writes a `demo/.env` file with all the connection URLs + both SDK token paths (`PULSAR_TOKEN_PATH` for stock, `PARCEL_PULSAR_TOKEN_PATH` for parcels) the docker-compose files consume.
 
 When it exits, you should see `🎉 Bootstrap complete` and a list of next-step commands.
 
@@ -160,7 +170,7 @@ Open the UI: **http://localhost:3200**.
 APP_TOKEN=$(cat demo/infra/terraform/app.token)
 BROKER=$(grep PULSAR_ADMIN_URL demo/.env | cut -d= -f2)
 curl -s -H "Authorization: Bearer $APP_TOKEN" \
-  "$BROKER/admin/v3/functions/stock-demo/filtering" | jq
+  "$BROKER/admin/v3/functions/control-plane/broker-filter" | jq
 # Stock:   ["orchestrator","selector-filter-stock-quotes-…"]
 # Parcels: ["orchestrator","selector-filter-parcel-exceptions-…",
 #           "selector-filter-parcel-scans-…","selector-filter-parcel-shipments-…"]
@@ -170,10 +180,10 @@ curl -s -H "Authorization: Bearer $APP_TOKEN" \
 
 ```bash
 for fn in $(curl -s -H "Authorization: Bearer $APP_TOKEN" \
-    "$BROKER/admin/v3/functions/stock-demo/filtering" \
+    "$BROKER/admin/v3/functions/control-plane/broker-filter" \
     | jq -r '.[]|select(startswith("selector-filter"))'); do
   echo "=== $fn ==="
-  curl -s -H "Authorization: Bearer $APP_TOKEN" "$BROKER/admin/v3/functions/stock-demo/filtering/$fn/stats" \
+  curl -s -H "Authorization: Bearer $APP_TOKEN" "$BROKER/admin/v3/functions/control-plane/broker-filter/$fn/stats" \
     | jq '{received: .receivedTotal, processed: .processedSuccessfullyTotal, errors: .userExceptionsTotal}'
 done
 ```
@@ -199,9 +209,16 @@ cd demo/infra/terraform && terraform destroy
 
 ## 10. Common gotchas
 
-- **Token expired** mid-session (24h default): re-run `snctl auth get-token … --login` and re-export `PULSAR_TOKEN`.
+- **`curl` returns `HTTP 000` with `$PULSAR_TOKEN`**: the snctl banner contaminated the token. Re-mint with the JWT-extraction pipe in step 5, OR rescue an existing var with:
+  ```bash
+  PULSAR_TOKEN=$(printf '%s' "$PULSAR_TOKEN" \
+    | grep -oE 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' \
+    | tail -1)
+  ```
+- **Token expired** mid-session (24h default): re-mint with the JWT-extraction pipe from step 5.
 - **`recreate.sh` errors with "instance still provisioning"**: fresh GCP-backed instances take 10–15 min to come up; the script retries 30× at 60s. Walk away and come back.
 - **Filters show `back-off restarting`**: confirm `SELECTOR_REL` is a real release tag (not a SNAPSHOT) and that you ran `make reset-demo-cloud` before bumping versions.
 - **Filters RUNNING but no matches**: was the four-layer onion historically debugged on 2026-05-28 (PRs #29 → #30 → #31 → #32). All four fixes are now in `main`; if you see this on `main`, the symptom is something new — start from `latestUserExceptions[0]` on `/admin/v3/functions/.../status`.
 - **`recreate.sh` Phase 7 hits `unbound variable`**: you're on a stale checkout pre-PR #31; pull `main`.
 - **Parcels demo filters spawn but never match**: you're on a stale checkout pre-PR #29 / #30 / #32; pull `main`.
+- **Doc refers to `stock-demo/filtering` but commands say `control-plane/broker-filter`**: you're on a stale checkout pre-tenant-refactor; pull `main`.

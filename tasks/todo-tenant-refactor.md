@@ -196,9 +196,9 @@ If the migration goes sideways: revert the merge commit on main, `make reset-dem
 
 - [x] User confirmed plan (one shared orchestrator, per-demo SDK SAs, `control-plane/broker-filter` control plane — locked in 2026-05-28)
 - [x] Sanity-check: PUT against the cluster returns 204 (verified 2026-05-28; namespace-create perms confirmed)
-- [ ] Implement TF changes (topics.tf, apikeys.tf, permissions.tf, variables.tf)
-- [ ] Implement script changes (recreate.sh, reset-cloud.sh, bootstrap.sh)
-- [ ] Implement runtime changes (.env.example, compose files)
-- [ ] Update RUNBOOK
+- [x] Implement TF changes (topics.tf, apikeys.tf, permissions.tf, variables.tf) — commit 2a100f3
+- [x] Implement script changes (recreate.sh, reset-cloud.sh, orchestrator-function-config.yaml) — commit f216513
+- [x] Implement runtime changes (.env.example, compose files) — commit 85b0a96
+- [x] Update RUNBOOK — this commit
 - [ ] PR + reset + recreate to verify on live cluster
 - [ ] Squash-merge
