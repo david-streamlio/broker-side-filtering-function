@@ -102,7 +102,17 @@ Allow **~15–20 minutes** the first time (most of it is serverless instance pro
 3. Sets `kafkaEntryFormat=pulsar_non_batched` per source topic and namespace-default on `public/default`, so KoP-produced Kafka headers surface as Pulsar message properties on the consumer side. (This is what makes JMS selectors like `carrier = 'UPS'` evaluate against actual data.)
 4. Downloads + uploads the pinned `selector-filter` NAR as a Pulsar package (`function://control-plane/broker-filter/selector-filter@1.1.0`).
 5. Deploys the orchestrator function from the pinned orchestrator NAR into `control-plane/broker-filter`.
-6. Writes a `demo/.env` file with all the connection URLs + both SDK token paths (`PULSAR_TOKEN_PATH` for stock, `PARCEL_PULSAR_TOKEN_PATH` for parcels) the docker-compose files consume.
+6. Writes a `demo/.env` file with all the connection URLs + three token paths the docker-compose files consume:
+   - `PULSAR_TOKEN_PATH` (stock-demo SDK)
+   - `PARCEL_PULSAR_TOKEN_PATH` (parcels SDK)
+   - `ORCHESTRATOR_PULSAR_TOKEN_PATH` (observability UI — needs elevated scope to read `control-plane/broker-filter/orchestrator-state`; SDK tokens can't see that namespace)
+
+   **Upgrade-from-prior-shape gotcha**: if `demo/.env` already exists (you've run this before), recreate.sh writes `demo/.env.generated` *instead* to avoid clobbering operator edits. You'll see a yellow `! demo/.env already exists` line in the recreate output. Swap it in:
+   ```bash
+   diff demo/.env demo/.env.generated   # review the changes
+   mv demo/.env demo/.env.backup
+   mv demo/.env.generated demo/.env
+   ```
 
 When it exits, you should see `🎉 Bootstrap complete` and a list of next-step commands.
 
@@ -164,6 +174,11 @@ Open the UI: **http://localhost:3200**.
   | `dispatch-watchlist` | `__key__ IN ('TRK000001',…)` (multi-topic) | ~90% |
   | `critical-exceptions` | `severity = 'CRITICAL'` | ~95% |
 
+### What you should *not* see (and shouldn't worry about)
+
+- **`stock-demo` and `parcel-demo` tenants have no namespaces.** That's by design — those tenants exist only to scope their respective SDK SAs (`stock-demo-app`, `parcel-demo-app`); they don't own any namespace. Source topics live in `public/default`, control plane lives in `control-plane/broker-filter`. The cosmetic tenants being "empty" in the SN Cloud console is the expected state.
+- **`control-plane/broker-filter` is not browseable in the SN Cloud console as either SDK SA** — only `orchestrator-function@…` is `admin_roles` on that tenant. Use `orchestrator-function.token` for admin probes against `control-plane/*` (the observability container does exactly this — see step 6's third token path).
+
 ### Command-line sanity check (both demos)
 
 ```bash
@@ -190,22 +205,100 @@ done
 
 ## 9. Shut down
 
-**Soft** (cluster stays, spawned filters auto-GC'd within ~90s):
+Three escalating levels, depending on how much state you want to keep:
+
+### 9a. Soft — stop the demo containers, leave the cluster alone
+
 ```bash
 make demo-down
 ```
-Use this between flipping between stock and parcels, or when stepping away. `make demo-down` tears down whichever compose stack is currently up. The cluster, orchestrator, and source topics persist; spawned filters get tombstoned via the SDK's UNREGISTER → orchestrator idle-GC chain.
 
-**Hard** (wipes spawned filters, packages, source/state/private-output topics + clears their TF state — needs `PULSAR_TOKEN` set):
+Tears down whichever compose stack is currently up (stock or parcels). The 30-second graceful stop lets multi-query-app's JVM shutdown hook send `UNREGISTER` for each registered queryId, which the orchestrator processes and tombstones; the spawned filter functions are then GC'd by the idle-sweep within `HEARTBEAT_MAX_STALE_SECONDS + idle-gc-ttl-seconds` (~90s + 10min by default, but the GC sweep runs every 60s so most spawned filters are gone within ~2 minutes).
+
+**Survives**: cluster, tenants, SAs, package store, orchestrator function, source topics, all data already produced. Spawned filter functions get reclaimed asynchronously. `make demo-cloud[-parcels]` from a clean slate brings everything back in ~30 seconds.
+
+Use between switching demos, or when stepping away.
+
+### 9b. Hard — wipe spawned filters + packages + topics + TF state, keep the cluster
+
 ```bash
 make reset-demo-cloud
 ```
-Implicitly runs `make demo-down` first, then `reset-cloud.sh`. Use this when bumping `SELECTOR_REL` or starting completely fresh. The cluster, tenant, and SAs themselves persist — those are owned by the Terraform root state, not the reset script.
 
-**Full teardown** (delete the entire instance):
+Implicitly runs `make demo-down` first (graceful UNREGISTER, then SIGKILL), then runs `demo/infra/terraform/reset-cloud.sh`. The reset script:
+
+1. Undeploys the orchestrator function so it can't auto-recreate things mid-reset.
+2. Deletes every spawned `selector-filter-*` function in `control-plane/broker-filter`.
+3. Deletes every package version under `function://control-plane/broker-filter/selector-filter` + `/orchestrator`.
+4. Lists every topic in `control-plane/broker-filter` (catches orchestrator-spawned `ctrl-<input-topic>-<uuid>` runtime artifacts, not just the TF-managed `filter-requests` + `orchestrator-state`) and force-deletes each.
+5. Deletes the four source topics (`stock-quotes`, `parcel-{shipments,scans,exceptions}`) and any `filtered-<uuid>` private-output topics in `public/default`.
+6. `terraform state rm`s each of those resources so the next `recreate.sh` plans clean CREATEs instead of UPDATE-existing-but-deleted errors.
+
+**Needs `PULSAR_TOKEN`** (super-admin) set in your shell — JWT-only form, see step 5.
+
+**Survives**: cluster, three tenants, three SAs (`stock-demo-app`, `parcel-demo-app`, `stock-demo-orchestrator-function`), the three `*.token` files on disk, `pulsar_tenant.*` + `pulsar_namespace.broker_filter` Terraform resources, and the namespace itself on the broker (it ends up empty).
+
+Use when bumping `SELECTOR_REL` to a different release, or when you want a guaranteed-clean slate without burning the cluster.
+
+### 9c. Full teardown — delete the entire instance
+
 ```bash
 cd demo/infra/terraform && terraform destroy
 ```
+
+Destroys the GCP-backed serverless instance + cluster + everything inside it. Survives: nothing in the demo's TF state; the `streamnative-key.json` and `*.token` files on disk are left behind for the next `recreate.sh`.
+
+Use when you're done with the demo entirely, or before a major instance-size change that requires a fresh provision.
+
+### 9d. Manual escape hatch if `reset-demo-cloud` leaves something stuck
+
+The four-step diagnostic pattern, in order of likelihood, if `make reset-demo-cloud` finishes but the next `recreate.sh` errors with `Cannot delete non empty namespace` or `409 already exists`:
+
+```bash
+HOST="$(grep PULSAR_ADMIN_URL demo/.env | cut -d= -f2)"
+PULSAR_TOKEN=$(snctl -O <org> auth get-token <cluster>-instance --login \
+  | grep -oE 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' | tail -1)
+
+# 1. Inventory what's actually in the namespace
+curl -s -H "Authorization: Bearer $PULSAR_TOKEN" \
+  "$HOST/admin/v2/persistent/control-plane/broker-filter"          # topics
+curl -s -H "Authorization: Bearer $PULSAR_TOKEN" \
+  "$HOST/admin/v3/packages/function/control-plane/broker-filter"   # package names
+
+# 2. Delete leftover topics (most common cause: orchestrator-spawned ctrl-* topics
+#    that pre-PR #34 reset-cloud.sh didn't know about)
+curl -s -H "Authorization: Bearer $PULSAR_TOKEN" \
+  "$HOST/admin/v2/persistent/control-plane/broker-filter" \
+  | jq -r '.[]' | while read t; do
+  curl -sw "  $t -> HTTP %{http_code}\n" -X DELETE \
+    -H "Authorization: Bearer $PULSAR_TOKEN" "$HOST${t/persistent:\///admin/v2/persistent/}?force=true"
+done
+
+# 3. Delete leftover package versions
+for pkg in orchestrator selector-filter; do
+  for v in $(curl -s -H "Authorization: Bearer $PULSAR_TOKEN" \
+    "$HOST/admin/v3/packages/function/control-plane/broker-filter/$pkg" \
+    | jq -r '.[]?'); do
+    curl -sw "  $pkg@$v -> HTTP %{http_code}\n" -X DELETE \
+      -H "Authorization: Bearer $PULSAR_TOKEN" \
+      "$HOST/admin/v3/packages/function/control-plane/broker-filter/$pkg/$v"
+  done
+done
+
+# 4. Retry namespace delete (force=true is rejected by SN Cloud's
+#    forceDeleteNamespaceAllowed=false; the non-force form needs the namespace
+#    to be truly empty, which steps 1-3 just ensured)
+curl -sw "  HTTP %{http_code}\n" -X DELETE \
+  -H "Authorization: Bearer $PULSAR_TOKEN" \
+  "$HOST/admin/v2/namespaces/control-plane/broker-filter"
+# expect HTTP 204
+
+# 5. Sync TF state
+cd demo/infra/terraform
+terraform state rm pulsar_namespace.broker_filter 2>/dev/null
+```
+
+Then `./recreate.sh` resumes cleanly.
 
 ## 10. Common gotchas
 
