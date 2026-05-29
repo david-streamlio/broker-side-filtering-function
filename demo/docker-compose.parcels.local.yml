@@ -139,7 +139,7 @@ services:
       - ./multi-query-app/queries-parcels.yaml:/app/queries.yaml:ro
 
   observability:
-    image: ghcr.io/david-streamlio/broker-side-filter-observability:${OBSERVABILITY_IMAGE_TAG:-0.1.2}
+    image: ghcr.io/david-streamlio/broker-side-filter-observability:${OBSERVABILITY_IMAGE_TAG:-0.2.0}
     pull_policy: missing
     container_name: parcel-demo-observability
     restart: unless-stopped

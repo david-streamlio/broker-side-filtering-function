@@ -171,7 +171,7 @@ services:
       - ./multi-query-app/queries.yaml:/app/queries.yaml:ro
 
   observability:
-    image: ghcr.io/david-streamlio/broker-side-filter-observability:${OBSERVABILITY_IMAGE_TAG:-0.1.2}
+    image: ghcr.io/david-streamlio/broker-side-filter-observability:${OBSERVABILITY_IMAGE_TAG:-0.2.0}
     # `pull_policy: missing` means Docker will only pull when no local image
     # with this tag exists. Lets contributors who built the image locally
     # (e.g. `docker tag broker-side-filter-observability:test ghcr.io/...:latest`)
