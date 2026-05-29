@@ -23,14 +23,17 @@ variable "location" {
   default     = "us-central1"
 }
 
-variable "tenant" {
-  description = "Pulsar tenant for the stock-demo SDK client (admin_roles=[stock-demo-app]). Cosmetic project organization; data topics live in public/default, control plane lives in control-plane/broker-filter."
-  type        = string
-  default     = "stock-demo"
-}
+# NOTE: there's no `var.tenant` and no `var.parcel_tenant` here. Earlier
+# revisions had cosmetic `stock-demo` / `parcel-demo` Pulsar tenants for
+# project organization, but they ended up empty by construction (data
+# topics MUST live in public/default for KoP's default kafkaNamespace;
+# control plane lives in control-plane/broker-filter). The SAs work fine
+# off namespace-level grants on public/default + per-topic grants on
+# filter-requests — no tenant-admin scope needed anywhere. See topics.tf
+# header comment for the full reasoning.
 
-variable "parcel_tenant" {
-  description = "Pulsar tenant for the parcels-demo SDK client (admin_roles=[parcel-demo-app]). Parallel to var.tenant — both are cosmetic; data topics still live in public/default, control plane still lives in control-plane/broker-filter."
+variable "parcel_app_prefix" {
+  description = "Name prefix for the parcels-demo SDK service account + apikey + rolebindings. Produces 'parcel-demo-app' as the SA name, mirroring the stock-demo SA which inherits its name from var.cluster_name. Pure label — not a Pulsar tenant."
   type        = string
   default     = "parcel-demo"
 }
