@@ -1,31 +1,59 @@
-# ── Tenant ────────────────────────────────────────────────────────────────────
+# ── Tenants ───────────────────────────────────────────────────────────────────
 # Requires the pulsar provider (var.pulsar_web_service_url + var.pulsar_token set).
+#
+# Three tenants:
+#   control-plane  — Owns the filtering infrastructure (orchestrator, filter-
+#                    requests, orchestrator-state, spawned selector-filter
+#                    functions, selector-filter package). admin_roles is just
+#                    the orchestrator-function SA so SDK clients can't reach
+#                    in via tenant-admin shortcuts; SDK access to filter-requests
+#                    is granted explicitly per-topic in permissions.tf.
+#   stock-demo     — Cosmetic / SDK-side organization for the stock demo. The
+#                    stock-demo-app SA is its tenant admin; data still lives
+#                    in public/default per KoP's kafkaNamespace default.
+#   parcel-demo    — Parallel to stock-demo for the parcels demo.
 
-resource "pulsar_tenant" "stock_demo" {
-  tenant           = var.tenant
+resource "pulsar_tenant" "control_plane" {
+  tenant           = var.control_plane_tenant
   allowed_clusters = [var.cluster_name]
-  # Admin roles — must use full principal: <sa-name>@<sa_domain>
-  # stock_demo_app needs admin so the SDK's Session.registerPrivateQuery can create
-  # the per-query private output topic. Spawned filter functions run as the
-  # orchestrator SA and need admin to publish into the same private topics.
   admin_roles = [
-    "${streamnative_service_account.stock_demo_app.name}@${local.sa_domain}",
     "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}",
   ]
 }
 
-# ── Namespaces ────────────────────────────────────────────────────────────────
-# Note: the source topic (stock-quotes) lives in `public/default` per KoP's
-# default `kafkaNamespace` setting — that's the only place Kafka clients connecting
-# via SASL_SSL on :9093 can read/write without explicit FQN routing. The private
-# filtered-* topics also land there for the same reason. Only the orchestrator's
-# own state + control topics + per-filter ctrl topics + spawned filter functions
-# go under stock-demo/filtering, where they can be managed with project-scoped
-# permissions distinct from the broker's shared `public/default`.
+resource "pulsar_tenant" "stock_demo" {
+  tenant           = var.tenant
+  allowed_clusters = [var.cluster_name]
+  # stock_demo_app is tenant admin so the SDK's Session.registerPrivateQuery can
+  # create per-query private output topics. The orchestrator SA is NOT here
+  # anymore (PR follows-up to PR #32 access-control rework): it owns the
+  # control-plane tenant instead, and SDK-side topics are in public/default
+  # where namespace-level grants cover it.
+  admin_roles = [
+    "${streamnative_service_account.stock_demo_app.name}@${local.sa_domain}",
+  ]
+}
 
-resource "pulsar_namespace" "filtering" {
-  tenant    = pulsar_tenant.stock_demo.tenant
-  namespace = "filtering"
+resource "pulsar_tenant" "parcel_demo" {
+  tenant           = var.parcel_tenant
+  allowed_clusters = [var.cluster_name]
+  admin_roles = [
+    "${streamnative_service_account.parcel_demo_app.name}@${local.sa_domain}",
+  ]
+}
+
+# ── Namespaces ────────────────────────────────────────────────────────────────
+# Note: data topics (stock-quotes, parcel-*, filtered-<uuid>) live in
+# `public/default` per KoP's default `kafkaNamespace` setting — that's the only
+# place Kafka clients connecting via SASL_SSL on :9093 can read/write without
+# explicit FQN routing. The control plane (orchestrator + filter-requests +
+# orchestrator-state + spawned filter functions) lives in
+# `control-plane/broker-filter` so SDK clients have explicit per-topic grants
+# only and can't accidentally interact with orchestrator internals.
+
+resource "pulsar_namespace" "broker_filter" {
+  tenant    = pulsar_tenant.control_plane.tenant
+  namespace = var.control_plane_namespace
 
   namespace_config {
     replication_clusters = [var.cluster_name]
@@ -87,9 +115,11 @@ resource "pulsar_topic" "parcel_exceptions" {
 # Control topic — SDK-facing input topic for the orchestrator function.
 # multi-query-app publishes FilterRequest{REGISTER,MODIFY,UNREGISTER} records here;
 # the orchestrator routes them to per-input-topic selector-filter function instances.
+# Both stock-demo-app and parcel-demo-app SAs have explicit produce+consume grants
+# on this single topic (see permissions.tf:{app,parcel_app}_filter_requests).
 resource "pulsar_topic" "filter_requests" {
-  tenant     = pulsar_namespace.filtering.tenant
-  namespace  = pulsar_namespace.filtering.namespace
+  tenant     = pulsar_namespace.broker_filter.tenant
+  namespace  = pulsar_namespace.broker_filter.namespace
   topic_type = "persistent"
   topic_name = "filter-requests"
   partitions = 0
@@ -97,8 +127,8 @@ resource "pulsar_topic" "filter_requests" {
 
 # Orchestrator state topic — TableView-backed registry of input topics + active queries.
 resource "pulsar_topic" "orchestrator_state" {
-  tenant     = pulsar_namespace.filtering.tenant
-  namespace  = pulsar_namespace.filtering.namespace
+  tenant     = pulsar_namespace.broker_filter.tenant
+  namespace  = pulsar_namespace.broker_filter.namespace
   topic_type = "persistent"
   topic_name = "orchestrator-state"
   partitions = 0

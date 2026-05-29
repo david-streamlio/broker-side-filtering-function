@@ -240,11 +240,24 @@ terraform apply -auto-approve
 elapsed "Terraform Step B" $PHASE5_START
 ok "Pulsar resources created"
 
-# ── Phase 6: Token export (already done above on first run; re-export for safety) ──
+# ── Phase 6: Token export (idempotent re-export, then sanity-check) ──
+# The Phase 2 export loop only runs when the cluster wasn't already up; on a
+# resumed apply (CLUSTER_UP=true above), Phase 2 is skipped and any NEW apikey
+# resource added since the last run (e.g. a new SA) would have its token only
+# in `terraform output`, not on disk. This phase re-exports unconditionally,
+# then verifies all expected tokens landed. Idempotent for repeat runs.
 section "Phase 6 — Token export"
-[[ -f "$TF_DIR/app.token" && -f "$TF_DIR/orchestrator-function.token" ]] \
-  || fail "Token files missing — re-run with the cluster up to regenerate"
-ok "SA tokens present (app.token, orchestrator-function.token)"
+terraform output -json apikey_tokens 2>/dev/null | python3 -c "
+import sys, json, os
+tokens = json.load(sys.stdin)
+for name, token in tokens.items():
+    fname = name.replace('_', '-') + '.token'
+    open(fname, 'w').write(token)
+    print(f'  wrote {fname}')
+" || fail "terraform output -json apikey_tokens failed — Step B didn't write the apikey resources?"
+[[ -f "$TF_DIR/app.token" && -f "$TF_DIR/parcel-app.token" && -f "$TF_DIR/orchestrator-function.token" ]] \
+  || fail "Token files missing after re-export — check terraform output -json apikey_tokens manually"
+ok "SA tokens present (app.token, parcel-app.token, orchestrator-function.token)"
 APP_TOKEN=$(cat "$TF_DIR/app.token")
 OF_TOKEN=$(cat "$TF_DIR/orchestrator-function.token")
 
@@ -332,7 +345,10 @@ ok "NARs ready"
 
 # Upload selector-filter NAR as a Pulsar package — the orchestrator spawns
 # instances of this function on demand by referencing the package URL.
-PKG_URL="function://stock-demo/filtering/selector-filter@${SF_VER}"
+# Control-plane lives under control-plane/broker-filter (see
+# variables.tf:control_plane_{tenant,namespace}); the orchestrator-function SA
+# is tenant-admin via pulsar_tenant.control_plane.admin_roles.
+PKG_URL="function://control-plane/broker-filter/selector-filter@${SF_VER}"
 echo "  Uploading selector-filter as Pulsar package ${PKG_URL}..."
 pa packages upload "$PKG_URL" \
   --path "$FILT_NAR" \
@@ -342,13 +358,13 @@ pa packages upload "$PKG_URL" \
 
 # Reset path — undeploy orchestrator before recreating it.
 if [[ "${RESET:-0}" == "1" ]]; then
-  pa functions delete --tenant stock-demo --namespace filtering --name orchestrator 2>/dev/null \
+  pa functions delete --tenant control-plane --namespace broker-filter --name orchestrator 2>/dev/null \
     && ok "Orchestrator deleted (RESET=1)" \
     || warn "Orchestrator was not running"
 fi
 
 # Deploy orchestrator function (if not already running).
-FUNCS_LIST=$(pa functions list --tenant stock-demo --namespace filtering 2>&1 || true)
+FUNCS_LIST=$(pa functions list --tenant control-plane --namespace broker-filter 2>&1 || true)
 
 if echo "$FUNCS_LIST" | grep -q "^orchestrator$"; then
   ok "Orchestrator already deployed — skipping (export RESET=1 to redeploy)"
@@ -374,7 +390,7 @@ PHASE8_START=$(date +%s)
 sleep 5
 
 ORCH_STATUS=$(curl -sf -H "Authorization: Bearer $OF_TOKEN" \
-  "$ADMIN_URL/admin/v3/functions/stock-demo/filtering/orchestrator/status" 2>&1 || true)
+  "$ADMIN_URL/admin/v3/functions/control-plane/broker-filter/orchestrator/status" 2>&1 || true)
 if echo "$ORCH_STATUS" | grep -q '"running":true'; then
   ok "Orchestrator is RUNNING"
 else
@@ -413,18 +429,38 @@ cat > "$ENV_TARGET" <<EOF
 PULSAR_SERVICE_URL=$SERVICE_URL
 PULSAR_ADMIN_URL=$ADMIN_URL
 KAFKA_BOOTSTRAP=$KAFKA_BOOTSTRAP
+
+# Stock demo SDK credentials (docker-compose.yml reads these)
 KAFKA_USERNAME=${PULSAR_CLUSTER}-app
 DEMO_SA_PRINCIPAL=${PULSAR_CLUSTER}-app@${ORG}.auth.streamnative.cloud
 PULSAR_TOKEN_PATH=$TF_DIR/app.token
+
+# Parcels demo SDK credentials (docker-compose.parcels.yml reads these)
+PARCEL_KAFKA_USERNAME=parcel-demo-app
+PARCEL_DEMO_SA_PRINCIPAL=parcel-demo-app@${ORG}.auth.streamnative.cloud
+PARCEL_PULSAR_TOKEN_PATH=$TF_DIR/parcel-app.token
+
+# Observability container token — needs read access to
+# control-plane/broker-filter/orchestrator-state (the UI's source of truth)
+# and to list spawned filters under control-plane/broker-filter. Neither SDK
+# SA has that scope; only the orchestrator-function SA is tenant-admin of
+# control-plane. Both compose files mount this same token for observability.
+ORCHESTRATOR_PULSAR_TOKEN_PATH=$TF_DIR/orchestrator-function.token
+
+# Data topics — both demos share public/default for KoP's default kafkaNamespace
 DEMO_SOURCE_TOPIC_STOCKS=persistent://public/default/stock-quotes
-DEMO_CONTROL_TOPIC=persistent://${PULSAR_CLUSTER}/filtering/filter-requests
-DEMO_SOURCE_PARTITIONS=1
 DEMO_SOURCE_TOPIC_SHIPMENTS=persistent://public/default/parcel-shipments
 DEMO_SOURCE_TOPIC_SCANS=persistent://public/default/parcel-scans
 DEMO_SOURCE_TOPIC_EXCEPTIONS=persistent://public/default/parcel-exceptions
-STATE_TOPIC=persistent://${PULSAR_CLUSTER}/filtering/orchestrator-state
-ORCHESTRATOR_TENANT=${PULSAR_CLUSTER}
-ORCHESTRATOR_NAMESPACE=filtering
+DEMO_SOURCE_PARTITIONS=1
+
+# Control plane — orchestrator + filter-requests + orchestrator-state live in
+# control-plane/broker-filter (locked-down tenant; orchestrator-function SA is
+# the only tenant admin, SDK SAs have explicit per-topic grants on filter-requests).
+DEMO_CONTROL_TOPIC=persistent://control-plane/broker-filter/filter-requests
+STATE_TOPIC=persistent://control-plane/broker-filter/orchestrator-state
+ORCHESTRATOR_TENANT=control-plane
+ORCHESTRATOR_NAMESPACE=broker-filter
 ORCHESTRATOR_FUNCTION=orchestrator
 HEARTBEAT_MAX_STALE_SECONDS=90
 SELECTOR_REL=$SELECTOR_REL

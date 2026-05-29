@@ -33,8 +33,8 @@
 #
 # Required env (auto-loaded from demo/.env if present):
 #   PULSAR_ADMIN_URL              SN Cloud admin URL (recreate.sh writes this)
-#   ORCHESTRATOR_TENANT           e.g. stock-demo
-#   ORCHESTRATOR_NAMESPACE        e.g. filtering
+#   ORCHESTRATOR_TENANT           e.g. control-plane (recreate.sh writes this)
+#   ORCHESTRATOR_NAMESPACE        e.g. broker-filter (recreate.sh writes this)
 #   ORCHESTRATOR_FUNCTION         orchestrator (default)
 #
 # Token (in priority order):
@@ -64,8 +64,8 @@ if [[ -f "$DEMO_DIR/.env" ]]; then
 fi
 
 PULSAR_ADMIN_URL="${PULSAR_ADMIN_URL:?required (set in env, or run recreate.sh first so it writes demo/.env)}"
-TENANT="${ORCHESTRATOR_TENANT:-stock-demo}"
-NS="${ORCHESTRATOR_NAMESPACE:-filtering}"
+TENANT="${ORCHESTRATOR_TENANT:-control-plane}"
+NS="${ORCHESTRATOR_NAMESPACE:-broker-filter}"
 ORCH_FN="${ORCHESTRATOR_FUNCTION:-orchestrator}"
 PULSAR_IMAGE="${PULSAR_IMAGE:-apachepulsar/pulsar:4.2.1}"
 
@@ -146,8 +146,16 @@ fi
 # ── Step 3/5: uploaded selector-filter package versions ──────────────────────
 section "Step 3/5 — Delete selector-filter package versions"
 PKG_PATH="function://$TENANT/$NS/selector-filter"
-VERS_OUT=$(PA packages list-package-versions "$PKG_PATH" 2>&1 || true)
-VERS=$(_normalize_list "$VERS_OUT")
+# pulsarctl's subcommand was renamed `list-package-versions` -> `list-versions`
+# at some point; using the wrong name causes pulsarctl to print a "Did you mean?"
+# help message which used to get parsed (verbatim) as a fake version list, and
+# the loop below tried to delete `selector-filter@Unmatched`, `@arguments`, etc.
+# Belt-and-suspenders: (1) use the current subcommand name, (2) only keep
+# tokens that look like an actual semver-ish version so any future rename fails
+# closed rather than fans out into garbage deletes.
+VERS_OUT=$(PA packages list-versions "$PKG_PATH" 2>&1 || true)
+VERS=$(_normalize_list "$VERS_OUT" \
+         | grep -E '^[0-9]+(\.[0-9]+)*([-+.][A-Za-z0-9_.-]+)?$' || true)
 if [[ -z "$VERS" ]]; then
     warn "no package versions listed for $PKG_PATH (or none exist)"
 else
@@ -177,16 +185,26 @@ for t in \
     fi
 done
 
-# Control + state — non-partitioned.
-for t in \
-        "persistent://$TENANT/$NS/filter-requests" \
-        "persistent://$TENANT/$NS/orchestrator-state" ; do
-    if PA topics delete "$t" -f >/dev/null 2>&1; then
-        ok "deleted topic: $t"
-    else
-        warn "skipped (not found or no permission): $t"
-    fi
-done
+# Every topic in $TENANT/$NS — covers the TF-managed filter-requests +
+# orchestrator-state PLUS the orchestrator's runtime-spawned per-filter
+# control topics (ctrl-<input-topic>-<uuid>), which aren't TF-managed and
+# nobody else tracks. Leaving any of those behind blocks the subsequent
+# namespace destroy (TF's pulsar_namespace.broker_filter delete returns
+# "Cannot delete non empty namespace"; SN Cloud has
+# forceDeleteNamespaceAllowed=false).
+NS_TOPICS_OUT=$(PA topics list "$TENANT/$NS" 2>/dev/null || true)
+NS_TOPICS=$(_normalize_list "$NS_TOPICS_OUT" | grep -E '^persistent://' || true)
+if [[ -z "$NS_TOPICS" ]]; then
+    warn "no topics listed in $TENANT/$NS (or list call failed): $NS_TOPICS_OUT"
+else
+    for t in $NS_TOPICS; do
+        if PA topics delete "$t" -f >/dev/null 2>&1; then
+            ok "deleted topic: $t"
+        else
+            warn "skipped (not found or no permission): $t"
+        fi
+    done
+fi
 
 # SDK private topics (filtered-<uuid>) in public/default — accumulate per query registration.
 PRIV_OUT=$(PA topics list public/default 2>/dev/null || true)
@@ -217,18 +235,23 @@ elif [[ ! -f "$TF_DIR/terraform.tfstate" && ! -f "$TF_DIR/.terraform/terraform.t
     ok "no terraform state file present — nothing to clean"
 else
     TF_RESOURCES=(
+        # Data topics (public/default)
         pulsar_topic.stock_quotes
         pulsar_topic.parcel_shipments
         pulsar_topic.parcel_scans
         pulsar_topic.parcel_exceptions
+        # Control-plane topics (control-plane/broker-filter)
         pulsar_topic.filter_requests
         pulsar_topic.orchestrator_state
+        # SDK grants
         pulsar_permission_grant.app_public_default
         pulsar_permission_grant.app_filter_requests
-        pulsar_permission_grant.orchestrator_filter_deploy
-        pulsar_permission_grant.orchestrator_consume_control
-        pulsar_permission_grant.orchestrator_state_consume
-        pulsar_permission_grant.orchestrator_state_produce
+        pulsar_permission_grant.parcel_app_public_default
+        pulsar_permission_grant.parcel_app_filter_requests
+        # Orchestrator grants — only the namespace-wide public/default consume+produce
+        # remains. The old filter_deploy / consume_control / state_consume /
+        # state_produce grants are gone (orchestrator-function SA is tenant-admin of
+        # control-plane via pulsar_tenant.control_plane.admin_roles).
         pulsar_permission_grant.orchestrator_consume_source
     )
     # Intersect with what's actually in state so we don't `state rm` missing

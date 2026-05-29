@@ -1,13 +1,23 @@
 # ── Service Accounts (streamnative provider) ──────────────────────────────────
-# Two SAs:
+# Three SAs:
 #   stock_demo_app          — ShadowTraffic produces stock-quotes here; multi-query-app
-#                              also uses this SA as the SDK Session principal + consumer.
-#   orchestrator_function   — runs the orchestrator function; spawned selector-filter
-#                              instances inherit the orchestrator's identity.
+#                              uses this SA as the SDK Session principal + consumer
+#                              when running the stock demo.
+#   parcel_demo_app         — Same role, but for the parcels demo (ShadowTraffic +
+#                              SDK Session). Parallel SA so each demo's SDK access
+#                              is independently auditable / revocable.
+#   orchestrator_function   — Runs the orchestrator function; spawned selector-filter
+#                              instances inherit this identity. Owns the
+#                              control-plane tenant (admin_roles in topics.tf).
 
 resource "streamnative_service_account" "stock_demo_app" {
   organization = var.organization
   name         = "${var.cluster_name}-app"
+}
+
+resource "streamnative_service_account" "parcel_demo_app" {
+  organization = var.organization
+  name         = "${var.parcel_tenant}-app"
 }
 
 resource "streamnative_service_account" "orchestrator_function" {
@@ -22,6 +32,12 @@ resource "streamnative_service_account" "orchestrator_function" {
 resource "streamnative_service_account_binding" "stock_demo_app" {
   organization         = var.organization
   service_account_name = streamnative_service_account.stock_demo_app.name
+  cluster_name         = var.cluster_name
+}
+
+resource "streamnative_service_account_binding" "parcel_demo_app" {
+  organization         = var.organization
+  service_account_name = streamnative_service_account.parcel_demo_app.name
   cluster_name         = var.cluster_name
 }
 
@@ -68,6 +84,22 @@ resource "streamnative_rolebinding" "stock_demo_app_namespace_operator" {
   service_account_names = [streamnative_service_account.stock_demo_app.name]
 }
 
+# parcel_demo_app — same two ClusterRoles as stock_demo_app (consumer-group-reader +
+# namespace-operator). Mirrors the KoP-side authorization the SDK + ShadowTraffic need.
+resource "streamnative_rolebinding" "parcel_demo_app_consumer_group_reader" {
+  organization          = var.organization
+  name                  = "${var.parcel_tenant}-app-consumer-group-reader"
+  cluster_role_name     = "consumer-group-reader"
+  service_account_names = [streamnative_service_account.parcel_demo_app.name]
+}
+
+resource "streamnative_rolebinding" "parcel_demo_app_namespace_operator" {
+  organization          = var.organization
+  name                  = "${var.parcel_tenant}-app-namespace-operator"
+  cluster_role_name     = "namespace-operator"
+  service_account_names = [streamnative_service_account.parcel_demo_app.name]
+}
+
 # ── Permission Grants (pulsar provider) ───────────────────────────────────────
 
 # stock_demo_app — produce + consume + packages on public/default. Covers:
@@ -80,48 +112,46 @@ resource "pulsar_permission_grant" "app_public_default" {
   actions   = ["produce", "consume", "packages"]
 }
 
+# parcel_demo_app — namespace-level grant on public/default, mirroring
+# app_public_default. Same three actions: ShadowTraffic produces parcel-*,
+# SDK consumes private filtered-* outputs, packages action covers any
+# package-API use by the demo client.
+resource "pulsar_permission_grant" "parcel_app_public_default" {
+  namespace = "public/default"
+  role      = "${streamnative_service_account.parcel_demo_app.name}@${local.sa_domain}"
+  actions   = ["produce", "consume", "packages"]
+}
+
 # stock_demo_app — produce + consume on filter-requests so the SDK can publish
 # REGISTER/MODIFY/UNREGISTER records (orchestrator consumes them). consume is for
-# the SDK's heartbeat thread responses.
+# the SDK's heartbeat thread responses. The control topic now lives in
+# control-plane/broker-filter (locked-down tenant), so the SDK SA needs explicit
+# per-topic access here — it has no tenant-admin shortcut.
 resource "pulsar_permission_grant" "app_filter_requests" {
   depends_on = [pulsar_topic.filter_requests]
-  topic      = "persistent://${var.tenant}/filtering/filter-requests"
+  topic      = "persistent://${var.control_plane_tenant}/${var.control_plane_namespace}/filter-requests"
   role       = "${streamnative_service_account.stock_demo_app.name}@${local.sa_domain}"
   actions    = ["produce", "consume"]
 }
 
-# orchestrator_function — deploy spawned filter functions + upload NAR packages
-# in the filtering namespace. Required for the orchestrator's
-# functions().createFunction call when spawning a selector-filter instance.
-resource "pulsar_permission_grant" "orchestrator_filter_deploy" {
-  depends_on = [pulsar_namespace.filtering]
-  namespace  = "${var.tenant}/filtering"
-  role       = "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}"
-  actions    = ["functions", "packages"]
-}
-
-# orchestrator_function — consume the SDK-facing FilterRequest topic
-resource "pulsar_permission_grant" "orchestrator_consume_control" {
+# parcel_demo_app — same grant on filter-requests as stock_demo_app. Both demos'
+# SDK clients publish REGISTER/MODIFY/UNREGISTER to the single shared control
+# topic; the orchestrator routes by queryId so per-demo isolation is at the
+# query-id level, not the topic level.
+resource "pulsar_permission_grant" "parcel_app_filter_requests" {
   depends_on = [pulsar_topic.filter_requests]
-  topic      = "persistent://${var.tenant}/filtering/filter-requests"
-  role       = "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}"
-  actions    = ["consume"]
+  topic      = "persistent://${var.control_plane_tenant}/${var.control_plane_namespace}/filter-requests"
+  role       = "${streamnative_service_account.parcel_demo_app.name}@${local.sa_domain}"
+  actions    = ["produce", "consume"]
 }
 
-# orchestrator_function — read + write its TableView state topic
-resource "pulsar_permission_grant" "orchestrator_state_consume" {
-  depends_on = [pulsar_topic.orchestrator_state]
-  topic      = "persistent://${var.tenant}/filtering/orchestrator-state"
-  role       = "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}"
-  actions    = ["consume"]
-}
-
-resource "pulsar_permission_grant" "orchestrator_state_produce" {
-  depends_on = [pulsar_topic.orchestrator_state]
-  topic      = "persistent://${var.tenant}/filtering/orchestrator-state"
-  role       = "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}"
-  actions    = ["produce"]
-}
+# NOTE: the orchestrator-function SA used to have four explicit grants in the
+# old stock-demo/filtering namespace (functions+packages on the namespace; consume
+# on filter-requests; consume+produce on orchestrator-state). All four are now
+# redundant — the SA is admin_roles of the new control-plane tenant (see
+# topics.tf:pulsar_tenant.control_plane), and tenant-admin grants all of those
+# operations implicitly across the entire tenant. Removing them eliminates four
+# (namespace, role) id-collision opportunities of the PR #32 class.
 
 # orchestrator_function — consume any source topic and produce to any per-query
 # private filtered-* output topic in public/default. Required so spawned
@@ -152,6 +182,7 @@ output "service_accounts" {
   description = "SA names — apikeys.tf produces the corresponding JWT tokens"
   value = {
     app                   = streamnative_service_account.stock_demo_app.name
+    parcel_app            = streamnative_service_account.parcel_demo_app.name
     orchestrator_function = streamnative_service_account.orchestrator_function.name
   }
 }

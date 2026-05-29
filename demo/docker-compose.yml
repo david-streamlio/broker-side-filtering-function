@@ -15,15 +15,16 @@
 #   PULSAR_SERVICE_URL          pulsar+ssl://pc-<id>.<region>.snio.cloud:6651
 #   PULSAR_ADMIN_URL            https://pc-<id>.<region>.snio.cloud
 #   KAFKA_BOOTSTRAP             pc-<id>.<region>.snio.cloud:9093
-#   KAFKA_USERNAME              <sa-name>   (e.g. tradewise-demo-tradewise-backend)
-#   STATE_TOPIC                 persistent://<tenant>/<filtering-ns>/orchestrator-state
-#   ORCHESTRATOR_TENANT         <tenant>
-#   ORCHESTRATOR_NAMESPACE      <filtering-ns>
-#   PULSAR_TOKEN_PATH           absolute path on the host to the SA token file
+#   KAFKA_USERNAME              stock-demo-app (the stock-demo SDK SA; recreate.sh writes this)
+#   DEMO_SA_PRINCIPAL           stock-demo-app@<org>.auth.streamnative.cloud
+#   PULSAR_TOKEN_PATH           absolute path on the host to app.token
+#   STATE_TOPIC                 persistent://control-plane/broker-filter/orchestrator-state
+#   ORCHESTRATOR_TENANT         control-plane
+#   ORCHESTRATOR_NAMESPACE      broker-filter
 #   SHADOWTRAFFIC_LICENSE_ID    your ShadowTraffic license id
 #   SHADOWTRAFFIC_LICENSE_KEY   your ShadowTraffic license key
 #   DEMO_SOURCE_TOPIC_STOCKS    defaults to persistent://public/default/stock-quotes
-#   DEMO_CONTROL_TOPIC          defaults to persistent://public/default/filter-requests
+#   DEMO_CONTROL_TOPIC          defaults to persistent://control-plane/broker-filter/filter-requests
 #
 # Note: the source + control topics must already exist on the cluster (or have
 # auto-topic-creation enabled on their namespaces). The orchestrator must be
@@ -42,7 +43,7 @@ services:
       PULSAR_ADMIN_URL:       "${PULSAR_ADMIN_URL:?set in .env}"
       PULSAR_TOKEN_FILE:      "/var/run/secrets/pulsar.token"
       DEMO_SOURCE_TOPIC:      "${DEMO_SOURCE_TOPIC_STOCKS:-persistent://public/default/stock-quotes}"
-      DEMO_CONTROL_TOPIC:     "${DEMO_CONTROL_TOPIC:-persistent://public/default/filter-requests}"
+      DEMO_CONTROL_TOPIC:     "${DEMO_CONTROL_TOPIC:-persistent://control-plane/broker-filter/filter-requests}"
       DEMO_SA_PRINCIPAL:      "${DEMO_SA_PRINCIPAL:?set in .env (e.g. <sa>@<org>.auth.streamnative.cloud)}"
       DEMO_SOURCE_PARTITIONS: "${DEMO_SOURCE_PARTITIONS:-1}"
     volumes:
@@ -116,7 +117,7 @@ services:
       # `env_file:` indirection (see .env / .env.example).
       KAFKA_PASSWORD_FILE: "/var/run/secrets/pulsar.token"
       DEMO_SOURCE_TOPIC:   "${DEMO_SOURCE_TOPIC_STOCKS:-persistent://public/default/stock-quotes}"
-      DEMO_CONTROL_TOPIC:  "${DEMO_CONTROL_TOPIC:-persistent://public/default/filter-requests}"
+      DEMO_CONTROL_TOPIC:  "${DEMO_CONTROL_TOPIC:-persistent://control-plane/broker-filter/filter-requests}"
       DEMO_QUERIES_PATH:   "/app/queries.yaml"
     volumes:
       - ./multi-query-app/queries.yaml:/app/queries.yaml:ro
@@ -144,7 +145,13 @@ services:
       ORCHESTRATOR_FUNCTION:     "${ORCHESTRATOR_FUNCTION:-orchestrator}"
       HEARTBEAT_MAX_STALE_SECONDS: "${HEARTBEAT_MAX_STALE_SECONDS:-90}"
     volumes:
-      - ${PULSAR_TOKEN_PATH}:/var/run/secrets/pulsar.token:ro
+      # Observability needs read access to control-plane/broker-filter/
+      # orchestrator-state (the UI's source of truth) and to list spawned
+      # filters under control-plane/broker-filter. Neither SDK SA has that
+      # scope on the locked-down control-plane tenant — only the
+      # orchestrator-function SA (admin_roles of pulsar_tenant.control_plane)
+      # does. Mount that token here, not the SDK PULSAR_TOKEN_PATH.
+      - ${ORCHESTRATOR_PULSAR_TOKEN_PATH:?set in .env (recreate.sh writes it; points at orchestrator-function.token)}:/var/run/secrets/pulsar.token:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:3200/actuator/health || exit 1"]
       interval: 30s

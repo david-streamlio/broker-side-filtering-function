@@ -1,12 +1,14 @@
-tenant: stock-demo
-namespace: filtering
+tenant: control-plane
+namespace: broker-filter
 name: orchestrator
 className: io.streamnative.filter.orchestrator.OrchestratorFunction
 inputs:
   # SDK-facing topic. multi-query-app publishes FilterRequest{REGISTER,MODIFY,UNREGISTER}
   # records here via selector-filter-client-kafka's Session.registerPrivateQuery /
-  # updatePrivateQuery / retirePrivateQuery.
-  - persistent://stock-demo/filtering/filter-requests
+  # updatePrivateQuery / retirePrivateQuery. Both stock-demo-app and parcel-demo-app
+  # SAs have explicit per-topic produce+consume grants here (see
+  # pulsar_permission_grant.{app,parcel_app}_filter_requests).
+  - persistent://control-plane/broker-filter/filter-requests
 processingGuarantees: ATLEAST_ONCE
 # MUST be 1 — multiple orchestrator instances would race on spawn decisions.
 parallelism: 1
@@ -14,18 +16,19 @@ userConfig:
   # TableView state topic — orchestrator persists per-input-topic filter function metadata
   # and per-queryId fan-out indexes here. apply-compaction below keeps the topic bounded
   # on replay.
-  state-topic: persistent://stock-demo/filtering/orchestrator-state
+  state-topic: persistent://control-plane/broker-filter/orchestrator-state
 
   # Pulsar package URL for the selector-filter NAR. recreate.sh Phase 7 uploads the NAR
   # to this URL after downloading it from the broker-side-filtering-function GitHub
   # Release — the @1.0 version tag is rewritten at deploy time to match $SELECTOR_REL.
-  function-package-url: function://stock-demo/filtering/selector-filter@1.0
+  function-package-url: function://control-plane/broker-filter/selector-filter@1.0
 
   # Tenant/namespace under which spawned selector-filter function instances are deployed.
-  # The orchestrator principal MUST have functions admin on this namespace — granted via
-  # pulsar_permission_grant.orchestrator_filter_deploy in infra/terraform/permissions.tf.
-  function-tenant: stock-demo
-  function-namespace: filtering
+  # The orchestrator principal is admin_roles of pulsar_tenant.control_plane (see
+  # infra/terraform/topics.tf) so it has tenant-admin on control-plane/* implicitly —
+  # no explicit pulsar_permission_grant required for these operations.
+  function-tenant: control-plane
+  function-namespace: broker-filter
 
   function-parallelism: 1
 
