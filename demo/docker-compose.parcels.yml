@@ -23,11 +23,14 @@
 #   PULSAR_SERVICE_URL          pulsar+ssl://pc-<id>.<region>.snio.cloud:6651
 #   PULSAR_ADMIN_URL            https://pc-<id>.<region>.snio.cloud
 #   KAFKA_BOOTSTRAP             pc-<id>.<region>.snio.cloud:9093
-#   KAFKA_USERNAME              <sa-name>
-#   STATE_TOPIC                 persistent://<tenant>/<filtering-ns>/orchestrator-state
-#   ORCHESTRATOR_TENANT         <tenant>
-#   ORCHESTRATOR_NAMESPACE      <filtering-ns>
-#   PULSAR_TOKEN_PATH           absolute path on the host to the SA token file
+#   PARCEL_KAFKA_USERNAME       parcel-demo-app (the parcels SDK SA — separate from
+#                                stock demo's so each demo's SDK access is independently
+#                                auditable / revocable; recreate.sh writes this)
+#   PARCEL_DEMO_SA_PRINCIPAL    parcel-demo-app@<org>.auth.streamnative.cloud
+#   PARCEL_PULSAR_TOKEN_PATH    absolute path on the host to parcel-app.token
+#   STATE_TOPIC                 persistent://control-plane/broker-filter/orchestrator-state
+#   ORCHESTRATOR_TENANT         control-plane
+#   ORCHESTRATOR_NAMESPACE      broker-filter
 #   SHADOWTRAFFIC_LICENSE_ID    your ShadowTraffic license id
 #   SHADOWTRAFFIC_LICENSE_KEY   your ShadowTraffic license key
 #   DEMO_SOURCE_TOPIC_SHIPMENTS  defaults to persistent://public/default/parcel-shipments
@@ -55,12 +58,12 @@ services:
       # so the kafkaEntryFormat / grant / auto-topic-creation steps run once
       # against public/default rather than three times.
       DEMO_SOURCE_TOPICS:     "${DEMO_SOURCE_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments},${DEMO_SOURCE_TOPIC_SCANS:-persistent://public/default/parcel-scans},${DEMO_SOURCE_TOPIC_EXCEPTIONS:-persistent://public/default/parcel-exceptions}"
-      DEMO_CONTROL_TOPIC:     "${DEMO_CONTROL_TOPIC:-persistent://public/default/filter-requests}"
-      DEMO_SA_PRINCIPAL:      "${DEMO_SA_PRINCIPAL:?set in .env (e.g. <sa>@<org>.auth.streamnative.cloud)}"
+      DEMO_CONTROL_TOPIC:     "${DEMO_CONTROL_TOPIC:-persistent://control-plane/broker-filter/filter-requests}"
+      DEMO_SA_PRINCIPAL:      "${PARCEL_DEMO_SA_PRINCIPAL:?set in .env (e.g. <sa>@<org>.auth.streamnative.cloud)}"
       DEMO_SOURCE_PARTITIONS: "${DEMO_SOURCE_PARTITIONS:-1}"
     volumes:
       - ./bootstrap/bootstrap.sh:/usr/local/bin/bootstrap.sh:ro
-      - ${PULSAR_TOKEN_PATH:?set in .env}:/var/run/secrets/pulsar.token:ro
+      - ${PARCEL_PULSAR_TOKEN_PATH:?set in .env}:/var/run/secrets/pulsar.token:ro
     entrypoint: ["/bin/bash", "/usr/local/bin/bootstrap.sh"]
 
   shadowtraffic:
@@ -77,7 +80,7 @@ services:
       - license.env
     volumes:
       - ./shadowtraffic/parcel-events.json:/etc/shadowtraffic/parcel-events.json:ro
-      - ${PULSAR_TOKEN_PATH:?set in .env}:/var/run/secrets/pulsar.token:ro
+      - ${PARCEL_PULSAR_TOKEN_PATH:?set in .env}:/var/run/secrets/pulsar.token:ro
     # Same sed-render dance as the stock-quotes demo: ShadowTraffic 1.18.2
     # strict-parses the config file as JSON BEFORE any substitution, so the
     # template placeholders must be rendered into concrete JSON before the
@@ -92,7 +95,7 @@ services:
             -e "s|[$]{topic_scans}|${DEMO_SOURCE_TOPIC_SCANS:-persistent://public/default/parcel-scans}|g" \
             -e "s|[$]{topic_exceptions}|${DEMO_SOURCE_TOPIC_EXCEPTIONS:-persistent://public/default/parcel-exceptions}|g" \
             -e "s|[$]{bootstrap}|${KAFKA_BOOTSTRAP}|g" \
-            -e "s|[$]{username}|${KAFKA_USERNAME}|g" \
+            -e "s|[$]{username}|${PARCEL_KAFKA_USERNAME}|g" \
             -e "s|[$]{kafka_token}|$$TOKEN|g" \
             /etc/shadowtraffic/parcel-events.json > /tmp/parcel-events.rendered.json
         exec java -Djava.security.manager=allow -Dfile.encoding=UTF-8 \
@@ -116,17 +119,17 @@ services:
       PULSAR_ADMIN_URL:    "${PULSAR_ADMIN_URL:?set in .env}"
       PULSAR_TOKEN_FILE:   "/var/run/secrets/pulsar.token"
       KAFKA_BOOTSTRAP:     "${KAFKA_BOOTSTRAP:?set in .env}"
-      KAFKA_USERNAME:      "${KAFKA_USERNAME:?set in .env}"
+      KAFKA_USERNAME:      "${PARCEL_KAFKA_USERNAME:?set in .env}"
       KAFKA_PASSWORD_FILE: "/var/run/secrets/pulsar.token"
       # DEMO_SOURCE_TOPIC is a fallback only — every query in queries-parcels.yaml
       # specifies its own `topics:` list, so MultiQueryDemo never consults this
       # default. Set it to the shipments topic for sanity / docs alignment.
       DEMO_SOURCE_TOPIC:   "${DEMO_SOURCE_TOPIC_SHIPMENTS:-persistent://public/default/parcel-shipments}"
-      DEMO_CONTROL_TOPIC:  "${DEMO_CONTROL_TOPIC:-persistent://public/default/filter-requests}"
+      DEMO_CONTROL_TOPIC:  "${DEMO_CONTROL_TOPIC:-persistent://control-plane/broker-filter/filter-requests}"
       DEMO_QUERIES_PATH:   "/app/queries.yaml"
     volumes:
       - ./multi-query-app/queries-parcels.yaml:/app/queries.yaml:ro
-      - ${PULSAR_TOKEN_PATH}:/var/run/secrets/pulsar.token:ro
+      - ${PARCEL_PULSAR_TOKEN_PATH}:/var/run/secrets/pulsar.token:ro
     entrypoint: ["/bin/sh", "-c"]
     command: >
       'export KAFKA_PASSWORD=$(cat /var/run/secrets/pulsar.token);
@@ -148,7 +151,7 @@ services:
       ORCHESTRATOR_FUNCTION:     "${ORCHESTRATOR_FUNCTION:-orchestrator}"
       HEARTBEAT_MAX_STALE_SECONDS: "${HEARTBEAT_MAX_STALE_SECONDS:-90}"
     volumes:
-      - ${PULSAR_TOKEN_PATH}:/var/run/secrets/pulsar.token:ro
+      - ${PARCEL_PULSAR_TOKEN_PATH}:/var/run/secrets/pulsar.token:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:3200/actuator/health || exit 1"]
       interval: 30s
