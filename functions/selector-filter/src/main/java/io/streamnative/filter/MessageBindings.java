@@ -19,7 +19,6 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Supplier;
 
 /**
  * Selector-evaluation bindings backed by a Pulsar {@link Record}.
@@ -62,10 +61,12 @@ public final class MessageBindings {
      */
     public static final String KOP_INTERNAL_HEADER_FORMAT = "__ksn_internal_header_format";
 
-    private final Supplier<String> keySupplier;
-    private final Supplier<String> topicSupplier;
-    private final Supplier<Map<String, String>> propertiesSupplier;
-    private final Supplier<byte[]> payloadSupplier;
+    // Hot-path source. When {@code record} is non-null (production) the key/topic/properties resolve
+    // lazily from it on first reference; when null (test constructors) the explicit values passed in
+    // are used. Holding the record + payload directly — rather than four Supplier lambdas — removes
+    // ~5 allocations per message on the matched and dropped fast paths.
+    private final Record<?> record;
+    private final byte[] payload;
 
     private String key;
     private boolean keyResolved;
@@ -87,28 +88,22 @@ public final class MessageBindings {
 
     /** Test constructor — no payload; only key/topic/properties are bound. */
     public MessageBindings(String key, String topic, Map<String, String> properties) {
-        this.keySupplier        = () -> key;
-        this.topicSupplier      = () -> topic;
-        this.propertiesSupplier = () -> properties == null ? Map.of() : properties;
-        this.payloadSupplier    = null;
+        this(key, topic, properties, null);
     }
 
     /** Test constructor — includes raw payload bytes for JSON-field selectors. */
     public MessageBindings(String key, String topic, Map<String, String> properties, byte[] payload) {
-        this.keySupplier        = () -> key;
-        this.topicSupplier      = () -> topic;
-        this.propertiesSupplier = () -> properties == null ? Map.of() : properties;
-        this.payloadSupplier    = () -> payload;
+        this.record     = null;
+        this.payload    = payload;
+        this.key        = key;
+        this.topic      = topic;
+        this.properties = properties;
     }
 
-    private MessageBindings(Supplier<String> keySupplier,
-                            Supplier<String> topicSupplier,
-                            Supplier<Map<String, String>> propertiesSupplier,
-                            Supplier<byte[]> payloadSupplier) {
-        this.keySupplier        = keySupplier;
-        this.topicSupplier      = topicSupplier;
-        this.propertiesSupplier = propertiesSupplier;
-        this.payloadSupplier    = payloadSupplier;
+    /** Production constructor — binds a live record; key/topic/properties resolve lazily from it. */
+    private MessageBindings(Record<?> record, byte[] payload) {
+        this.record  = record;
+        this.payload = payload;
     }
 
     /**
@@ -117,14 +112,7 @@ public final class MessageBindings {
      * when properties are empty — as is the case for KoP-bridged Coinbase messages.
      */
     public static MessageBindings from(Record<?> record, byte[] payload) {
-        return new MessageBindings(
-                () -> resolveLogicalKey(record),
-                () -> TopicNames.normalize(record.getTopicName().orElse(null)),
-                () -> {
-                    Map<String, String> p = record.getProperties();
-                    return p == null ? Map.of() : p;
-                },
-                () -> payload);
+        return new MessageBindings(record, payload);
     }
 
     /** Backward-compatible overload — no payload; JSON-field selectors will not match. */
@@ -154,7 +142,9 @@ public final class MessageBindings {
 
     public String getKey() {
         if (!keyResolved) {
-            key = keySupplier.get();
+            if (record != null) {
+                key = resolveLogicalKey(record);
+            }
             keyResolved = true;
         }
         return key;
@@ -162,7 +152,9 @@ public final class MessageBindings {
 
     public String getTopic() {
         if (!topicResolved) {
-            topic = topicSupplier.get();
+            if (record != null) {
+                topic = TopicNames.normalize(record.getTopicName().orElse(null));
+            }
             topicResolved = true;
         }
         return topic;
@@ -170,7 +162,12 @@ public final class MessageBindings {
 
     public Map<String, String> getProperties() {
         if (!propertiesResolved) {
-            properties = propertiesSupplier.get();
+            if (record != null) {
+                Map<String, String> p = record.getProperties();
+                properties = p == null ? Map.of() : p;
+            } else if (properties == null) {
+                properties = Map.of();
+            }
             propertiesResolved = true;
         }
         return properties;
@@ -217,15 +214,13 @@ public final class MessageBindings {
     private Object getJsonField(String name) {
         if (!payloadResolved) {
             payloadResolved = true;
-            if (payloadSupplier != null) {
-                byte[] bytes = payloadSupplier.get();
-                if (bytes != null && bytes.length > 0) {
-                    try {
-                        JsonNode root = MAPPER.readTree(bytes);
-                        payloadJson = (root != null && root.isObject()) ? root : null;
-                    } catch (Exception e) {
-                        LOG.debug("Payload is not valid JSON — JSON-field selectors will not match: {}", e.toString());
-                    }
+            byte[] bytes = payload;
+            if (bytes != null && bytes.length > 0) {
+                try {
+                    JsonNode root = MAPPER.readTree(bytes);
+                    payloadJson = (root != null && root.isObject()) ? root : null;
+                } catch (Exception e) {
+                    LOG.debug("Payload is not valid JSON — JSON-field selectors will not match: {}", e.toString());
                 }
             }
         }
