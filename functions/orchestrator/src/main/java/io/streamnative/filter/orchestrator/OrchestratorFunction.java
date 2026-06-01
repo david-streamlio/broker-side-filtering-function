@@ -66,6 +66,8 @@ public class OrchestratorFunction implements Function<byte[], Void> {
     private Clock clock = Clock.systemUTC();
     /** Background sweeper. {@code null} when {@code idle-gc-enabled = false}. */
     private IdleFilterSweeper idleFilterSweeper;
+    /** Background existence reconciler. {@code null} when {@code existence-reconcile-enabled = false}. */
+    private FilterReconciler filterReconciler;
     /**
      * Sweeper-emitted counters waiting to be flushed into the next process()-time {@link Context}.
      * Calls to {@code Context.recordMetric} from threads other than the function's process loop
@@ -141,16 +143,26 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             this.idleFilterSweeper.start();
         }
 
+        if (config.existenceReconcileEnabled()) {
+            this.filterReconciler = new FilterReconciler(registry, ownedAdmin, config, clock,
+                    spawner, this::publishQuery, this::recordSweeperMetric);
+            this.filterReconciler.start();
+        }
+
         LOG.info("OrchestratorFunction initialized. stateTopic={}, packageUrl={}, "
                         + "fnTenant={}, fnNamespace={}, ctrlTopicTenant={}, ctrlTopicNs={}, "
                         + "parallelism={}, applyCompaction={}, idleGcEnabled={}, "
-                        + "idleGcTtlSeconds={}, idleGcSweepIntervalSeconds={}",
+                        + "idleGcTtlSeconds={}, idleGcSweepIntervalSeconds={}, "
+                        + "existenceReconcileEnabled={}, existenceReconcileIntervalSeconds={}, "
+                        + "existenceReconcileMaxAttempts={}",
                 config.stateTopic(), config.functionPackageUrl(),
                 config.functionTenant(), config.functionNamespace(),
                 config.controlTopicTenant(), config.controlTopicNamespace(),
                 config.functionParallelism(), config.applyCompaction(),
                 config.idleGcEnabled(), config.idleGcTtlSeconds(),
-                config.idleGcSweepIntervalSeconds());
+                config.idleGcSweepIntervalSeconds(),
+                config.existenceReconcileEnabled(), config.existenceReconcileIntervalSeconds(),
+                config.existenceReconcileMaxAttempts());
     }
 
     @Override
@@ -266,7 +278,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
 
         registry.putQueryEntry(queryId, new QueryEntry(
                 req.getOutputTopic(), publishedControlTopics, publishedRegistryKeys,
-                Instant.now(clock).toString()));
+                Instant.now(clock).toString(), normalizedSelector(req.getSelector())));
         ctx.recordMetric("orchestrator.requests.accepted", 1);
         LOG.info("REGISTER queryId={} outputTopic={} controlTopics={}",
                 queryId, req.getOutputTopic(), publishedControlTopics);
@@ -286,8 +298,9 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         for (String controlTopic : q.getControlTopics()) {
             publishQuery(controlTopic, queryId, selector, q.getOutputTopic());
         }
-        // Touch lastSeen — a MODIFY counts as liveness signal just like a heartbeat.
-        registry.putQueryEntry(queryId, q.withLastSeen(Instant.now(clock)));
+        // Persist the new selector (authoritative for reconcile repopulation) and touch lastSeen —
+        // a MODIFY counts as a liveness signal just like a heartbeat.
+        registry.putQueryEntry(queryId, q.withSelector(selector).withLastSeen(Instant.now(clock)));
         ctx.recordMetric("orchestrator.requests.accepted", 1);
         LOG.info("MODIFY queryId={} selector=[{}] fanout={}",
                 queryId, selector, q.getControlTopics().size());
@@ -470,8 +483,11 @@ public class OrchestratorFunction implements Function<byte[], Void> {
 
     @Override
     public void close() throws Exception {
-        // Close the sweeper FIRST so it does not race with us tearing down the admin/registry
-        // beneath it.
+        // Close the background loops FIRST so they do not race with us tearing down the
+        // admin/registry beneath them.
+        if (filterReconciler != null) {
+            try { filterReconciler.close(); } catch (Exception e) { LOG.warn("Close reconciler", e); }
+        }
         if (idleFilterSweeper != null) {
             try { idleFilterSweeper.close(); } catch (Exception e) { LOG.warn("Close sweeper", e); }
         }

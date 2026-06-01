@@ -26,6 +26,12 @@ userConfig:
   idle-gc-ttl-seconds: 600
   idle-gc-sweep-interval-seconds: 60
   heartbeat-max-stale-seconds: 90
+  # Continuous existence reconcile — re-spawns filters deleted out-of-band while a query is live.
+  # Left disabled until the local "delete a function, watch it heal" e2e is validated; flip to
+  # true to demo self-healing (see RUNBOOK).
+  existence-reconcile-enabled: false
+  existence-reconcile-interval-seconds: 60
+  existence-reconcile-max-attempts: 5
 resources:
   cpu: 0.5
   ram: 536870912   # 512 MB — local Pulsar standalone has tight headroom

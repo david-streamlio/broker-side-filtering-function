@@ -41,6 +41,16 @@ final class RegistryEntry {
     private final String createdAt;
     private final Set<String> activeQueryIds;
     private final String idleSince;
+    /**
+     * Whether this entry's registry key is a topicsPattern (vs a concrete input topic FQN). Needed
+     * by the existence reconcile loop to reconstruct the spawn request — {@code topicsPattern}
+     * vs {@code inputTopics} — when re-creating a deleted function. {@code false} on read for
+     * entries written before this flag existed; such legacy entries are re-spawned as input-topic
+     * registrations (the common case), so a pre-flag pattern filter re-spawned after an upgrade
+     * would be reconstructed incorrectly — acceptable given pattern use is rare and the flag is
+     * written on every fresh REGISTER.
+     */
+    private final boolean isPattern;
 
     @JsonCreator
     RegistryEntry(@JsonProperty("controlTopic") String controlTopic,
@@ -50,7 +60,8 @@ final class RegistryEntry {
                   @JsonProperty("clientType") ClientType clientType,
                   @JsonProperty("createdAt") String createdAt,
                   @JsonProperty("activeQueryIds") Set<String> activeQueryIds,
-                  @JsonProperty("idleSince") String idleSince) {
+                  @JsonProperty("idleSince") String idleSince,
+                  @JsonProperty("isPattern") boolean isPattern) {
         this.controlTopic       = Objects.requireNonNull(controlTopic, "controlTopic");
         this.filterFunctionName = Objects.requireNonNull(filterFunctionName, "filterFunctionName");
         this.keyDeserializer    = keyDeserializer;
@@ -61,6 +72,16 @@ final class RegistryEntry {
                 ? null
                 : Collections.unmodifiableSet(new LinkedHashSet<>(activeQueryIds));
         this.idleSince          = idleSince;
+        this.isPattern          = isPattern;
+    }
+
+    /** Legacy 8-arg constructor — pre-dates the isPattern flag; defaults it to {@code false}. */
+    RegistryEntry(String controlTopic, String filterFunctionName,
+                  String keyDeserializer, String valueDeserializer,
+                  ClientType clientType, String createdAt,
+                  Set<String> activeQueryIds, String idleSince) {
+        this(controlTopic, filterFunctionName, keyDeserializer, valueDeserializer,
+                clientType, createdAt, activeQueryIds, idleSince, false);
     }
 
     /** Legacy 6-arg constructor — used by callers that don't yet write activeQueryIds. */
@@ -68,14 +89,15 @@ final class RegistryEntry {
                   String keyDeserializer, String valueDeserializer,
                   ClientType clientType, String createdAt) {
         this(controlTopic, filterFunctionName, keyDeserializer, valueDeserializer,
-                clientType, createdAt, null, null);
+                clientType, createdAt, null, null, false);
     }
 
     static RegistryEntry newEntry(String controlTopic, String filterFunctionName,
                                   FilterRequest req) {
+        boolean pattern = req.getTopicsPattern() != null && !req.getTopicsPattern().isBlank();
         return new RegistryEntry(controlTopic, filterFunctionName,
                 req.getKeyDeserializer(), req.getValueDeserializer(), req.getClientType(),
-                Instant.now().toString(), null, null);
+                Instant.now().toString(), null, null, pattern);
     }
 
     public String getControlTopic()                  { return controlTopic; }
@@ -86,6 +108,10 @@ final class RegistryEntry {
     public String getCreatedAt()                     { return createdAt; }
     public Set<String> getActiveQueryIds()           { return activeQueryIds; }
     public String getIdleSince()                     { return idleSince; }
+    // Pin the JSON name: Jackson would otherwise derive "pattern" from the boolean getter and
+    // mismatch the @JsonCreator's "isPattern" param (→ always deserializes false).
+    @JsonProperty("isPattern")
+    public boolean isPattern()                       { return isPattern; }
 
     /**
      * Compatibility matrix for serializer fields, applied per-field:
@@ -129,7 +155,8 @@ final class RegistryEntry {
                 clientType == null ? req.getClientType() : clientType,
                 createdAt,
                 activeQueryIds,
-                idleSince);
+                idleSince,
+                isPattern);
     }
 
     /**
@@ -144,7 +171,7 @@ final class RegistryEntry {
         next.add(queryId);
         return new RegistryEntry(controlTopic, filterFunctionName,
                 keyDeserializer, valueDeserializer, clientType, createdAt,
-                next, null);
+                next, null, isPattern);
     }
 
     /**
@@ -160,7 +187,7 @@ final class RegistryEntry {
         String nextIdleSince = next.isEmpty() ? now.toString() : null;
         return new RegistryEntry(controlTopic, filterFunctionName,
                 keyDeserializer, valueDeserializer, clientType, createdAt,
-                next, nextIdleSince);
+                next, nextIdleSince, isPattern);
     }
 
     private enum Mismatch { NONE, UPGRADE, REJECT }
@@ -183,13 +210,14 @@ final class RegistryEntry {
                 && clientType == that.clientType
                 && Objects.equals(createdAt, that.createdAt)
                 && Objects.equals(activeQueryIds, that.activeQueryIds)
-                && Objects.equals(idleSince, that.idleSince);
+                && Objects.equals(idleSince, that.idleSince)
+                && isPattern == that.isPattern;
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(controlTopic, filterFunctionName, keyDeserializer,
-                valueDeserializer, clientType, createdAt, activeQueryIds, idleSince);
+                valueDeserializer, clientType, createdAt, activeQueryIds, idleSince, isPattern);
     }
 
     @Override
@@ -201,7 +229,8 @@ final class RegistryEntry {
                 + "', clientType=" + clientType
                 + ", createdAt='" + createdAt
                 + "', activeQueryIds=" + activeQueryIds
-                + ", idleSince='" + idleSince + "'}";
+                + ", idleSince='" + idleSince
+                + "', isPattern=" + isPattern + "}";
     }
 
     /** Tri-state result from {@link RegistryEntry#check(FilterRequest)}. */

@@ -70,6 +70,24 @@ final class OrchestratorConfig {
      */
     static final String KEY_HEARTBEAT_MAX_STALE       = "heartbeat-max-stale-seconds";
 
+    /**
+     * Master switch for the continuous existence-reconcile loop. When false, no reconciler is
+     * started — the orchestrator self-heals only reactively (REGISTER) and by deletion (idle GC).
+     * When true, a periodic loop re-spawns filter functions that have gone missing while a live
+     * query still references them.
+     */
+    static final String KEY_EXISTENCE_RECONCILE_ENABLED      = "existence-reconcile-enabled";
+
+    /** How often the reconciler evaluates in-use {@code t:} entries for a missing function. */
+    static final String KEY_EXISTENCE_RECONCILE_INTERVAL     = "existence-reconcile-interval-seconds";
+
+    /**
+     * Consecutive failed re-spawn attempts for a single registry key before the reconciler gives up
+     * on it (until the next clean REGISTER) — backstop against hammering admin on a permanently
+     * unspawnable filter (e.g. a bad package URL).
+     */
+    static final String KEY_EXISTENCE_RECONCILE_MAX_ATTEMPTS = "existence-reconcile-max-attempts";
+
     private final String stateTopic;
     private final String functionPackageUrl;
     private final String functionTenant;
@@ -85,6 +103,9 @@ final class OrchestratorConfig {
     private final long idleGcTtlSeconds;
     private final long idleGcSweepIntervalSeconds;
     private final long heartbeatMaxStaleSeconds;
+    private final boolean existenceReconcileEnabled;
+    private final long existenceReconcileIntervalSeconds;
+    private final long existenceReconcileMaxAttempts;
 
     private OrchestratorConfig(String stateTopic, String functionPackageUrl,
                                String functionTenant, String functionNamespace,
@@ -94,7 +115,10 @@ final class OrchestratorConfig {
                                String pulsarAdminToken,
                                boolean idleGcEnabled, long idleGcTtlSeconds,
                                long idleGcSweepIntervalSeconds,
-                               long heartbeatMaxStaleSeconds) {
+                               long heartbeatMaxStaleSeconds,
+                               boolean existenceReconcileEnabled,
+                               long existenceReconcileIntervalSeconds,
+                               long existenceReconcileMaxAttempts) {
         this.stateTopic                  = stateTopic;
         this.functionPackageUrl          = functionPackageUrl;
         this.functionTenant              = functionTenant;
@@ -110,6 +134,9 @@ final class OrchestratorConfig {
         this.idleGcTtlSeconds            = idleGcTtlSeconds;
         this.idleGcSweepIntervalSeconds  = idleGcSweepIntervalSeconds;
         this.heartbeatMaxStaleSeconds    = heartbeatMaxStaleSeconds;
+        this.existenceReconcileEnabled            = existenceReconcileEnabled;
+        this.existenceReconcileIntervalSeconds    = existenceReconcileIntervalSeconds;
+        this.existenceReconcileMaxAttempts        = existenceReconcileMaxAttempts;
     }
 
     static OrchestratorConfig fromContext(Context ctx) {
@@ -128,9 +155,13 @@ final class OrchestratorConfig {
         long gcTtl           = optionalLong(ctx, KEY_IDLE_GC_TTL_SECONDS, 300L);
         long gcInterval      = optionalLong(ctx, KEY_IDLE_GC_SWEEP_INTERVAL, 30L);
         long hbMaxStale      = optionalLong(ctx, KEY_HEARTBEAT_MAX_STALE, 90L);
+        boolean reconcileEnabled  = optionalBoolean(ctx, KEY_EXISTENCE_RECONCILE_ENABLED, false);
+        long reconcileInterval    = optionalLong(ctx, KEY_EXISTENCE_RECONCILE_INTERVAL, 60L);
+        long reconcileMaxAttempts = optionalLong(ctx, KEY_EXISTENCE_RECONCILE_MAX_ATTEMPTS, 5L);
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 ctrlTenant, ctrlNamespace, parallelism, compaction, threshold, adminUrl,
-                adminToken, gcEnabled, gcTtl, gcInterval, hbMaxStale);
+                adminToken, gcEnabled, gcTtl, gcInterval, hbMaxStale,
+                reconcileEnabled, reconcileInterval, reconcileMaxAttempts);
     }
 
     /** Package-private factory for tests — GC disabled by default. */
@@ -139,7 +170,8 @@ final class OrchestratorConfig {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
-                false, 300L, 30L, 90L);
+                false, 300L, 30L, 90L,
+                false, 60L, 5L);
     }
 
     /** Test factory exposing GC knobs — used by IdleFilterSweeper tests. */
@@ -150,7 +182,8 @@ final class OrchestratorConfig {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
-                gcEnabled, gcTtlSeconds, gcSweepIntervalSeconds, 90L);
+                gcEnabled, gcTtlSeconds, gcSweepIntervalSeconds, 90L,
+                false, 60L, 5L);
     }
 
     /** Test factory exposing both idle-GC and heartbeat knobs. */
@@ -160,7 +193,21 @@ final class OrchestratorConfig {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
-                true, 300L, 30L, heartbeatMaxStaleSeconds);
+                true, 300L, 30L, heartbeatMaxStaleSeconds,
+                false, 60L, 5L);
+    }
+
+    /** Test factory exposing existence-reconcile knobs — used by FilterReconciler tests. */
+    static OrchestratorConfig forTestingWithReconcile(String stateTopic, String packageUrl,
+                                                      String fnTenant, String fnNamespace,
+                                                      boolean reconcileEnabled,
+                                                      long reconcileIntervalSeconds,
+                                                      long reconcileMaxAttempts) {
+        return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
+                fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
+                "http://localhost:8080", "",
+                false, 300L, 30L, 90L,
+                reconcileEnabled, reconcileIntervalSeconds, reconcileMaxAttempts);
     }
 
     public String stateTopic()                  { return stateTopic; }
@@ -178,6 +225,9 @@ final class OrchestratorConfig {
     public long idleGcTtlSeconds()              { return idleGcTtlSeconds; }
     public long idleGcSweepIntervalSeconds()    { return idleGcSweepIntervalSeconds; }
     public long heartbeatMaxStaleSeconds()      { return heartbeatMaxStaleSeconds; }
+    public boolean existenceReconcileEnabled()           { return existenceReconcileEnabled; }
+    public long existenceReconcileIntervalSeconds()      { return existenceReconcileIntervalSeconds; }
+    public long existenceReconcileMaxAttempts()          { return existenceReconcileMaxAttempts; }
 
     private static String requireString(Context ctx, String key) {
         Object raw = ctx.getUserConfigValue(key).orElse(null);
@@ -232,6 +282,9 @@ final class OrchestratorConfig {
                 && idleGcTtlSeconds == that.idleGcTtlSeconds
                 && idleGcSweepIntervalSeconds == that.idleGcSweepIntervalSeconds
                 && heartbeatMaxStaleSeconds == that.heartbeatMaxStaleSeconds
+                && existenceReconcileEnabled == that.existenceReconcileEnabled
+                && existenceReconcileIntervalSeconds == that.existenceReconcileIntervalSeconds
+                && existenceReconcileMaxAttempts == that.existenceReconcileMaxAttempts
                 && Objects.equals(stateTopic, that.stateTopic)
                 && Objects.equals(functionPackageUrl, that.functionPackageUrl)
                 && Objects.equals(functionTenant, that.functionTenant)
@@ -248,6 +301,7 @@ final class OrchestratorConfig {
                 controlTopicTenant, controlTopicNamespace, functionParallelism,
                 applyCompaction, compactionThresholdBytes, pulsarAdminUrl, pulsarAdminToken,
                 idleGcEnabled, idleGcTtlSeconds, idleGcSweepIntervalSeconds,
-                heartbeatMaxStaleSeconds);
+                heartbeatMaxStaleSeconds, existenceReconcileEnabled,
+                existenceReconcileIntervalSeconds, existenceReconcileMaxAttempts);
     }
 }

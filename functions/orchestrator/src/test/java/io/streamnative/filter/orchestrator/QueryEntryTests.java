@@ -153,4 +153,73 @@ class QueryEntryTests {
         QueryEntry parsed = MAPPER.readValue(json, QueryEntry.class);
         assertThat(parsed.getLastSeen()).isNull();
     }
+
+    // ---------------------------------------------------------------- selector (reconcile repopulation)
+
+    @Test
+    void withSelectorReplacesAndPreservesOtherFields() {
+        QueryEntry q = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/orchestrator/ctrl-a"),
+                List.of("persistent://public/in/a"),
+                "2026-05-12T22:00:00Z");
+        assertThat(q.getSelector()).isNull();
+
+        QueryEntry withSel = q.withSelector("region = 'US'");
+        assertThat(withSel.getSelector()).isEqualTo("region = 'US'");
+        // Other fields preserved, including lastSeen.
+        assertThat(withSel.getOutputTopic()).isEqualTo(q.getOutputTopic());
+        assertThat(withSel.getControlTopics()).isEqualTo(q.getControlTopics());
+        assertThat(withSel.getRegistryKeys()).isEqualTo(q.getRegistryKeys());
+        assertThat(withSel.getLastSeen()).isEqualTo("2026-05-12T22:00:00Z");
+    }
+
+    @Test
+    void withLastSeenPreservesSelector() {
+        QueryEntry q = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/orchestrator/ctrl-a"),
+                List.of("persistent://public/in/a"),
+                null,
+                "region = 'US'");
+        QueryEntry stamped = q.withLastSeen(java.time.Instant.parse("2026-05-12T22:00:00Z"));
+        assertThat(stamped.getSelector()).isEqualTo("region = 'US'");
+        assertThat(stamped.getLastSeen()).isEqualTo("2026-05-12T22:00:00Z");
+    }
+
+    @Test
+    void serdeRoundTripWithSelector() throws Exception {
+        QueryEntry q = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/orchestrator/ctrl-a"),
+                List.of("persistent://public/in/a"),
+                "2026-05-12T22:00:00Z",
+                "__key__ IN ('AAPL','MSFT')");
+        byte[] payload = MAPPER.writeValueAsBytes(q);
+        QueryEntry parsed = MAPPER.readValue(payload, QueryEntry.class);
+        assertThat(parsed).isEqualTo(q);
+        assertThat(parsed.getSelector()).isEqualTo("__key__ IN ('AAPL','MSFT')");
+    }
+
+    @Test
+    void serdeOmitsNullSelector() throws Exception {
+        QueryEntry q = new QueryEntry(
+                "persistent://public/out/x",
+                List.of("persistent://public/orchestrator/ctrl-a"),
+                List.of("persistent://public/in/a"));
+        assertThat(MAPPER.writeValueAsString(q)).doesNotContain("selector");
+    }
+
+    @Test
+    void legacyJsonWithoutSelectorDeserializesNull() throws Exception {
+        String json = """
+                {
+                  "outputTopic": "persistent://public/out/x",
+                  "controlTopics": ["persistent://public/orchestrator/ctrl-a"],
+                  "registryKeys":  ["persistent://public/in/a"]
+                }
+                """;
+        QueryEntry parsed = MAPPER.readValue(json, QueryEntry.class);
+        assertThat(parsed.getSelector()).isNull();
+    }
 }

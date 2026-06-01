@@ -53,6 +53,13 @@ userConfig:
   # death to filter reclaim ≈ 90 + 600 + sweep slack ≈ 12 minutes.
   heartbeat-max-stale-seconds: 90
 
+  # Continuous existence reconcile — re-spawns filters deleted out-of-band while a query is
+  # still live (the "ensure desired filters exist" controller half). Disabled by default until
+  # validated on the cloud cluster; flip to true to enable self-healing of missing functions.
+  existence-reconcile-enabled: false
+  existence-reconcile-interval-seconds: 60
+  existence-reconcile-max-attempts: 5
+
 resources:
   cpu: 1.0
   ram: 1073741824   # 1 GB
