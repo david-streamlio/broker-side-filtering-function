@@ -120,8 +120,17 @@ abstract class PerfHarnessIT {
                 .withEnv("PULSAR_PREFIX_allowAutoTopicCreation", "true")
                 .withEnv("PULSAR_PREFIX_allowAutoTopicCreationType", "non-partitioned")
                 .withEnv("PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled", "false")
-                .waitingFor(Wait.forLogMessage(".*Created namespace public/default.*", 1)
-                        .withStartupTimeout(Duration.ofMinutes(3)));
+                // Explicit standalone command. Without it the sn-platform default entrypoint
+                // exits without a long-running broker (container exits code 0 → "Wait strategy
+                // failed"). Apply PULSAR_PREFIX_* to standalone.conf (the default entrypoint only
+                // configures broker.conf, but `pulsar standalone` reads standalone.conf) and run
+                // standalone with the functions worker (we deploy NARs via admin); -nss = no stream
+                // storage. Mirrors the validated KoPFilterFunctionIT setup.
+                .withCommand("sh", "-c",
+                        "bin/apply-config-from-env.py conf/standalone.conf "
+                                + "&& bin/pulsar standalone -nss")
+                .waitingFor(Wait.forLogMessage(".*messaging service is ready.*", 1)
+                        .withStartupTimeout(Duration.ofMinutes(5)));
     }
 
     /**
