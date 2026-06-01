@@ -75,6 +75,25 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
      */
     static final String METRIC_PROCESSING_TIME_MS = "filter.processing.time.ms";
 
+    /**
+     * Synchronous span of {@code process()} for a MATCHED record: entry → all {@code sendAsync()}
+     * calls dispatched (deserialize + selector evaluation + message build + producer enqueue), in
+     * milliseconds. This is the function's own CPU "value-add" latency, excluding the output-send
+     * round-trip. Matched-only (dropped records emit no output). Recorded as a sample so the
+     * monitoring layer computes percentiles. Gated by {@link #CFG_PROCESSING_TIME_METRIC}.
+     */
+    static final String METRIC_DISPATCH_TIME_MS = "filter.dispatch.time.ms";
+
+    /**
+     * Full span of {@code process()} for a MATCHED record: entry → all output sends acked — i.e.
+     * {@link #METRIC_DISPATCH_TIME_MS} plus the output-send round-trip, in milliseconds.
+     * Matched-only, distinct from {@link #METRIC_PROCESSING_TIME_MS} which also samples the dropped
+     * path. {@code match_processing − dispatch} isolates the output-send component, so a baseline
+     * can tell whether value-add latency is code-bound (dispatch) or send-bound. Gated by
+     * {@link #CFG_PROCESSING_TIME_METRIC}.
+     */
+    static final String METRIC_MATCH_PROCESSING_TIME_MS = "filter.match.processing.time.ms";
+
     // Latency metrics: running sums + counts so the observability can compute
     // avg latency as delta(sum)/delta(count) over any polling window.
     // "publish" = Pulsar broker received the source message (broker-side filter latency).
@@ -202,6 +221,10 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
             return ackAsDropped(ctx, record, payloadBytes, startNanos);
         }
 
+        // (b1) value-add latency: entry → all sends dispatched (deserialize + eval + build +
+        // enqueue). Recorded synchronously on the process-loop thread, matched-only.
+        recordDispatchTime(ctx, startNanos);
+
         final int fanout = sends.size();
         return CompletableFuture.allOf(sends.toArray(new CompletableFuture[0]))
                 .whenComplete((v, err) -> {
@@ -216,6 +239,8 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                         ctx.recordMetric(METRIC_MESSAGES_OUT, fanout);
                         ctx.recordMetric(METRIC_BYTES_OUT, (double) payloadBytes * fanout);
                         recordMatchLatency(ctx, record);
+                        // (b) total value-add latency: entry → all output sends acked (matched-only).
+                        recordMatchProcessingTime(ctx, startNanos);
                         long c = filteredCount.addAndGet(fanout);
                         if (c % LOG_FREQUENCY < fanout) {
                             LOG.info("Filtered {} messages (in={} dropped={} active-queries={})",
@@ -298,6 +323,32 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         }
         double elapsedMs = (System.nanoTime() - startNanos) / 1_000_000.0;
         ctx.recordMetric(METRIC_PROCESSING_TIME_MS, elapsedMs);
+    }
+
+    /**
+     * Records {@link #METRIC_DISPATCH_TIME_MS} — the synchronous (b1) value-add span from
+     * {@code process()} entry to all sends dispatched. Called on the process-loop thread for a
+     * matched record only. No-op when the metric is disabled (and {@code startNanos} is then 0).
+     */
+    private void recordDispatchTime(Context ctx, long startNanos) {
+        if (!processingTimeMetricEnabled) {
+            return;
+        }
+        double elapsedMs = (System.nanoTime() - startNanos) / 1_000_000.0;
+        ctx.recordMetric(METRIC_DISPATCH_TIME_MS, elapsedMs);
+    }
+
+    /**
+     * Records {@link #METRIC_MATCH_PROCESSING_TIME_MS} — the full (b) value-add span from
+     * {@code process()} entry to all output sends acked, for a matched record. Called from the
+     * matched-fanout completion (async, broker IO thread) on success. No-op when disabled.
+     */
+    private void recordMatchProcessingTime(Context ctx, long startNanos) {
+        if (!processingTimeMetricEnabled) {
+            return;
+        }
+        double elapsedMs = (System.nanoTime() - startNanos) / 1_000_000.0;
+        ctx.recordMetric(METRIC_MATCH_PROCESSING_TIME_MS, elapsedMs);
     }
 
     private static boolean resolveBoolean(Context ctx, String key, boolean defaultValue) {

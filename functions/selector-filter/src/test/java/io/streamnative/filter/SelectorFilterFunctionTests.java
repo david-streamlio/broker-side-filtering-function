@@ -350,6 +350,35 @@ class SelectorFilterFunctionTests {
     }
 
     @Test
+    void matchedPathRecordsValueAddLatencySplit() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        mockOutputBuilder("persistent://public/out/a", CompletableFuture.completedFuture(null));
+        fn.loadQueryForTest("q1", queryJson("region = 'US'", "persistent://public/out/a"));
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        // (b1) entry→dispatch and (b) entry→acked are both recorded for a matched record.
+        verify(ctx).recordMetric(eq(SelectorFilterFunction.METRIC_DISPATCH_TIME_MS), anyDouble());
+        verify(ctx).recordMetric(eq(SelectorFilterFunction.METRIC_MATCH_PROCESSING_TIME_MS), anyDouble());
+    }
+
+    @Test
+    void droppedPathDoesNotRecordValueAddLatencySplit() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        // No queries -> drop; the matched-only split metrics must not fire.
+        fn.process("abc".getBytes(StandardCharsets.UTF_8), ctx).join();
+
+        verify(ctx, never()).recordMetric(eq(SelectorFilterFunction.METRIC_DISPATCH_TIME_MS), anyDouble());
+        verify(ctx, never()).recordMetric(eq(SelectorFilterFunction.METRIC_MATCH_PROCESSING_TIME_MS), anyDouble());
+    }
+
+    @Test
     void processFanoutMultipliesBytesOut() throws Exception {
         givenControlTopic("persistent://public/control/queries");
         SelectorFilterFunction fn = new SelectorFilterFunction();
