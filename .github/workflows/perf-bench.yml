@@ -1,0 +1,65 @@
+# Manual performance benchmark — runs the -Pperf SelectorScalingBench on the CI runners, where
+# the Pulsar function worker reliably cold-starts the orchestrator + spawned filter (unlike a
+# resource-starved dev box). Never runs on push/PR — workflow_dispatch only.
+#
+# Trigger: Actions tab → "Perf bench" → Run workflow. Reads the filter's own value-add latency
+# metrics (filter.dispatch.time.ms = b1, filter.match.processing.time.ms = b) and uploads the
+# per-scale JSON reports as a build artifact.
+name: Perf bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      selectorCounts:
+        description: 'Comma-separated selector counts to run (each is a separate bench run)'
+        default: '10,100'
+      targetRate:
+        description: 'Offered load in msg/s — keep well below saturation for a latency baseline'
+        default: '2000'
+      duration:
+        description: 'Measured load seconds per scale'
+        default: '60'
+
+jobs:
+  selector-scaling-bench:
+    name: SelectorScalingBench
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Build + install all modules (incl. the function NARs the bench loads from disk) once,
+      # tests skipped, so each per-scale bench run can resolve deps without rebuilding.
+      - name: Build + install module artifacts (NARs)
+        run: mvn -B -DskipTests install
+
+      - name: Run SelectorScalingBench at each scale
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra COUNTS <<< "${{ inputs.selectorCounts }}"
+          for n in "${COUNTS[@]}"; do
+            echo "::group::SelectorScalingBench — ${n} selectors"
+            mvn -B -Pperf -pl perf verify \
+              -Dsurefire.skip=true \
+              -Dfailsafe.failIfNoSpecifiedTests=false \
+              -Dit.test=SelectorScalingBench \
+              -Dperf.selectorCount="${n}" \
+              -Dperf.targetRate="${{ inputs.targetRate }}" \
+              -Dperf.duration="${{ inputs.duration }}"
+            echo "::endgroup::"
+          done
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selector-scaling-bench-reports
+          path: perf/target/reports/*.json
+          if-no-files-found: warn
