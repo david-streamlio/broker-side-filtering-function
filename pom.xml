@@ -43,6 +43,7 @@
         <docker-maven-plugin.version>0.45.1</docker-maven-plugin.version>
         <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
         <maven-failsafe-plugin.version>3.2.5</maven-failsafe-plugin.version>
+        <maven-jar-plugin.version>3.5.0</maven-jar-plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -157,6 +158,14 @@
     <build>
         <pluginManagement>
             <plugins>
+                <!-- Pin maven-jar-plugin so modules that declare it explicitly (e.g. the demo
+                     uber-jar's forceCreation config) inherit a version instead of warning that
+                     'build.plugins.plugin.version' is missing. -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>${maven-jar-plugin.version}</version>
+                </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
