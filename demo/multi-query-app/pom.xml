@@ -33,14 +33,15 @@
             <version>${project.version}</version>
         </dependency>
 
-        <!-- Pulsar client implementation. The SDK modules declare these at
-             test scope, so they aren't on the demo's runtime classpath via
-             the transitive graph. Without them, PulsarClient.builder() throws
-             ClassNotFoundException for PulsarClientImplementationBindingImpl. -->
-        <dependency>
-            <groupId>org.apache.pulsar</groupId>
-            <artifactId>pulsar-client</artifactId>
-        </dependency>
+        <!-- Pulsar client implementation + admin. The SDK modules declare these at test scope, so
+             they aren't on the demo's runtime classpath transitively; without an explicit dep,
+             PulsarClient.builder() throws ClassNotFoundException for
+             PulsarClientImplementationBindingImpl.
+
+             We pull ONLY pulsar-client-admin: its shaded jar is a superset of pulsar-client — it
+             bundles the full client impl (ProducerImpl, ConsumerImpl, the binding) PLUS the admin
+             API. Depending on both fat jars bundled the same ~10.5k relocated
+             org.apache.pulsar.shade.* classes twice, producing a large maven-shade overlap. -->
         <dependency>
             <groupId>org.apache.pulsar</groupId>
             <artifactId>pulsar-client-admin</artifactId>
@@ -85,6 +86,19 @@
     <build>
         <finalName>multi-query-demo</finalName>
         <plugins>
+            <!-- Always rebuild the thin project jar before shade runs. Without this, a second
+                 `package` over the same target/ (the integration-tests CI job runs `mvn package`
+                 then `mvn verify`, which re-runs `package`, with no `clean` between) finds the
+                 prior run's *shaded* fat jar already "up to date", skips rebuilding it, and shade
+                 then re-shades its own output — yielding spurious "overlapping classes" warnings
+                 (e.g. commons-codec vs multi-query-demo.jar). -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <forceCreation>true</forceCreation>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
@@ -105,9 +119,21 @@
                                 <filter>
                                     <artifact>*:*</artifact>
                                     <excludes>
+                                        <!-- Signatures: invalid once classes are repackaged. -->
                                         <exclude>META-INF/*.SF</exclude>
                                         <exclude>META-INF/*.DSA</exclude>
                                         <exclude>META-INF/*.RSA</exclude>
+                                        <!-- Per-jar build metadata that collides across every
+                                             dependency; the uber jar needs none of it. Dropping
+                                             these removes the bulk of the harmless overlap noise.
+                                             The final manifest is still produced by the
+                                             ManifestResourceTransformer above. -->
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                        <exclude>META-INF/maven/**</exclude>
+                                        <!-- JPMS descriptors are meaningless on the flat classpath
+                                             of an uber jar and overlap across modular deps. -->
+                                        <exclude>module-info.class</exclude>
+                                        <exclude>META-INF/versions/*/module-info.class</exclude>
                                     </excludes>
                                 </filter>
                             </filters>
