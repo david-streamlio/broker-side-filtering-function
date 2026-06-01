@@ -687,6 +687,64 @@ class OrchestratorFunctionTests {
         assertThat(stored.getLastSeen()).isEqualTo("2026-05-12T22:05:00Z");
     }
 
+    // ---------------------------------------------------------------- selector persistence (reconcile)
+
+    @Test
+    void registerPersistsNormalizedSelectorOnQueryEntry() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        FilterRequest req = FilterRequest.register(
+                "persistent://public/in/trades",
+                "persistent://public/filtered/filtered-abc",
+                "region = 'US'", null, null, ClientType.PULSAR);
+        RegistryEntry spawned = new RegistryEntry(
+                "persistent://public/filtered/ctrl-x", "selector-filter-x",
+                null, null, ClientType.PULSAR, Instant.now().toString());
+        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        stubControlProducer(spawned.getControlTopic());
+
+        orchestrator.process(serialize(req), contextFor(queryId));
+
+        assertThat(readQueryEntry(queryId).getSelector()).isEqualTo("region = 'US'");
+    }
+
+    @Test
+    void registerWithNullSelectorPersistsIdentity() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        FilterRequest req = FilterRequest.register(
+                "persistent://public/in/trades",
+                "persistent://public/filtered/filtered-abc",
+                null, null, null, ClientType.PULSAR);
+        RegistryEntry spawned = new RegistryEntry(
+                "persistent://public/filtered/ctrl-x", "selector-filter-x",
+                null, null, ClientType.PULSAR, Instant.now().toString());
+        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        stubControlProducer(spawned.getControlTopic());
+
+        orchestrator.process(serialize(req), contextFor(queryId));
+
+        // null/blank user selector normalizes to the JMS identity so reconcile can replay it.
+        assertThat(readQueryEntry(queryId).getSelector())
+                .isEqualTo(OrchestratorFunction.IDENTITY_SELECTOR);
+    }
+
+    @Test
+    void modifyUpdatesPersistedSelector() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        String controlTopic = "persistent://public/filtered/ctrl-x";
+        seedQueryEntry(queryId, new QueryEntry(
+                "persistent://public/filtered/filtered-abc",
+                List.of(controlTopic),
+                List.of("persistent://public/in/trades"),
+                "2026-05-12T22:00:00Z",
+                "region = 'US'"));
+        stubControlProducer(controlTopic);
+
+        orchestrator.process(serialize(FilterRequest.modify("region IN ('US','UK')")),
+                contextFor(queryId));
+
+        assertThat(readQueryEntry(queryId).getSelector()).isEqualTo("region IN ('US','UK')");
+    }
+
     @Test
     void heartbeatTouchesLastSeenOnAllNamedQueryEntries() throws Exception {
         java.time.Clock fixed = java.time.Clock.fixed(

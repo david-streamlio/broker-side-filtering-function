@@ -256,4 +256,60 @@ class RegistryEntryTests {
         assertThat(parsed.getActiveQueryIds()).isNull();
         assertThat(parsed.getIdleSince()).isNull();
     }
+
+    // ---------------------------------------------------------------- isPattern (reconcile re-spawn)
+
+    @Test
+    void newEntryRecordsInputTopicAsNotPattern() {
+        RegistryEntry entry = RegistryEntry.newEntry(
+                "persistent://public/orchestrator/ctrl-trades", "selector-filter-trades",
+                reqWithSerializers("StringDeser", "ByteDeser"));
+        assertThat(entry.isPattern()).isFalse();
+    }
+
+    @Test
+    void newEntryRecordsTopicsPatternAsPattern() {
+        FilterRequest patternReq = FilterRequest.registerPattern(
+                "persistent://public/trades/.*", "persistent://public/out/x", "region = 'US'",
+                null, null, ClientType.PULSAR);
+        RegistryEntry entry = RegistryEntry.newEntry(
+                "persistent://public/orchestrator/ctrl-pat", "selector-filter-pat", patternReq);
+        assertThat(entry.isPattern()).isTrue();
+    }
+
+    @Test
+    void isPatternSurvivesQueryIdCopyMethods() {
+        FilterRequest patternReq = FilterRequest.registerPattern(
+                "persistent://public/trades/.*", "persistent://public/out/x", "region = 'US'",
+                null, null, ClientType.PULSAR);
+        RegistryEntry entry = RegistryEntry.newEntry("persistent://t/n/ctrl", "fn", patternReq)
+                .withQueryId("q-1");
+        assertThat(entry.isPattern()).isTrue();
+        RegistryEntry idled = entry.withoutQueryId("q-1", Instant.parse("2026-05-12T00:00:00Z"));
+        assertThat(idled.isPattern()).isTrue();
+    }
+
+    @Test
+    void serdeRoundTripPreservesIsPattern() throws Exception {
+        FilterRequest patternReq = FilterRequest.registerPattern(
+                "persistent://public/trades/.*", "persistent://public/out/x", "region = 'US'",
+                null, null, ClientType.PULSAR);
+        RegistryEntry entry = RegistryEntry.newEntry("persistent://t/n/ctrl", "fn", patternReq);
+        RegistryEntry parsed = MAPPER.readValue(MAPPER.writeValueAsBytes(entry), RegistryEntry.class);
+        assertThat(parsed.isPattern()).isTrue();
+        assertThat(parsed).isEqualTo(entry);
+    }
+
+    @Test
+    void legacyJsonWithoutIsPatternDefaultsFalse() throws Exception {
+        String json = """
+                {
+                  "controlTopic": "persistent://t/n/ctrl",
+                  "filterFunctionName": "fn-1",
+                  "createdAt": "2026-05-11T00:00:00Z"
+                }
+                """;
+        RegistryEntry parsed = MAPPER.readValue(json, RegistryEntry.class);
+        assertThat(parsed.isPattern()).isFalse();
+    }
 }

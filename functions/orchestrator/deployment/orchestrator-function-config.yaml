@@ -77,6 +77,24 @@ userConfig:
   # Default (90 + 300 + ~10) ~= 6.5 minutes.
   #
   # heartbeat-max-stale-seconds: 90              # default: 90 (3 missed @ SDK default 30s)
+
+  # ----------------------------------------------------------------------------
+  # Continuous existence reconcile (opt-in)
+  # ----------------------------------------------------------------------------
+  # When enabled, the orchestrator runs a background loop that re-creates filter functions which
+  # have gone MISSING (deleted out-of-band) while a live query still references them — the
+  # "ensure desired filters exist" half of a Kubernetes-style controller. It does NOT restart
+  # crashed-but-present instances (the Pulsar Functions runtime handles that, kubelet-style); it
+  # only repairs absent function records. On repair it re-spawns idempotently and repopulates the
+  # control topic from the selector persisted on each q: entry. Disjoint from idle GC: this loop
+  # only touches in-use filters (non-empty activeQueryIds), the sweeper only idle ones.
+  #
+  # Permissions when enabled: the orchestrator principal needs the same functions-admin +
+  # control-topic create/produce rights it uses for the initial spawn (it reuses the spawner).
+  #
+  # existence-reconcile-enabled: false           # default: false (opt-in)
+  # existence-reconcile-interval-seconds: 60     # default: 60
+  # existence-reconcile-max-attempts: 5          # default: 5 (consecutive failures before give-up)
 resources:
   cpu: 1.0
   ram: 1073741824   # 1GB

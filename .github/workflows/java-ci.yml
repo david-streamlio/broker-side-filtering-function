@@ -15,6 +15,10 @@ name: Java CI
 
 on:
   pull_request:
+    # Include `labeled` so adding `run-integration-tests` to an already-open PR actually
+    # triggers a run that evaluates the integration-tests job condition (default types are
+    # opened/synchronize/reopened, which is why labeling after open was a silent no-op).
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - '**.java'
       - '**/pom.xml'

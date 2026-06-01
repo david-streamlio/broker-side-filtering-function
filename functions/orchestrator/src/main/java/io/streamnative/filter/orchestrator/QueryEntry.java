@@ -25,6 +25,13 @@ import java.util.Objects;
  * its filters get a synthesized UNREGISTER. {@code null} on read for entries written before
  * heartbeat support — those queryIds will be refreshed on first MODIFY or HEARTBEAT they receive,
  * or persist forever if neither happens (no false-positive dead detection).
+ *
+ * <p>{@code selector} (the normalized JMS selector, never null on entries written from
+ * {@link OrchestratorFunction#handleRegister}/{@code handleModify}) is persisted so the existence
+ * reconcile loop can rebuild a per-function control topic that was lost alongside its function —
+ * republishing the same {@code QueryMessage} the SDK originally produced. {@code null} on read for
+ * entries written before selector persistence; the reconciler falls back to the identity selector
+ * and logs that the original was unrecoverable.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -34,39 +41,58 @@ final class QueryEntry {
     private final List<String> controlTopics;
     private final List<String> registryKeys;
     private final String lastSeen;
+    private final String selector;
 
     @JsonCreator
     QueryEntry(@JsonProperty("outputTopic") String outputTopic,
                @JsonProperty("controlTopics") List<String> controlTopics,
                @JsonProperty("registryKeys") List<String> registryKeys,
-               @JsonProperty("lastSeen") String lastSeen) {
+               @JsonProperty("lastSeen") String lastSeen,
+               @JsonProperty("selector") String selector) {
         this.outputTopic   = Objects.requireNonNull(outputTopic, "outputTopic");
         this.controlTopics = List.copyOf(controlTopics);
         this.registryKeys  = registryKeys == null ? null : List.copyOf(registryKeys);
         this.lastSeen      = lastSeen;
+        this.selector      = selector;
+    }
+
+    /** 4-arg constructor — used by callers that don't yet persist the selector. */
+    QueryEntry(String outputTopic, List<String> controlTopics, List<String> registryKeys,
+               String lastSeen) {
+        this(outputTopic, controlTopics, registryKeys, lastSeen, null);
     }
 
     /** 3-arg constructor — used by callers that don't yet stamp lastSeen. */
     QueryEntry(String outputTopic, List<String> controlTopics, List<String> registryKeys) {
-        this(outputTopic, controlTopics, registryKeys, null);
+        this(outputTopic, controlTopics, registryKeys, null, null);
     }
 
     /** Legacy 2-arg constructor — used by callers that don't yet write registryKeys. */
     QueryEntry(String outputTopic, List<String> controlTopics) {
-        this(outputTopic, controlTopics, null, null);
+        this(outputTopic, controlTopics, null, null, null);
     }
 
     public String getOutputTopic()         { return outputTopic; }
     public List<String> getControlTopics() { return controlTopics; }
     public List<String> getRegistryKeys()  { return registryKeys; }
     public String getLastSeen()            { return lastSeen; }
+    public String getSelector()            { return selector; }
 
     /**
      * Return a copy with {@code lastSeen} stamped to {@code now}. Used by REGISTER (creation),
      * MODIFY (touch), and HEARTBEAT (touch). All other fields are preserved.
      */
     QueryEntry withLastSeen(Instant now) {
-        return new QueryEntry(outputTopic, controlTopics, registryKeys, now.toString());
+        return new QueryEntry(outputTopic, controlTopics, registryKeys, now.toString(), selector);
+    }
+
+    /**
+     * Return a copy with {@code selector} replaced. Used by MODIFY so the persisted selector stays
+     * authoritative for the reconciler's control-topic repopulation. {@code lastSeen} is preserved
+     * — callers that also want a liveness touch chain {@link #withLastSeen(Instant)}.
+     */
+    QueryEntry withSelector(String newSelector) {
+        return new QueryEntry(outputTopic, controlTopics, registryKeys, lastSeen, newSelector);
     }
 
     @Override
@@ -75,12 +101,13 @@ final class QueryEntry {
         return Objects.equals(outputTopic, that.outputTopic)
                 && Objects.equals(controlTopics, that.controlTopics)
                 && Objects.equals(registryKeys, that.registryKeys)
-                && Objects.equals(lastSeen, that.lastSeen);
+                && Objects.equals(lastSeen, that.lastSeen)
+                && Objects.equals(selector, that.selector);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(outputTopic, controlTopics, registryKeys, lastSeen);
+        return Objects.hash(outputTopic, controlTopics, registryKeys, lastSeen, selector);
     }
 
     @Override
@@ -88,6 +115,7 @@ final class QueryEntry {
         return "QueryEntry{outputTopic='" + outputTopic
                 + "', controlTopics=" + controlTopics
                 + ", registryKeys=" + registryKeys
-                + ", lastSeen='" + lastSeen + "'}";
+                + ", lastSeen='" + lastSeen
+                + "', selector='" + selector + "'}";
     }
 }
