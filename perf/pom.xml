@@ -29,8 +29,11 @@
         <skipTests>false</skipTests>
         <skipITs>true</skipITs>
         <hdrhistogram.version>2.2.2</hdrhistogram.version>
-        <!-- Internal load harness; not a consumable artifact. -->
+        <!-- Internal load harness; not a consumable artifact. The jar plugin's skipIfEmpty (this
+             module is test-only) means no jar is produced, so install must be skipped too —
+             otherwise `mvn install` fails with "did not assign a file to the build artifact". -->
         <maven.deploy.skip>true</maven.deploy.skip>
+        <maven.install.skip>true</maven.install.skip>
     </properties>
 
     <dependencies>
