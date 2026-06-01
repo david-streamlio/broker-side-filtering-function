@@ -3,7 +3,9 @@ package io.streamnative.filter.orchestrator;
 import io.streamnative.filter.common.FilterRequest;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
+import org.apache.pulsar.common.functions.BatchingConfig;
 import org.apache.pulsar.common.functions.FunctionConfig;
+import org.apache.pulsar.common.functions.ProducerConfig;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -123,6 +125,7 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
                 .forwardSourceMessageProperty(true)
                 .cleanupSubscription(true)
                 .parallelism(cfg.functionParallelism())
+                .producerConfig(buildProducerConfig(cfg))
                 .userConfig(buildUserConfig(controlTopic));
         if (isPattern) {
             b.topicsPattern(req.getTopicsPattern());
@@ -139,6 +142,23 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
         Map<String, Object> cfg = new HashMap<>();
         cfg.put("control-topic", controlTopic);
         return cfg;
+    }
+
+    /**
+     * Output-producer config for the spawned filter. Tunes batching for latency: the
+     * Pulsar-Functions default batching delay dominates the filter's value-add latency, so we set
+     * {@code batchingMaxPublishDelayMs} from {@link OrchestratorConfig#filterOutputBatchMaxPublishDelayMs()}
+     * (default 1ms). A value of {@code 0} disables batching entirely.
+     */
+    private static ProducerConfig buildProducerConfig(OrchestratorConfig cfg) {
+        int delayMs = cfg.filterOutputBatchMaxPublishDelayMs();
+        BatchingConfig batching = new BatchingConfig(
+                delayMs > 0,                    // enabled
+                delayMs > 0 ? delayMs : null,   // batchingMaxPublishDelayMs
+                null, null, null, null);
+        ProducerConfig producerConfig = new ProducerConfig();
+        producerConfig.setBatchingConfig(batching);
+        return producerConfig;
     }
 
     /**

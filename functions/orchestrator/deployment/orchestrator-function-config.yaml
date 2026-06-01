@@ -95,6 +95,16 @@ userConfig:
   # existence-reconcile-enabled: false           # default: false (opt-in)
   # existence-reconcile-interval-seconds: 60     # default: 60
   # existence-reconcile-max-attempts: 5          # default: 5 (consecutive failures before give-up)
+
+  # ----------------------------------------------------------------------------
+  # Spawned-filter output-producer batching (latency tuning)
+  # ----------------------------------------------------------------------------
+  # batchingMaxPublishDelayMs applied to every spawned filter's output producer. The Pulsar
+  # Functions framework default dominates the filter's value-add latency (a matched message waits
+  # up to this many ms before being flushed downstream). 1ms is a strong latency/throughput
+  # balance; 0 disables batching (lowest latency, highest per-message send cost). Measured: this
+  # is ~99.9% of the filter's value-add latency at 10-100 selectors (see SelectorScalingBench).
+  # filter-output-batch-max-publish-delay-ms: 1  # default: 1 (0 = batching disabled)
 resources:
   cpu: 1.0
   ram: 1073741824   # 1GB

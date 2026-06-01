@@ -88,6 +88,15 @@ final class OrchestratorConfig {
      */
     static final String KEY_EXISTENCE_RECONCILE_MAX_ATTEMPTS = "existence-reconcile-max-attempts";
 
+    /**
+     * Output-producer {@code batchingMaxPublishDelayMs} applied to every spawned filter function.
+     * The Pulsar Functions framework's default batching delay dominates the filter's value-add
+     * latency (it adds up to this many ms before a matched message is flushed downstream); a low
+     * value trades a little throughput for much lower per-message latency. {@code 0} disables
+     * batching entirely (lowest latency, highest per-message send overhead). Default {@code 1}.
+     */
+    static final String KEY_FILTER_OUTPUT_BATCH_MAX_DELAY_MS = "filter-output-batch-max-publish-delay-ms";
+
     private final String stateTopic;
     private final String functionPackageUrl;
     private final String functionTenant;
@@ -106,6 +115,7 @@ final class OrchestratorConfig {
     private final boolean existenceReconcileEnabled;
     private final long existenceReconcileIntervalSeconds;
     private final long existenceReconcileMaxAttempts;
+    private final int filterOutputBatchMaxPublishDelayMs;
 
     private OrchestratorConfig(String stateTopic, String functionPackageUrl,
                                String functionTenant, String functionNamespace,
@@ -118,7 +128,8 @@ final class OrchestratorConfig {
                                long heartbeatMaxStaleSeconds,
                                boolean existenceReconcileEnabled,
                                long existenceReconcileIntervalSeconds,
-                               long existenceReconcileMaxAttempts) {
+                               long existenceReconcileMaxAttempts,
+                               int filterOutputBatchMaxPublishDelayMs) {
         this.stateTopic                  = stateTopic;
         this.functionPackageUrl          = functionPackageUrl;
         this.functionTenant              = functionTenant;
@@ -137,6 +148,7 @@ final class OrchestratorConfig {
         this.existenceReconcileEnabled            = existenceReconcileEnabled;
         this.existenceReconcileIntervalSeconds    = existenceReconcileIntervalSeconds;
         this.existenceReconcileMaxAttempts        = existenceReconcileMaxAttempts;
+        this.filterOutputBatchMaxPublishDelayMs   = filterOutputBatchMaxPublishDelayMs;
     }
 
     static OrchestratorConfig fromContext(Context ctx) {
@@ -158,10 +170,11 @@ final class OrchestratorConfig {
         boolean reconcileEnabled  = optionalBoolean(ctx, KEY_EXISTENCE_RECONCILE_ENABLED, false);
         long reconcileInterval    = optionalLong(ctx, KEY_EXISTENCE_RECONCILE_INTERVAL, 60L);
         long reconcileMaxAttempts = optionalLong(ctx, KEY_EXISTENCE_RECONCILE_MAX_ATTEMPTS, 5L);
+        int batchMaxDelayMs       = optionalInt(ctx, KEY_FILTER_OUTPUT_BATCH_MAX_DELAY_MS, 1);
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 ctrlTenant, ctrlNamespace, parallelism, compaction, threshold, adminUrl,
                 adminToken, gcEnabled, gcTtl, gcInterval, hbMaxStale,
-                reconcileEnabled, reconcileInterval, reconcileMaxAttempts);
+                reconcileEnabled, reconcileInterval, reconcileMaxAttempts, batchMaxDelayMs);
     }
 
     /** Package-private factory for tests — GC disabled by default. */
@@ -171,7 +184,7 @@ final class OrchestratorConfig {
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 false, 300L, 30L, 90L,
-                false, 60L, 5L);
+                false, 60L, 5L, 1);
     }
 
     /** Test factory exposing GC knobs — used by IdleFilterSweeper tests. */
@@ -183,7 +196,7 @@ final class OrchestratorConfig {
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 gcEnabled, gcTtlSeconds, gcSweepIntervalSeconds, 90L,
-                false, 60L, 5L);
+                false, 60L, 5L, 1);
     }
 
     /** Test factory exposing both idle-GC and heartbeat knobs. */
@@ -194,7 +207,7 @@ final class OrchestratorConfig {
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 true, 300L, 30L, heartbeatMaxStaleSeconds,
-                false, 60L, 5L);
+                false, 60L, 5L, 1);
     }
 
     /** Test factory exposing existence-reconcile knobs — used by FilterReconciler tests. */
@@ -207,7 +220,7 @@ final class OrchestratorConfig {
                 fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 false, 300L, 30L, 90L,
-                reconcileEnabled, reconcileIntervalSeconds, reconcileMaxAttempts);
+                reconcileEnabled, reconcileIntervalSeconds, reconcileMaxAttempts, 1);
     }
 
     public String stateTopic()                  { return stateTopic; }
@@ -228,6 +241,7 @@ final class OrchestratorConfig {
     public boolean existenceReconcileEnabled()           { return existenceReconcileEnabled; }
     public long existenceReconcileIntervalSeconds()      { return existenceReconcileIntervalSeconds; }
     public long existenceReconcileMaxAttempts()          { return existenceReconcileMaxAttempts; }
+    public int filterOutputBatchMaxPublishDelayMs()      { return filterOutputBatchMaxPublishDelayMs; }
 
     private static String requireString(Context ctx, String key) {
         Object raw = ctx.getUserConfigValue(key).orElse(null);
@@ -285,6 +299,7 @@ final class OrchestratorConfig {
                 && existenceReconcileEnabled == that.existenceReconcileEnabled
                 && existenceReconcileIntervalSeconds == that.existenceReconcileIntervalSeconds
                 && existenceReconcileMaxAttempts == that.existenceReconcileMaxAttempts
+                && filterOutputBatchMaxPublishDelayMs == that.filterOutputBatchMaxPublishDelayMs
                 && Objects.equals(stateTopic, that.stateTopic)
                 && Objects.equals(functionPackageUrl, that.functionPackageUrl)
                 && Objects.equals(functionTenant, that.functionTenant)
@@ -302,6 +317,7 @@ final class OrchestratorConfig {
                 applyCompaction, compactionThresholdBytes, pulsarAdminUrl, pulsarAdminToken,
                 idleGcEnabled, idleGcTtlSeconds, idleGcSweepIntervalSeconds,
                 heartbeatMaxStaleSeconds, existenceReconcileEnabled,
-                existenceReconcileIntervalSeconds, existenceReconcileMaxAttempts);
+                existenceReconcileIntervalSeconds, existenceReconcileMaxAttempts,
+                filterOutputBatchMaxPublishDelayMs);
     }
 }

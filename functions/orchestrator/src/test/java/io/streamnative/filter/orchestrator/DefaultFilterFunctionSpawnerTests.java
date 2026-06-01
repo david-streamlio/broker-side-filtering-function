@@ -109,6 +109,12 @@ class DefaultFilterFunctionSpawnerTests {
         assertThat(fc.getParallelism()).isEqualTo(cfg.functionParallelism());
         assertThat(fc.getUserConfig().get("control-topic")).isEqualTo(entry.getControlTopic());
         assertThat(pkgCap.getValue()).isEqualTo("function://public/filters/selector-filter@1.0.0");
+
+        // Output producer batching tuned for latency — forTesting() defaults to 1ms.
+        assertThat(fc.getProducerConfig()).isNotNull();
+        assertThat(fc.getProducerConfig().getBatchingConfig()).isNotNull();
+        assertThat(fc.getProducerConfig().getBatchingConfig().isEnabled()).isTrue();
+        assertThat(fc.getProducerConfig().getBatchingConfig().getBatchingMaxPublishDelayMs()).isEqualTo(1);
     }
 
     @Test
