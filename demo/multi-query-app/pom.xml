@@ -33,14 +33,15 @@
             <version>${project.version}</version>
         </dependency>
 
-        <!-- Pulsar client implementation. The SDK modules declare these at
-             test scope, so they aren't on the demo's runtime classpath via
-             the transitive graph. Without them, PulsarClient.builder() throws
-             ClassNotFoundException for PulsarClientImplementationBindingImpl. -->
-        <dependency>
-            <groupId>org.apache.pulsar</groupId>
-            <artifactId>pulsar-client</artifactId>
-        </dependency>
+        <!-- Pulsar client implementation + admin. The SDK modules declare these at test scope, so
+             they aren't on the demo's runtime classpath transitively; without an explicit dep,
+             PulsarClient.builder() throws ClassNotFoundException for
+             PulsarClientImplementationBindingImpl.
+
+             We pull ONLY pulsar-client-admin: its shaded jar is a superset of pulsar-client — it
+             bundles the full client impl (ProducerImpl, ConsumerImpl, the binding) PLUS the admin
+             API. Depending on both fat jars bundled the same ~10.5k relocated
+             org.apache.pulsar.shade.* classes twice, producing a large maven-shade overlap. -->
         <dependency>
             <groupId>org.apache.pulsar</groupId>
             <artifactId>pulsar-client-admin</artifactId>
