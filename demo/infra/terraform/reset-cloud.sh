@@ -27,8 +27,8 @@
 # 409 "topic already exists" against state it doesn't know about.
 #
 # After running, redeploy:
-#   1. SELECTOR_REL=v1.1.0 make demo-nars        # refresh the local NAR cache
-#   2. cd demo/infra/terraform && SELECTOR_REL=v1.1.0 RESET=1 ./recreate.sh
+#   1. SELECTOR_REL=v1.2.0 make demo-nars        # refresh the local NAR cache
+#   2. cd demo/infra/terraform && SELECTOR_REL=v1.2.0 RESET=1 ./recreate.sh
 #   3. make demo-cloud-parcels                   # (or demo-cloud)
 #
 # Required env (auto-loaded from demo/.env if present):
@@ -275,10 +275,10 @@ echo -e "${GREEN}🎉 Reset complete.${NC}"
 echo "Next steps — copy/paste each block (paths are absolute, no matter your CWD):"
 echo
 echo "  # 1. refresh local NAR cache"
-echo "  cd $REPO_ROOT && SELECTOR_REL=v1.1.0 make demo-nars"
+echo "  cd $REPO_ROOT && SELECTOR_REL=v1.2.0 make demo-nars"
 echo
 echo "  # 2. re-upload selector-filter package + redeploy orchestrator"
-echo "  cd $TF_DIR && SELECTOR_REL=v1.1.0 RESET=1 ./recreate.sh"
+echo "  cd $TF_DIR && SELECTOR_REL=v1.2.0 RESET=1 ./recreate.sh"
 echo
 echo "  # 3. bring the demo back up (or 'make demo-cloud' for the stock-quotes scenario)"
 echo "  cd $REPO_ROOT && make demo-cloud-parcels"

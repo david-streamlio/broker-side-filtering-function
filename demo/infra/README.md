@@ -57,7 +57,7 @@ From the demo root:
 ```bash
 cd infra/terraform
 export ORG=<your-sn-cloud-org-id>          # e.g. o-mj3r8
-export SELECTOR_REL=v1.1.0              # broker-side-filtering-function release
+export SELECTOR_REL=v1.2.0              # broker-side-filtering-function release
 ./recreate.sh
 ```
 
