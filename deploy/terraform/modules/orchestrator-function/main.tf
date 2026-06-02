@@ -19,6 +19,8 @@ locals {
     "function-control-topic-tenant"    = local.control_topic_tenant_effective
     "function-control-topic-namespace" = local.control_topic_namespace_effective
     "function-parallelism"             = 1
+    "function-cpu"                     = var.function_cpu
+    "function-memory-bytes"            = var.function_memory_bytes
     "apply-compaction"                 = var.apply_compaction
     "compaction-threshold-bytes"       = var.compaction_threshold_bytes
     "pulsar-admin-url"                 = var.pulsar_admin_url
@@ -26,6 +28,13 @@ locals {
     "idle-gc-ttl-seconds"              = var.idle_gc_ttl_seconds
     "idle-gc-sweep-interval-seconds"   = var.idle_gc_sweep_interval_seconds
     "heartbeat-max-stale-seconds"      = var.heartbeat_max_stale_seconds
+
+    "existence-reconcile-enabled"          = var.existence_reconcile_enabled
+    "existence-reconcile-interval-seconds" = var.existence_reconcile_interval_seconds
+    "existence-reconcile-max-attempts"     = var.existence_reconcile_max_attempts
+
+    "filter-output-batch-max-publish-delay-ms" = var.filter_output_batch_max_publish_delay_ms
+    "filter-log-timing-every"                  = var.filter_log_timing_every
   }
 
   user_config_json   = jsonencode(local.user_config)

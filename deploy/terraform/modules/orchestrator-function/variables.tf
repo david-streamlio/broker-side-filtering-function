@@ -125,3 +125,45 @@ variable "heartbeat_max_stale_seconds" {
   type        = number
   default     = 90
 }
+
+variable "function_cpu" {
+  description = "CPU cores stamped on each spawned filter function instance (FunctionConfig.resources). Keep ~1 CPU : 4 GiB with function_memory_bytes. Mirrors OrchestratorConfig.KEY_FUNCTION_CPU."
+  type        = number
+  default     = 0.5
+}
+
+variable "function_memory_bytes" {
+  description = "Memory (bytes) stamped on each spawned filter function instance. Default 2 GiB. Mirrors OrchestratorConfig.KEY_FUNCTION_MEMORY_BYTES."
+  type        = number
+  default     = 2147483648
+}
+
+variable "filter_output_batch_max_publish_delay_ms" {
+  description = "Output-producer batchingMaxPublishDelayMs applied to every spawned filter (latency tuning). 0 disables batching. Mirrors OrchestratorConfig.KEY_FILTER_OUTPUT_BATCH_MAX_DELAY_MS."
+  type        = number
+  default     = 1
+}
+
+variable "existence_reconcile_enabled" {
+  description = "Master switch for the continuous existence-reconcile loop (re-spawns filters deleted out-of-band while a query is live). Mirrors OrchestratorConfig.KEY_EXISTENCE_RECONCILE_ENABLED."
+  type        = bool
+  default     = false
+}
+
+variable "existence_reconcile_interval_seconds" {
+  description = "How often the existence-reconcile loop evaluates in-use registry entries, in seconds. Mirrors OrchestratorConfig.KEY_EXISTENCE_RECONCILE_INTERVAL."
+  type        = number
+  default     = 60
+}
+
+variable "existence_reconcile_max_attempts" {
+  description = "Consecutive failed re-spawn attempts for one registry key before the reconciler gives up. Mirrors OrchestratorConfig.KEY_EXISTENCE_RECONCILE_MAX_ATTEMPTS."
+  type        = number
+  default     = 5
+}
+
+variable "filter_log_timing_every" {
+  description = "Diagnostic passthrough — spawned filters log a sampled [timing] line every N matched messages (queue → producer/ingest split, eval, send). 0 = off. Mirrors OrchestratorConfig.KEY_FILTER_LOG_TIMING_EVERY."
+  type        = number
+  default     = 0
+}
