@@ -32,6 +32,8 @@ userConfig:
   existence-reconcile-enabled: false
   existence-reconcile-interval-seconds: 60
   existence-reconcile-max-attempts: 5
+  # Output-producer batching delay for spawned filters — 1ms for low latency (see perf/README.md).
+  filter-output-batch-max-publish-delay-ms: 1
 resources:
   cpu: 0.5
   ram: 536870912   # 512 MB — local Pulsar standalone has tight headroom
