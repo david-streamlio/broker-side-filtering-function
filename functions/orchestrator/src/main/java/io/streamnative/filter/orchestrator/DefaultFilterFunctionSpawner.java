@@ -131,7 +131,7 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
                         .ram(cfg.functionMemoryBytes())
                         .build())
                 .producerConfig(buildProducerConfig(cfg))
-                .userConfig(buildUserConfig(controlTopic));
+                .userConfig(buildUserConfig(controlTopic, cfg));
         if (isPattern) {
             b.topicsPattern(req.getTopicsPattern());
         } else {
@@ -143,10 +143,15 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
         return b.build();
     }
 
-    private static Map<String, Object> buildUserConfig(String controlTopic) {
-        Map<String, Object> cfg = new HashMap<>();
-        cfg.put("control-topic", controlTopic);
-        return cfg;
+    private static Map<String, Object> buildUserConfig(String controlTopic, OrchestratorConfig cfg) {
+        Map<String, Object> userConfig = new HashMap<>();
+        userConfig.put("control-topic", controlTopic);
+        // Diagnostic passthrough — only injected when enabled, so a spawned filter's userConfig stays
+        // minimal in the steady state (the filter defaults log-timing-every to 0 / off).
+        if (cfg.filterLogTimingEvery() > 0) {
+            userConfig.put("log-timing-every", cfg.filterLogTimingEvery());
+        }
+        return userConfig;
     }
 
     /**

@@ -34,6 +34,11 @@ userConfig:
   existence-reconcile-max-attempts: 5
   # Output-producer batching delay for spawned filters — 1ms for low latency (see perf/README.md).
   filter-output-batch-max-publish-delay-ms: 1
+  # Diagnostic (measurement only): when > 0, spawned filters log a [timing] line every N matched
+  # messages decomposing latency (queue → producer/ingest split, eval, send). Requires
+  # AppendBrokerTimestampMetadataInterceptor on the broker (set in docker-compose.local.yml) for the
+  # producer/ingest split. Set to 0 to disable. See perf/queue-decomposition.md.
+  filter-log-timing-every: 50
 resources:
   cpu: 0.5
   ram: 536870912   # 512 MB — local Pulsar standalone has tight headroom

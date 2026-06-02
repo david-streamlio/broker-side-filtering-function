@@ -105,6 +105,14 @@ final class OrchestratorConfig {
      */
     static final String KEY_FILTER_OUTPUT_BATCH_MAX_DELAY_MS = "filter-output-batch-max-publish-delay-ms";
 
+    /**
+     * Diagnostic: passed through to each spawned filter as its {@code log-timing-every} key. When
+     * &gt; 0, the filter logs a sampled {@code [timing]} line every N matched messages decomposing the
+     * latency (queue → producer/ingest split, eval, send). Default {@code 0} (off) — a measurement
+     * aid threaded on per deployment, not a steady-state knob.
+     */
+    static final String KEY_FILTER_LOG_TIMING_EVERY          = "filter-log-timing-every";
+
     private final String stateTopic;
     private final String functionPackageUrl;
     private final String functionTenant;
@@ -126,6 +134,7 @@ final class OrchestratorConfig {
     private final long existenceReconcileIntervalSeconds;
     private final long existenceReconcileMaxAttempts;
     private final int filterOutputBatchMaxPublishDelayMs;
+    private final int filterLogTimingEvery;
 
     private OrchestratorConfig(String stateTopic, String functionPackageUrl,
                                String functionTenant, String functionNamespace,
@@ -140,7 +149,8 @@ final class OrchestratorConfig {
                                boolean existenceReconcileEnabled,
                                long existenceReconcileIntervalSeconds,
                                long existenceReconcileMaxAttempts,
-                               int filterOutputBatchMaxPublishDelayMs) {
+                               int filterOutputBatchMaxPublishDelayMs,
+                               int filterLogTimingEvery) {
         this.stateTopic                  = stateTopic;
         this.functionPackageUrl          = functionPackageUrl;
         this.functionTenant              = functionTenant;
@@ -162,6 +172,7 @@ final class OrchestratorConfig {
         this.existenceReconcileIntervalSeconds    = existenceReconcileIntervalSeconds;
         this.existenceReconcileMaxAttempts        = existenceReconcileMaxAttempts;
         this.filterOutputBatchMaxPublishDelayMs   = filterOutputBatchMaxPublishDelayMs;
+        this.filterLogTimingEvery                 = filterLogTimingEvery;
     }
 
     static OrchestratorConfig fromContext(Context ctx) {
@@ -186,10 +197,12 @@ final class OrchestratorConfig {
         long reconcileInterval    = optionalLong(ctx, KEY_EXISTENCE_RECONCILE_INTERVAL, 60L);
         long reconcileMaxAttempts = optionalLong(ctx, KEY_EXISTENCE_RECONCILE_MAX_ATTEMPTS, 5L);
         int batchMaxDelayMs       = optionalInt(ctx, KEY_FILTER_OUTPUT_BATCH_MAX_DELAY_MS, 1);
+        int logTimingEvery        = optionalInt(ctx, KEY_FILTER_LOG_TIMING_EVERY, 0);
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
                 ctrlTenant, ctrlNamespace, parallelism, cpu, memBytes, compaction, threshold, adminUrl,
                 adminToken, gcEnabled, gcTtl, gcInterval, hbMaxStale,
-                reconcileEnabled, reconcileInterval, reconcileMaxAttempts, batchMaxDelayMs);
+                reconcileEnabled, reconcileInterval, reconcileMaxAttempts, batchMaxDelayMs,
+                logTimingEvery);
     }
 
     /** Package-private factory for tests — GC disabled by default. */
@@ -199,7 +212,7 @@ final class OrchestratorConfig {
                 fnTenant, fnNamespace, 1, 0.5, 2L * 1024 * 1024 * 1024L, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 false, 300L, 30L, 90L,
-                false, 60L, 5L, 1);
+                false, 60L, 5L, 1, 0);
     }
 
     /** Test factory exposing GC knobs — used by IdleFilterSweeper tests. */
@@ -211,7 +224,7 @@ final class OrchestratorConfig {
                 fnTenant, fnNamespace, 1, 0.5, 2L * 1024 * 1024 * 1024L, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 gcEnabled, gcTtlSeconds, gcSweepIntervalSeconds, 90L,
-                false, 60L, 5L, 1);
+                false, 60L, 5L, 1, 0);
     }
 
     /** Test factory exposing both idle-GC and heartbeat knobs. */
@@ -222,7 +235,7 @@ final class OrchestratorConfig {
                 fnTenant, fnNamespace, 1, 0.5, 2L * 1024 * 1024 * 1024L, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 true, 300L, 30L, heartbeatMaxStaleSeconds,
-                false, 60L, 5L, 1);
+                false, 60L, 5L, 1, 0);
     }
 
     /** Test factory exposing existence-reconcile knobs — used by FilterReconciler tests. */
@@ -235,7 +248,18 @@ final class OrchestratorConfig {
                 fnTenant, fnNamespace, 1, 0.5, 2L * 1024 * 1024 * 1024L, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 false, 300L, 30L, 90L,
-                reconcileEnabled, reconcileIntervalSeconds, reconcileMaxAttempts, 1);
+                reconcileEnabled, reconcileIntervalSeconds, reconcileMaxAttempts, 1, 0);
+    }
+
+    /** Test factory exposing the diagnostic log-timing passthrough knob. */
+    static OrchestratorConfig forTestingWithLogTiming(String stateTopic, String packageUrl,
+                                                      String fnTenant, String fnNamespace,
+                                                      int filterLogTimingEvery) {
+        return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
+                fnTenant, fnNamespace, 1, 0.5, 2L * 1024 * 1024 * 1024L, true, 10L * 1024 * 1024,
+                "http://localhost:8080", "",
+                false, 300L, 30L, 90L,
+                false, 60L, 5L, 1, filterLogTimingEvery);
     }
 
     public String stateTopic()                  { return stateTopic; }
@@ -259,6 +283,7 @@ final class OrchestratorConfig {
     public long existenceReconcileIntervalSeconds()      { return existenceReconcileIntervalSeconds; }
     public long existenceReconcileMaxAttempts()          { return existenceReconcileMaxAttempts; }
     public int filterOutputBatchMaxPublishDelayMs()      { return filterOutputBatchMaxPublishDelayMs; }
+    public int filterLogTimingEvery()                    { return filterLogTimingEvery; }
 
     private static String requireString(Context ctx, String key) {
         Object raw = ctx.getUserConfigValue(key).orElse(null);
@@ -325,6 +350,7 @@ final class OrchestratorConfig {
                 && existenceReconcileIntervalSeconds == that.existenceReconcileIntervalSeconds
                 && existenceReconcileMaxAttempts == that.existenceReconcileMaxAttempts
                 && filterOutputBatchMaxPublishDelayMs == that.filterOutputBatchMaxPublishDelayMs
+                && filterLogTimingEvery == that.filterLogTimingEvery
                 && Objects.equals(stateTopic, that.stateTopic)
                 && Objects.equals(functionPackageUrl, that.functionPackageUrl)
                 && Objects.equals(functionTenant, that.functionTenant)
@@ -343,6 +369,6 @@ final class OrchestratorConfig {
                 idleGcEnabled, idleGcTtlSeconds, idleGcSweepIntervalSeconds,
                 heartbeatMaxStaleSeconds, existenceReconcileEnabled,
                 existenceReconcileIntervalSeconds, existenceReconcileMaxAttempts,
-                filterOutputBatchMaxPublishDelayMs);
+                filterOutputBatchMaxPublishDelayMs, filterLogTimingEvery);
     }
 }
