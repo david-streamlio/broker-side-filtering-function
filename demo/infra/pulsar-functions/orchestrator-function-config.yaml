@@ -30,7 +30,14 @@ userConfig:
   function-tenant: control-plane
   function-namespace: broker-filter
 
+  # Parallelism for each spawned selector-filter instance (default: 1).
+  # Increase to distribute load — requires at least as many source-topic partitions.
   function-parallelism: 1
+
+  # Resources per spawned selector-filter instance. Keep 1 CPU : 4 GiB ratio.
+  # e.g. 0.5 CPU → 2 GiB, 1.0 CPU → 4 GiB, 2.0 CPU → 8 GiB.
+  function-cpu: 0.5
+  function-memory-bytes: 2147483648   # 2 GiB
 
   apply-compaction: true
   compaction-threshold-bytes: 10485760  # 10 MB

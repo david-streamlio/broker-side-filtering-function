@@ -6,6 +6,7 @@ import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.common.functions.BatchingConfig;
 import org.apache.pulsar.common.functions.FunctionConfig;
 import org.apache.pulsar.common.functions.ProducerConfig;
+import org.apache.pulsar.common.functions.Resources;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -125,6 +126,10 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
                 .forwardSourceMessageProperty(true)
                 .cleanupSubscription(true)
                 .parallelism(cfg.functionParallelism())
+                .resources(Resources.builder()
+                        .cpu(cfg.functionCpu())
+                        .ram(cfg.functionMemoryBytes())
+                        .build())
                 .producerConfig(buildProducerConfig(cfg))
                 .userConfig(buildUserConfig(controlTopic));
         if (isPattern) {

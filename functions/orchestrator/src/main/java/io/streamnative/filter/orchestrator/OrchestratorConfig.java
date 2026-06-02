@@ -28,8 +28,16 @@ final class OrchestratorConfig {
     /** Namespace for per-filter-function control topics. */
     static final String KEY_CONTROL_TOPIC_NAMESPACE   = "function-control-topic-namespace";
 
-    /** Parallelism applied to each spawned filter function. */
+    /** Parallelism applied to each spawned filter function. Default: 1. */
     static final String KEY_FUNCTION_PARALLELISM      = "function-parallelism";
+
+    /** CPU cores for each spawned filter function instance. Default: 0.5.
+     *  Keep the 1 CPU : 4 GiB ratio with {@link #KEY_FUNCTION_MEMORY_BYTES}. */
+    static final String KEY_FUNCTION_CPU              = "function-cpu";
+
+    /** Memory in bytes for each spawned filter function instance. Default: 2 GiB.
+     *  Recommended ratio: 1 CPU : 4 GiB — e.g. 0.5 → 2 GiB, 1.0 → 4 GiB, 2.0 → 8 GiB. */
+    static final String KEY_FUNCTION_MEMORY_BYTES     = "function-memory-bytes";
 
     /** Whether to set per-topic compaction on each per-function control topic. */
     static final String KEY_APPLY_COMPACTION          = "apply-compaction";
@@ -103,7 +111,9 @@ final class OrchestratorConfig {
     private final String functionNamespace;
     private final String controlTopicTenant;
     private final String controlTopicNamespace;
-    private final int functionParallelism;
+    private final int    functionParallelism;
+    private final double functionCpu;
+    private final long   functionMemoryBytes;
     private final boolean applyCompaction;
     private final long compactionThresholdBytes;
     private final String pulsarAdminUrl;
@@ -120,7 +130,8 @@ final class OrchestratorConfig {
     private OrchestratorConfig(String stateTopic, String functionPackageUrl,
                                String functionTenant, String functionNamespace,
                                String controlTopicTenant, String controlTopicNamespace,
-                               int functionParallelism, boolean applyCompaction,
+                               int functionParallelism, double functionCpu, long functionMemoryBytes,
+                               boolean applyCompaction,
                                long compactionThresholdBytes, String pulsarAdminUrl,
                                String pulsarAdminToken,
                                boolean idleGcEnabled, long idleGcTtlSeconds,
@@ -137,6 +148,8 @@ final class OrchestratorConfig {
         this.controlTopicTenant          = controlTopicTenant;
         this.controlTopicNamespace       = controlTopicNamespace;
         this.functionParallelism         = functionParallelism;
+        this.functionCpu                 = functionCpu;
+        this.functionMemoryBytes         = functionMemoryBytes;
         this.applyCompaction             = applyCompaction;
         this.compactionThresholdBytes    = compactionThresholdBytes;
         this.pulsarAdminUrl              = pulsarAdminUrl;
@@ -159,6 +172,8 @@ final class OrchestratorConfig {
         String ctrlTenant    = optionalString(ctx, KEY_CONTROL_TOPIC_TENANT, fnTenant);
         String ctrlNamespace = optionalString(ctx, KEY_CONTROL_TOPIC_NAMESPACE, fnNamespace);
         int parallelism      = optionalInt(ctx, KEY_FUNCTION_PARALLELISM, 1);
+        double cpu           = optionalDouble(ctx, KEY_FUNCTION_CPU, 0.5);
+        long memBytes        = optionalLong(ctx, KEY_FUNCTION_MEMORY_BYTES, 2L * 1024 * 1024 * 1024);
         boolean compaction   = optionalBoolean(ctx, KEY_APPLY_COMPACTION, true);
         long threshold       = optionalLong(ctx, KEY_COMPACTION_THRESHOLD, 10L * 1024 * 1024); // 10 MB
         String adminUrl      = requireString(ctx, KEY_PULSAR_ADMIN_URL);
@@ -172,7 +187,7 @@ final class OrchestratorConfig {
         long reconcileMaxAttempts = optionalLong(ctx, KEY_EXISTENCE_RECONCILE_MAX_ATTEMPTS, 5L);
         int batchMaxDelayMs       = optionalInt(ctx, KEY_FILTER_OUTPUT_BATCH_MAX_DELAY_MS, 1);
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
-                ctrlTenant, ctrlNamespace, parallelism, compaction, threshold, adminUrl,
+                ctrlTenant, ctrlNamespace, parallelism, cpu, memBytes, compaction, threshold, adminUrl,
                 adminToken, gcEnabled, gcTtl, gcInterval, hbMaxStale,
                 reconcileEnabled, reconcileInterval, reconcileMaxAttempts, batchMaxDelayMs);
     }
@@ -181,7 +196,7 @@ final class OrchestratorConfig {
     static OrchestratorConfig forTesting(String stateTopic, String packageUrl,
                                          String fnTenant, String fnNamespace) {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
-                fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
+                fnTenant, fnNamespace, 1, 0.5, 2L * 1024 * 1024 * 1024L, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 false, 300L, 30L, 90L,
                 false, 60L, 5L, 1);
@@ -193,7 +208,7 @@ final class OrchestratorConfig {
                                                boolean gcEnabled, long gcTtlSeconds,
                                                long gcSweepIntervalSeconds) {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
-                fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
+                fnTenant, fnNamespace, 1, 0.5, 2L * 1024 * 1024 * 1024L, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 gcEnabled, gcTtlSeconds, gcSweepIntervalSeconds, 90L,
                 false, 60L, 5L, 1);
@@ -204,7 +219,7 @@ final class OrchestratorConfig {
                                                      String fnTenant, String fnNamespace,
                                                      long heartbeatMaxStaleSeconds) {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
-                fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
+                fnTenant, fnNamespace, 1, 0.5, 2L * 1024 * 1024 * 1024L, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 true, 300L, 30L, heartbeatMaxStaleSeconds,
                 false, 60L, 5L, 1);
@@ -217,7 +232,7 @@ final class OrchestratorConfig {
                                                       long reconcileIntervalSeconds,
                                                       long reconcileMaxAttempts) {
         return new OrchestratorConfig(stateTopic, packageUrl, fnTenant, fnNamespace,
-                fnTenant, fnNamespace, 1, true, 10L * 1024 * 1024,
+                fnTenant, fnNamespace, 1, 0.5, 2L * 1024 * 1024 * 1024L, true, 10L * 1024 * 1024,
                 "http://localhost:8080", "",
                 false, 300L, 30L, 90L,
                 reconcileEnabled, reconcileIntervalSeconds, reconcileMaxAttempts, 1);
@@ -229,7 +244,9 @@ final class OrchestratorConfig {
     public String functionNamespace()           { return functionNamespace; }
     public String controlTopicTenant()          { return controlTopicTenant; }
     public String controlTopicNamespace()       { return controlTopicNamespace; }
-    public int functionParallelism()            { return functionParallelism; }
+    public int    functionParallelism()         { return functionParallelism; }
+    public double functionCpu()                 { return functionCpu; }
+    public long   functionMemoryBytes()         { return functionMemoryBytes; }
     public boolean applyCompaction()            { return applyCompaction; }
     public long compactionThresholdBytes()      { return compactionThresholdBytes; }
     public String pulsarAdminUrl()              { return pulsarAdminUrl; }
@@ -284,6 +301,14 @@ final class OrchestratorConfig {
         Object raw = ctx.getUserConfigValue(key).orElse(null);
         if (raw == null) return defaultValue;
         return Boolean.parseBoolean(raw.toString().trim());
+    }
+
+    private static double optionalDouble(Context ctx, String key, double defaultValue) {
+        Object raw = ctx.getUserConfigValue(key).orElse(null);
+        if (raw == null) return defaultValue;
+        if (raw instanceof Number n) return n.doubleValue();
+        try { return Double.parseDouble(raw.toString().trim()); }
+        catch (NumberFormatException e) { return defaultValue; }
     }
 
     @Override

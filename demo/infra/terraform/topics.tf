@@ -35,6 +35,21 @@ resource "pulsar_tenant" "control_plane" {
   ]
 }
 
+# Grant the orchestrator-function SA tenant-admin on the built-in `public` tenant.
+# This allows the observability service (which uses the orchestrator-function token)
+# to manage topic policies on public/default — including updating partition counts
+# (validateTopicPolicyOperation PARTITION/WRITE requires tenant-admin or super-admin;
+# namespace permission grants alone are insufficient in Pulsar 4.x).
+# The built-in `public` tenant exists on every Pulsar cluster; we import and
+# update it rather than create it.
+resource "pulsar_tenant" "public" {
+  tenant           = "public"
+  allowed_clusters = [var.cluster_name]
+  admin_roles = [
+    "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}",
+  ]
+}
+
 # ── Namespaces ────────────────────────────────────────────────────────────────
 # Note: data topics (stock-quotes, parcel-*, filtered-<uuid>) live in
 # `public/default` per KoP's default `kafkaNamespace` setting — that's the only
