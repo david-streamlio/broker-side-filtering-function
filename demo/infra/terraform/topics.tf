@@ -50,6 +50,15 @@ resource "pulsar_tenant" "public" {
   ]
 }
 
+# `public` is auto-created on every Pulsar cluster, so a plain create 409s ("Tenant already exist").
+# This import block (Terraform 1.5+) brings the existing tenant into state on apply, then the resource
+# above just *updates* its admin_roles. Idempotent — a no-op once `public` is already managed, so it
+# survives state-clears and fresh provisions alike.
+import {
+  to = pulsar_tenant.public
+  id = "public"
+}
+
 # ── Namespaces ────────────────────────────────────────────────────────────────
 # Note: data topics (stock-quotes, parcel-*, filtered-<uuid>) live in
 # `public/default` per KoP's default `kafkaNamespace` setting — that's the only
