@@ -173,6 +173,10 @@ resource "pulsar_permission_grant" "parcel_app_filter_requests" {
 resource "pulsar_permission_grant" "orchestrator_consume_source" {
   namespace = "public/default"
   role      = "${streamnative_service_account.orchestrator_function.name}@${local.sa_domain}"
+  # consume + produce: spawned selector-filter functions (inheriting this SA) subscribe
+  #   to source topics and write to filtered-* output topics.
+  # Note: topic partition-count updates require tenant-admin, not namespace permissions.
+  #   That is granted via pulsar_tenant.public.admin_roles in topics.tf.
   actions   = ["consume", "produce"]
 }
 

@@ -69,7 +69,8 @@
         "sasl.mechanism":    "PLAIN",
         "sasl.jaas.config":  "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${username}\" password=\"token:${kafka_token}\";",
         "enable.idempotence": "false",
-        "acks": "1"
+        "acks": "1",
+        "metadata.max.age.ms": "30000"
       }
     }
   }
