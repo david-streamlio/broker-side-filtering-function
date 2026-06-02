@@ -51,14 +51,14 @@ tf-validate: ## terraform init + validate across all wrappers (offline-friendly 
 
 # ---------------------------------------------------------------- combined demo
 # One-command bring-up of the filtering stack + the broker-side-filter-observability
-# UI (http://localhost:3200). Pinned to the v1.1.0 GA; override SELECTOR_REL /
+# UI (http://localhost:3200). Pinned to the v1.2.0 GA; override SELECTOR_REL /
 # OBSERVABILITY_IMAGE_TAG to run a different release.
 
 SELECTOR_REPO ?= david-streamlio/broker-side-filtering-function
-SELECTOR_REL  ?= v1.1.0
+SELECTOR_REL  ?= v1.2.0
 
 .PHONY: demo-nars
-demo-nars: ## Fetch the v1.1.0 orchestrator + filter NARs into demo/local/nars (local-mode prereq)
+demo-nars: ## Fetch the v1.2.0 orchestrator + filter NARs into demo/local/nars (local-mode prereq)
 	rm -f demo/local/nars/*.nar
 	gh release download $(SELECTOR_REL) --repo $(SELECTOR_REPO) --dir demo/local/nars --pattern '*.nar'
 
