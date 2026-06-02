@@ -130,7 +130,7 @@ services:
        exec java $$JAVA_OPTS -jar /app/app.jar'
 
   observability:
-    image: ghcr.io/david-streamlio/broker-side-filter-observability:${OBSERVABILITY_IMAGE_TAG:-0.2.0}
+    image: ghcr.io/david-streamlio/broker-side-filter-observability:${OBSERVABILITY_IMAGE_TAG:-0.3.0}
     container_name: filter-observability
     restart: unless-stopped
     ports:
