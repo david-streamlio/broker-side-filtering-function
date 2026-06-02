@@ -310,6 +310,29 @@ PA_AUTH_TOKEN="$TF_VAR_pulsar_token" pa namespaces set-property \
   && ok "Namespace property set" \
   || warn "Could not set namespace property"
 
+# Persistence policy on the data namespace — lower the BookKeeper ack-quorum so a write
+# commits as soon as the fastest AQ-of-WQ bookies ack, skipping the slow-bookie tail.
+# AQ=1 is the most aggressive low-latency setting and TRADES DURABILITY: an acked write can
+# be lost if the single acking bookie fails before the entry replicates to the rest. Fine for
+# a synthetic demo; NOT a production-safe default. We read the current ensemble/write-quorum
+# and override ONLY the ack-quorum, so write replication is unchanged.
+#   Overridable: DATA_NS_ACK_QUORUM (default 1); DATA_NS_ENSEMBLE / DATA_NS_WRITE_QUORUM are
+#   fallbacks used only when the namespace has no explicit policy yet.
+# NOTE: applies to NEW ledgers — existing topics pick it up on the next ledger rollover, not
+# retroactively. For a clean before/after, `make reset-demo-cloud` (fresh topics) or
+# `pa topics unload <source-topic>` after applying. (RESET=1 only redeploys the orchestrator
+# function — it does NOT roll ledgers or recreate topics.)
+DATA_NS_ACK_QUORUM="${DATA_NS_ACK_QUORUM:-1}"
+_PERS=$(PA_AUTH_TOKEN="$TF_VAR_pulsar_token" pa namespaces get-persistence public/default 2>/dev/null || true)
+_ENS=$(printf '%s' "$_PERS" | grep -oE '"bookkeeperEnsemble"[^0-9]*[0-9]+' | grep -oE '[0-9]+$' || true)
+_WQ=$(printf '%s' "$_PERS"  | grep -oE '"bookkeeperWriteQuorum"[^0-9]*[0-9]+' | grep -oE '[0-9]+$' || true)
+_ENS="${_ENS:-${DATA_NS_ENSEMBLE:-2}}"; _WQ="${_WQ:-${DATA_NS_WRITE_QUORUM:-2}}"
+echo "  Setting persistence on public/default: ensemble=$_ENS write-quorum=$_WQ ack-quorum=$DATA_NS_ACK_QUORUM..."
+PA_AUTH_TOKEN="$TF_VAR_pulsar_token" pa namespaces set-persistence public/default \
+  -e "$_ENS" -w "$_WQ" -a "$DATA_NS_ACK_QUORUM" -r 0 \
+  && ok "ack-quorum=$DATA_NS_ACK_QUORUM set on public/default (ensemble=$_ENS write-quorum=$_WQ)" \
+  || warn "Could not set persistence on public/default — cluster may have fewer bookies than ensemble=$_ENS, or enforce a minimum ack-quorum"
+
 # Locate orchestrator + selector-filter NARs.
 # Preferred: NARs pre-downloaded on the host (gh has private-repo auth — plain
 # curl from this script does not). Mirrors the local-mode fix:
