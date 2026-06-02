@@ -184,6 +184,11 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
         MessageBindings bindings = MessageBindings.from(record, payload);
         final String msgKey = bindings.getKey();
+        // Preserve the source event time so end-to-end latency survives the filter hop. Without this,
+        // the output producer stamps a fresh publish time at re-publish, and any downstream consumer
+        // measuring latency off the filtered topic's timestamps under-counts by the ingest time.
+        // Under KoP, eventTime carries the Kafka producer's CreateTime (see recordMatchLatency note).
+        final long srcEventTime = record.getMessage().map(m -> m.getEventTime()).orElse(0L);
 
         List<CompletableFuture<?>> sends = new ArrayList<>();
         Map<String, String> forwardProperties = null;
@@ -203,6 +208,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                 }
                 if (msgKey != null) {
                     builder = builder.key(msgKey);
+                }
+                if (srcEventTime > 0) {
+                    builder = builder.eventTime(srcEventTime);
                 }
                 final String outputTopic = cq.outputTopic();
                 pendingSends.incrementAndGet();
