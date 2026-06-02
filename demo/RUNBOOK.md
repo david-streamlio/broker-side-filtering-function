@@ -90,7 +90,7 @@ This is the **shared** path — same script for both demos:
 
 ```bash
 cd demo/infra/terraform
-SELECTOR_REL=v1.1.0 ./recreate.sh
+SELECTOR_REL=v1.2.0 ./recreate.sh
 cd ../../..
 ```
 

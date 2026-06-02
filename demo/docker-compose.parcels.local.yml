@@ -69,7 +69,7 @@ services:
     environment:
       PULSAR_ADMIN_URL: "http://pulsar:8080"
       SELECTOR_REPO:    "${SELECTOR_REPO:-david-streamlio/broker-side-filtering-function}"
-      SELECTOR_REL:     "${SELECTOR_REL:-v1.1.0}"
+      SELECTOR_REL:     "${SELECTOR_REL:-v1.2.0}"
       GITHUB_TOKEN:     "${GITHUB_TOKEN:-}"
     volumes:
       - ./local/orchestrator-deploy.sh:/usr/local/bin/orchestrator-deploy.sh:ro
