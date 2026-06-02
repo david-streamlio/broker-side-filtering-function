@@ -37,6 +37,12 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
      * if profiling shows the metric itself is a bottleneck under extreme throughput.
      */
     static final String CFG_PROCESSING_TIME_METRIC = "enable-processing-time-metric";
+    /**
+     * userConfig key (int). Log a per-message phase-breakdown timing line every N matched
+     * messages: queue delay (broker write → process() call), eval time, and sendAsync
+     * round-trip. Default 10. Set to 0 to disable.
+     */
+    static final String CFG_LOG_TIMING_EVERY = "log-timing-every";
     static final long LOG_FREQUENCY = 100_000L;
     /** Warn when a single sendAsync() takes longer than this. */
     static final long SLOW_SEND_WARN_MS  = 5_000L;
@@ -123,6 +129,8 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     private volatile TableView<byte[]> controlTopicView;
     private volatile Context boundContext;
     private volatile boolean processingTimeMetricEnabled = true;
+    private volatile int logTimingEvery = 10;
+    private final AtomicLong timingLogCounter = new AtomicLong();
 
     @Override
     public void initialize(Context ctx) throws Exception {
@@ -134,6 +142,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
         this.boundContext = ctx;
         this.processingTimeMetricEnabled = resolveBoolean(ctx, CFG_PROCESSING_TIME_METRIC, true);
+        this.logTimingEvery = resolveInt(ctx, CFG_LOG_TIMING_EVERY, 10);
         LOG.info("Processing-time metric ({}) is {}", METRIC_PROCESSING_TIME_MS,
                 processingTimeMetricEnabled ? "ENABLED" : "DISABLED");
 
@@ -224,6 +233,8 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         // (b1) value-add latency: entry → all sends dispatched (deserialize + eval + build +
         // enqueue). Recorded synchronously on the process-loop thread, matched-only.
         recordDispatchTime(ctx, startNanos);
+        // Capture ms-precision dispatch-done time for the human-readable [timing] log.
+        final long evalDoneMs = System.currentTimeMillis();
 
         final int fanout = sends.size();
         return CompletableFuture.allOf(sends.toArray(new CompletableFuture[0]))
@@ -241,6 +252,25 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                         recordMatchLatency(ctx, record);
                         // (b) total value-add latency: entry → all output sends acked (matched-only).
                         recordMatchProcessingTime(ctx, startNanos);
+
+                        // Human-readable phase breakdown every logTimingEvery matched messages.
+                        // queue = broker writes source → process() called (scheduling/dispatch delay)
+                        // eval  = process() start → all sendAsync() submitted (CPU value-add)
+                        // send  = sendAsync() submitted → broker acks output (network round-trip)
+                        int every = logTimingEvery;
+                        if (every > 0 && timingLogCounter.incrementAndGet() % every == 0) {
+                            long totalMs = System.currentTimeMillis() - startMs;
+                            long evalMs  = evalDoneMs - startMs;
+                            long sendMs  = totalMs - evalMs;
+                            long queueMs = record.getMessage()
+                                    .map(m -> m.getPublishTime() > 0 ? startMs - m.getPublishTime() : -1L)
+                                    .orElse(-1L);
+                            LOG.info("[timing] key={} queue={}ms eval={}ms send={}ms total={}ms fanout={} pending={}",
+                                    msgKey,
+                                    queueMs >= 0 ? queueMs : "?",
+                                    evalMs, sendMs, totalMs, fanout, pendingSends.get());
+                        }
+
                         long c = filteredCount.addAndGet(fanout);
                         if (c % LOG_FREQUENCY < fanout) {
                             LOG.info("Filtered {} messages (in={} dropped={} active-queries={})",
@@ -353,10 +383,15 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
     private static boolean resolveBoolean(Context ctx, String key, boolean defaultValue) {
         Object value = ctx.getUserConfigValue(key).orElse(null);
-        if (value == null) {
-            return defaultValue;
-        }
+        if (value == null) return defaultValue;
         return Boolean.parseBoolean(value.toString());
+    }
+
+    private static int resolveInt(Context ctx, String key, int defaultValue) {
+        Object value = ctx.getUserConfigValue(key).orElse(null);
+        if (value == null) return defaultValue;
+        try { return Integer.parseInt(value.toString()); }
+        catch (NumberFormatException e) { return defaultValue; }
     }
 
     private String resolveControlTopic(Context ctx) {
