@@ -1,7 +1,8 @@
-provider "pulsar" {
-  web_service_url = var.pulsar_admin_url
-  token           = var.pulsar_admin_token
-}
+# NOTE: this module intentionally declares NO `provider "pulsar"` block. The caller configures the
+# provider (from var.pulsar_admin_url / var.pulsar_admin_token) and it is inherited here. A module
+# that declares its own provider blocks cannot be called with depends_on / count / for_each — and
+# the greenfield example must call this module with depends_on so it waits for the Helm release.
+# See examples/greenfield/main.tf for the root-level `provider "pulsar"` config.
 
 # Create the tenant if it doesn't already exist. Self-hosted Helm clusters don't preprovision
 # anything beyond the default 'public' tenant. The provider's pulsar_tenant resource is

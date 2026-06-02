@@ -17,6 +17,16 @@ terraform {
   }
 }
 
+# The pulsar provider points at the broker the Helm release stands up. Configured HERE (the root),
+# NOT inside the pulsar-helm module — Terraform forbids depends_on on a module that declares its own
+# provider blocks, and the orchestrator module must wait for the Helm release. The provider stores
+# the URL/token lazily and only connects when its resources are CRUD'd (after the depends_on), so a
+# not-yet-existing broker at plan time is fine.
+provider "pulsar" {
+  web_service_url = local.pulsar_admin_url
+  token           = "" # kind / greenfield broker runs without auth
+}
+
 variable "k8s_namespace" {
   description = "Kubernetes namespace to install Pulsar into."
   type        = string
@@ -42,20 +52,21 @@ variable "filter_nar_path" {
 locals {
   kafka_namespace_value     = "${var.release_name}-tenant/filters"
   kop_advertised_host_value = "localhost" # for kind / port-forward smoke — override in production
+  pulsar_admin_url          = "http://${var.release_name}-broker.${var.k8s_namespace}.svc.cluster.local:8080"
 
   broker_values = yamlencode({
     broker = {
       configData = {
-        messagingProtocols                  = "kafka"
-        kafkaListeners                      = "PLAINTEXT://0.0.0.0:9092"
-        kafkaAdvertisedListeners            = "PLAINTEXT://${local.kop_advertised_host_value}:9092"
-        kafkaNamespace                      = local.kafka_namespace_value
-        kafkaEntryFormat                    = "pulsar_non_batched"
-        kafkaTransactionCoordinatorEnabled  = "false"
-        brokerEntryMetadataInterceptors     = "org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
-        allowAutoTopicCreation              = "true"
-        allowAutoTopicCreationType          = "non-partitioned"
-        brokerDeleteInactiveTopicsEnabled   = "false"
+        messagingProtocols                 = "kafka"
+        kafkaListeners                     = "PLAINTEXT://0.0.0.0:9092"
+        kafkaAdvertisedListeners           = "PLAINTEXT://${local.kop_advertised_host_value}:9092"
+        kafkaNamespace                     = local.kafka_namespace_value
+        kafkaEntryFormat                   = "pulsar_non_batched"
+        kafkaTransactionCoordinatorEnabled = "false"
+        brokerEntryMetadataInterceptors    = "org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
+        allowAutoTopicCreation             = "true"
+        allowAutoTopicCreationType         = "non-partitioned"
+        brokerDeleteInactiveTopicsEnabled  = "false"
       }
     }
   })
@@ -79,7 +90,7 @@ resource "helm_release" "pulsar" {
 module "orchestrator" {
   source = "../.."
 
-  pulsar_admin_url = "http://${var.release_name}-broker.${var.k8s_namespace}.svc.cluster.local:8080"
+  pulsar_admin_url = local.pulsar_admin_url
   cluster_name     = var.release_name
   tenant           = "${var.release_name}-tenant"
   namespace        = "filters"
