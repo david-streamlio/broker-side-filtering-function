@@ -166,6 +166,22 @@ for t in "${SOURCE_TOPICS[@]}"; do
     fi
 done
 
+# ── Step 1c: set kafkaEntryFormat=pulsar_non_batched on PARENT partitioned topic
+# KoP source code (PartitionLogManager.java) reads kafkaEntryFormat from the
+# PARENT topic's partitioned-topic metadata for partitioned topics, NOT from the
+# namespace property set in Step 1 (which is read only for non-partitioned topics).
+# Without this, KoP stores Kafka records in batch format (x-pulsar-num-batch-message)
+# that the Pulsar function consumer cannot decode, logging "Discarding corrupted
+# message" for every entry and driving availablePermits negative — permanently
+# deadlocking message dispatch to the selector-filter function.
+for t in "${SOURCE_TOPICS[@]}"; do
+    echo -e "${BLUE}🔧 Step 1c — set kafkaEntryFormat=pulsar_non_batched on parent topic $t${NC}"
+    PA topics set-property "$t" \
+        --key kafkaEntryFormat \
+        --value pulsar_non_batched 2>&1 | grep -vE '^$' || true
+    echo -e "${GREEN}  ✅ parent topic property set (kafkaEntryFormat=pulsar_non_batched)${NC}"
+done
+
 # ── Step 2: ensure the control topic exists (non-partitioned) ────────────────
 echo -e "${BLUE}📦 Step 2 — ensure control topic exists${NC}"
 # Same idempotency as Step 1b: recreate.sh's Step B pre-creates the control

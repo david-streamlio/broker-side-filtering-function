@@ -96,6 +96,29 @@ resource "pulsar_topic" "stock_quotes" {
   partitions = 1
 }
 
+# Set kafkaEntryFormat=pulsar_non_batched on the stock-quotes PARENT topic.
+# KoP (PartitionLogManager.buildEntryFormatter) reads this from the partitioned-
+# topic metadata — NOT from the namespace property — for partitioned topics.
+# Without it, KoP stores Kafka records in its own batched format that Pulsar
+# function consumers cannot decode ("Discarding corrupted message"), driving
+# consumer flow-control permits negative and permanently deadlocking dispatch.
+# The pulsar_topic resource has no properties attribute, so we use a curl call
+# against the admin REST API with the superuser token from Phase 5.
+resource "null_resource" "stock_quotes_kafka_entry_format" {
+  depends_on = [pulsar_topic.stock_quotes]
+  provisioner "local-exec" {
+    command = <<-EOT
+      curl -sf -X PUT \
+        -H "Authorization: Bearer ${var.pulsar_token}" \
+        -H "Content-Type: application/json" \
+        -d '{"kafkaEntryFormat":"pulsar_non_batched"}' \
+        "${var.pulsar_web_service_url}/admin/v2/persistent/public/default/stock-quotes/properties" \
+        && echo "kafkaEntryFormat set on stock-quotes" \
+        || echo "WARN: could not set kafkaEntryFormat on stock-quotes (may need manual set)"
+    EOT
+  }
+}
+
 # Parcels-demo source topics. Pre-created (rather than letting ShadowTraffic
 # auto-create them on first produce) so recreate.sh can set
 # kafkaEntryFormat=pulsar_non_batched on each topic deterministically. Without
@@ -127,6 +150,28 @@ resource "pulsar_topic" "parcel_exceptions" {
   topic_type = "persistent"
   topic_name = "parcel-exceptions"
   partitions = 1
+}
+
+# Same kafkaEntryFormat fix for all parcel topics (see note on stock_quotes above).
+resource "null_resource" "parcel_topics_kafka_entry_format" {
+  depends_on = [
+    pulsar_topic.parcel_shipments,
+    pulsar_topic.parcel_scans,
+    pulsar_topic.parcel_exceptions,
+  ]
+  provisioner "local-exec" {
+    command = <<-EOT
+      for topic in parcel-shipments parcel-scans parcel-exceptions; do
+        curl -sf -X PUT \
+          -H "Authorization: Bearer ${var.pulsar_token}" \
+          -H "Content-Type: application/json" \
+          -d '{"kafkaEntryFormat":"pulsar_non_batched"}' \
+          "${var.pulsar_web_service_url}/admin/v2/persistent/public/default/$topic/properties" \
+          && echo "kafkaEntryFormat set on $topic" \
+          || echo "WARN: could not set kafkaEntryFormat on $topic"
+      done
+    EOT
+  }
 }
 
 # Control topic — SDK-facing input topic for the orchestrator function.
