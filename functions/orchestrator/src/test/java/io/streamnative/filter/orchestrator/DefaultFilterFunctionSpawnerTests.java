@@ -108,6 +108,8 @@ class DefaultFilterFunctionSpawnerTests {
         assertThat(fc.getCleanupSubscription()).isTrue();
         assertThat(fc.getParallelism()).isEqualTo(cfg.functionParallelism());
         assertThat(fc.getUserConfig().get("control-topic")).isEqualTo(entry.getControlTopic());
+        // Diagnostic log-timing-every is gated off by default (forTesting() = 0) → not injected.
+        assertThat(fc.getUserConfig()).doesNotContainKey("log-timing-every");
         assertThat(pkgCap.getValue()).isEqualTo("function://public/filters/selector-filter@1.0.0");
 
         // Output producer batching tuned for latency — forTesting() defaults to 1ms.
@@ -115,6 +117,23 @@ class DefaultFilterFunctionSpawnerTests {
         assertThat(fc.getProducerConfig().getBatchingConfig()).isNotNull();
         assertThat(fc.getProducerConfig().getBatchingConfig().isEnabled()).isTrue();
         assertThat(fc.getProducerConfig().getBatchingConfig().getBatchingMaxPublishDelayMs()).isEqualTo(1);
+    }
+
+    @Test
+    void spawnInjectsLogTimingEveryWhenConfigured() throws Exception {
+        // forTesting() defaults the diagnostic off; with the knob set, the orchestrator threads
+        // filter-log-timing-every through to the spawned filter's userConfig as log-timing-every.
+        OrchestratorConfig timed = OrchestratorConfig.forTestingWithLogTiming(
+                "persistent://public/orchestrator/state",
+                "function://public/filters/selector-filter@1.0.0",
+                "public", "filtered", 25);
+        when(functions.getFunctionStatus(anyString(), anyString(), anyString())).thenThrow(notFound());
+
+        spawner.spawn("persistent://public/in/trades", registerReq("persistent://public/in/trades"), timed);
+
+        ArgumentCaptor<FunctionConfig> fcCap = ArgumentCaptor.forClass(FunctionConfig.class);
+        verify(functions).createFunctionWithUrl(fcCap.capture(), anyString());
+        assertThat(fcCap.getValue().getUserConfig().get("log-timing-every")).isEqualTo(25);
     }
 
     @Test

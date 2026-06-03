@@ -58,7 +58,12 @@ services:
       # exposingBrokerEntryMetadataToClientEnabled lets the consumer read it
       # back. Both are documented KoP prerequisites the sn-platform image
       # doesn't enable by default in standalone mode.
-      PULSAR_PREFIX_brokerEntryMetadataInterceptors:          "org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
+      # AppendBrokerTimestampMetadataInterceptor (added alongside the index one)
+      # stamps the broker-receive instant into broker-entry metadata, surfaced as
+      # Message.getBrokerPublishTime() — used by the filter's [timing] log to split
+      # queue latency into producer-accumulator vs broker-ingest. Harmless when the
+      # timing log is disabled; required for its `producer`/`ingest` terms.
+      PULSAR_PREFIX_brokerEntryMetadataInterceptors:          "org.apache.pulsar.common.intercept.AppendBrokerTimestampMetadataInterceptor,org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
       PULSAR_PREFIX_exposingBrokerEntryMetadataToClientEnabled: "true"
       # Functions — required for the orchestrator + spawned selector-filters.
       PULSAR_PREFIX_functionsWorkerEnabled:                   "true"

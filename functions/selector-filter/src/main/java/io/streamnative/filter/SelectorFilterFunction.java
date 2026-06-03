@@ -38,9 +38,11 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
      */
     static final String CFG_PROCESSING_TIME_METRIC = "enable-processing-time-metric";
     /**
-     * userConfig key (int). Log a per-message phase-breakdown timing line every N matched
-     * messages: queue delay (broker write → process() call), eval time, and sendAsync
-     * round-trip. Default 10. Set to 0 to disable.
+     * userConfig key (int). When &gt; 0, log a per-message phase-breakdown {@code [timing]} line every
+     * N matched messages: queue (and its producer/ingest split when broker-entry-metadata is enabled),
+     * eval time, and sendAsync round-trip. Default {@code 0} (off) — a diagnostic, threaded on per
+     * deployment via the orchestrator's {@code filter-log-timing-every} knob; left off in steady state
+     * to avoid per-message log volume.
      */
     static final String CFG_LOG_TIMING_EVERY = "log-timing-every";
     static final long LOG_FREQUENCY = 100_000L;
@@ -129,7 +131,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     private volatile TableView<byte[]> controlTopicView;
     private volatile Context boundContext;
     private volatile boolean processingTimeMetricEnabled = true;
-    private volatile int logTimingEvery = 10;
+    private volatile int logTimingEvery = 0;
     private final AtomicLong timingLogCounter = new AtomicLong();
 
     @Override
@@ -142,7 +144,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
         this.boundContext = ctx;
         this.processingTimeMetricEnabled = resolveBoolean(ctx, CFG_PROCESSING_TIME_METRIC, true);
-        this.logTimingEvery = resolveInt(ctx, CFG_LOG_TIMING_EVERY, 10);
+        this.logTimingEvery = resolveInt(ctx, CFG_LOG_TIMING_EVERY, 0);
         LOG.info("Processing-time metric ({}) is {}", METRIC_PROCESSING_TIME_MS,
                 processingTimeMetricEnabled ? "ENABLED" : "DISABLED");
 
@@ -262,20 +264,28 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                         recordMatchProcessingTime(ctx, startNanos);
 
                         // Human-readable phase breakdown every logTimingEvery matched messages.
-                        // queue = broker writes source → process() called (scheduling/dispatch delay)
+                        // queue = producer CreateTime → process() called. When broker-entry-metadata
+                        //         is enabled it splits into:
+                        //   producer = CreateTime → broker receive (producer accumulator + network)
+                        //   ingest   = broker receive → process() (BookKeeper add-entry + dispatch)
                         // eval  = process() start → all sendAsync() submitted (CPU value-add)
                         // send  = sendAsync() submitted → broker acks output (network round-trip)
+                        // Under KoP, publishTime = the Kafka producer's CreateTime (NOT broker-receive),
+                        // so the producer/ingest split needs brokerPublishTime; it shows '?' when the
+                        // AppendBrokerTimestampMetadataInterceptor isn't enabled on the cluster.
                         int every = logTimingEvery;
                         if (every > 0 && timingLogCounter.incrementAndGet() % every == 0) {
                             long totalMs = System.currentTimeMillis() - startMs;
                             long evalMs  = evalDoneMs - startMs;
                             long sendMs  = totalMs - evalMs;
-                            long queueMs = record.getMessage()
-                                    .map(m -> m.getPublishTime() > 0 ? startMs - m.getPublishTime() : -1L)
-                                    .orElse(-1L);
-                            LOG.info("[timing] key={} queue={}ms eval={}ms send={}ms total={}ms fanout={} pending={}",
-                                    msgKey,
-                                    queueMs >= 0 ? queueMs : "?",
+                            var msgOpt = record.getMessage();
+                            long pt  = msgOpt.map(m -> m.getPublishTime()).orElse(-1L);
+                            long bpt = msgOpt.flatMap(m -> m.getBrokerPublishTime()).orElse(-1L);
+                            String queue    = pt > 0             ? (startMs - pt) + "ms" : "?";
+                            String producer = (bpt > 0 && pt > 0) ? (bpt - pt) + "ms"    : "?";
+                            String ingest   = bpt > 0            ? (startMs - bpt) + "ms" : "?";
+                            LOG.info("[timing] key={} queue={} producer={} ingest={} eval={}ms send={}ms total={}ms fanout={} pending={}",
+                                    msgKey, queue, producer, ingest,
                                     evalMs, sendMs, totalMs, fanout, pendingSends.get());
                         }
 
@@ -321,9 +331,12 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
      * Records broker-to-forward and event-to-forward latency for a matched message.
      * Both use running sums + counts so the observability can compute averages over any window.
      *
-     * <p>"Publish time" = when the Pulsar broker received the source message (set by the broker).
-     * "Event time" = the original Kafka/producer timestamp (set by the KoP bridge from the Kafka timestamp).
-     * Either can be 0 if not available; those messages are skipped for that metric.
+     * <p>Note: under KoP, <em>both</em> {@code publishTime} and {@code eventTime} are set from the
+     * Kafka record timestamp (the producer's CreateTime) — not the broker-receive instant — so these
+     * two metrics measure the same producer→forward span. The true broker-receive time is
+     * {@code brokerPublishTime} (broker entry metadata), used by the {@code [timing]} log to split
+     * producer-accumulator from broker-ingest. Either timestamp can be 0 if unavailable; those
+     * messages are skipped for that metric.
      */
     private void recordMatchLatency(Context ctx, Record<?> record) {
         record.getMessage().ifPresent(msg -> {
