@@ -1,5 +1,6 @@
 package io.streamnative.filter;
 
+import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.TableView;
@@ -26,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -73,6 +75,7 @@ class SelectorFilterFunctionTests {
         when(b.value(any(byte[].class))).thenReturn(b);
         when(b.properties(any(Map.class))).thenReturn(b);
         when(b.key(anyString())).thenReturn(b);
+        when(b.eventTime(anyLong())).thenReturn(b);
         when(b.sendAsync()).thenReturn((CompletableFuture) sendResult);
         when(ctx.newOutputMessage(eq(outputTopic), any(Schema.class))).thenReturn((TypedMessageBuilder) b);
         outputBuilders.put(outputTopic, b);
@@ -218,6 +221,33 @@ class SelectorFilterFunctionTests {
         verify(builder).sendAsync();
         verify(record).ack();
         verify(record, never()).fail();
+        // No source message present (record.getMessage() is empty) → no event time to forward.
+        verify(builder, never()).eventTime(anyLong());
+    }
+
+    @Test
+    void processForwardsSourceEventTime() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        String outputTopic = "persistent://public/filtered/us-large-cap";
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(outputTopic, CompletableFuture.completedFuture(null));
+
+        // Source message carries an event time (under KoP, the Kafka producer's CreateTime).
+        long srcEventTime = 1_700_000_000_000L;
+        @SuppressWarnings("unchecked")
+        Message<byte[]> msg = (Message<byte[]>) Mockito.mock(Message.class);
+        when(msg.getEventTime()).thenReturn(srcEventTime);
+        when(record.getMessage()).thenReturn(Optional.of(msg));
+
+        fn.loadQueryForTest("q1", queryJson("__key__ = 'AAPL'", outputTopic));
+
+        CompletableFuture<Void> result = fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);
+
+        assertThat(result).isCompleted();
+        // The output message preserves the source event time so end-to-end latency survives the hop.
+        verify(builder).eventTime(srcEventTime);
     }
 
     @Test
