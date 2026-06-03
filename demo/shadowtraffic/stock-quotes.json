@@ -54,7 +54,7 @@
         { "key": "side",     "value": { "_gen": "var", "var": "side" } }
       ],
       "localConfigs": {
-        "throttleMs": ${throttle_ms}
+        "throttleMs": 5
       }
     }
   ],
