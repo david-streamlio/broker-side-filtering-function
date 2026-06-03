@@ -206,6 +206,22 @@ else
     done
 fi
 
+# Partitioned topics in $TENANT/$NS — `topics list` above only returns non-partitioned, so a
+# partitioned filter-requests (auto-created by the orchestrator's subscription before TF could make
+# it the non-partitioned partitions=0 topic) is invisible to that loop and lingers. Without this pass
+# the next recreate.sh 409s forever creating the TF-managed non-partitioned filter-requests.
+NS_PART_OUT=$(PA topics list-partitioned-topics "$TENANT/$NS" 2>/dev/null || true)
+NS_PART=$(_normalize_list "$NS_PART_OUT" | grep -E '^persistent://' || true)
+if [[ -n "$NS_PART" ]]; then
+    for t in $NS_PART; do
+        if PA topics delete-partitioned-topic "$t" -f >/dev/null 2>&1; then
+            ok "deleted partitioned topic: $t"
+        else
+            warn "skipped partitioned (not found or no permission): $t"
+        fi
+    done
+fi
+
 # SDK private topics (filtered-<uuid>) in public/default — accumulate per query registration.
 PRIV_OUT=$(PA topics list public/default 2>/dev/null || true)
 PRIV_TOPICS=$(printf '%s' "$PRIV_OUT" | grep -E '/filtered-' || true)

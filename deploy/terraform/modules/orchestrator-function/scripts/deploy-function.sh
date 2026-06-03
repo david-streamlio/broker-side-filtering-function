@@ -7,7 +7,7 @@
 #   PULSAR_ADMIN_TOKEN   — empty for no-auth
 #   TENANT, NAMESPACE, FUNCTION_NAME
 #   ORCHESTRATOR_NAR     — absolute path on the Terraform host
-#   USER_CONFIG_JSON     — single-line JSON dict; mirrors the 14 OrchestratorConfig keys
+#   USER_CONFIG_JSON     — single-line JSON dict; mirrors the OrchestratorConfig.KEY_* keys
 #   FUNCTION_CLASSNAME   — io.streamnative.filter.orchestrator.OrchestratorFunction
 #   INPUTS               — comma-separated input topic FQDNs (the control topic)
 #   PARALLELISM          — integer (MUST be 1 per the v1 invariant)

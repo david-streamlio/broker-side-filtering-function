@@ -3,9 +3,11 @@
 One-shot Terraform: bring up Apache Pulsar via Helm AND provision the orchestrator
 topology + function on top. For operators with no existing cluster.
 
-Operators with an **existing** Pulsar Helm release should NOT use this; use
-[`../../main.tf`](../../main.tf) directly and merge
-[`../../values.broker.kop.yaml`](../../values.broker.kop.yaml) into their existing values.
+Operators with an **existing** Pulsar Helm release should NOT use this. Call the
+[`pulsar-helm`](../..) module from your own root, **configuring a `provider "pulsar"` there** — the
+module no longer embeds one (so it can be called with `depends_on`); see the root-level provider in
+this example's `main.tf`. Merge [`../../values.broker.kop.yaml`](../../values.broker.kop.yaml) into
+your existing chart values.
 
 ## What it does
 
