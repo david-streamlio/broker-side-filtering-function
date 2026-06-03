@@ -148,12 +148,15 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         LOG.info("Processing-time metric ({}) is {}", METRIC_PROCESSING_TIME_MS,
                 processingTimeMetricEnabled ? "ENABLED" : "DISABLED");
 
+        LOG.info("[debug-init] starting TableView on control topic {}", controlTopic);
         PulsarClient pulsarClient = ctx.getPulsarClient();
         this.controlTopicView = pulsarClient.newTableView(Schema.BYTES)
                 .topic(controlTopic)
                 .create();
+        LOG.info("[debug-init] TableView created, loading entries...");
 
         controlTopicView.forEachAndListen(this::onQueryEvent);
+        LOG.info("[debug-init] forEachAndListen done, {} queries loaded", compiled.size());
 
         warnOnLoop(ctx);
         recordMetric(METRIC_QUERIES_ACTIVE, compiled.size());
@@ -174,6 +177,29 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         ctx.recordMetric(METRIC_MESSAGES_IN, 1.0);
         ctx.recordMetric(METRIC_BYTES_IN, payloadBytes);
 
+        // Debug: log first 10 messages to confirm format is correct after kafkaEntryFormat fix.
+        // "Discarding corrupted message" in ConsumerImpl means KoP batch-format entries (produced
+        // WITHOUT kafkaEntryFormat=pulsar_non_batched) reached the consumer before it was able to
+        // decode them. Each discard consumes a flow-control permit without returning it, driving
+        // availablePermits negative and deadlocking dispatch. Fix: set kafkaEntryFormat=
+        // pulsar_non_batched on the topic AND namespace, then restart KoP producers (ShadowTraffic).
+        if (inCount <= 10) {
+            Record<?> dbgRecord = ctx.getCurrentRecord();
+            String dbgKey = dbgRecord.getKey().orElse("(no key)");
+            long dbgPt = dbgRecord.getMessage().map(m -> m.getPublishTime()).orElse(-1L);
+            long dbgEt = dbgRecord.getMessage().map(m -> m.getEventTime()).orElse(-1L);
+            int dbgProps = dbgRecord.getProperties() == null ? 0 : dbgRecord.getProperties().size();
+            // A zero-length payload with no key is a telltale sign of a KoP batch-container
+            // artifact that slipped through (should have been discarded by ConsumerImpl).
+            boolean suspicious = (payloadBytes == 0 && dbgKey.equals("(no key)"));
+            LOG.info("[debug-process] msg#{} key={} payloadBytes={} publishTime={} eventTime={} props={} compiled={} suspicious={}",
+                    inCount, dbgKey, payloadBytes, dbgPt, dbgEt, dbgProps, compiled.size(), suspicious);
+            if (suspicious) {
+                LOG.warn("[debug-process] msg#{} looks like a KoP batch-container artifact — acking as dropped. " +
+                         "Root cause: kafkaEntryFormat not set on topic before this message was produced.", inCount);
+            }
+        }
+
         // Periodic heartbeat — fires regardless of throughput so operators can tell
         // the function is alive even when it is stuck waiting on a send.
         emitHeartbeat(ctx);
@@ -181,6 +207,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         Record<?> record = ctx.getCurrentRecord();
 
         if (compiled.isEmpty()) {
+            LOG.warn("[debug-process] compiled map is EMPTY — dropping msg#{}", inCount);
             return ackAsDropped(ctx, record, payloadBytes, startNanos);
         }
 
