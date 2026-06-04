@@ -482,11 +482,18 @@ try (Consumer<Trade> consumer = session.newConsumer(Schema.JSON(Trade.class))
   because it needs the generated class to decode and carries no descriptor. `AUTO_CONSUME` is
   unsupported (no concrete reader schema).
 - The schema's full `SchemaInfo` (type + definition/descriptor) is forwarded to the orchestrator and
-  on to the filter function, which records it per query. **Schema-aware value *filtering* inside the
-  function (matching selectors on decoded JSON/Avro/Protobuf fields) is a follow-up; today the schema
-  is plumbed and stored but selectors still evaluate against the key, source topic, user properties,
-  and best-effort JSON payload fields.**
-- The no-arg `newConsumer()` is unchanged and remains wire-identical: it forwards no value schema.
+  on to the filter function, which uses it to **decode the message value and match selectors against
+  its top-level fields** — e.g. `price > 50000 AND side = 'buy'`:
+    - **JSON** — resolved by the function's best-effort JSON parsing (also applies when no schema is
+      declared, e.g. KoP-bridged JSON payloads).
+    - **AVRO** — decoded from the carried `.avsc` via a bundled Avro reader.
+    - **PROTOBUF_NATIVE** — decoded by reconstructing the descriptor carried in the schema (no
+      generated class needed).
+  Only **top-level scalar fields** are addressable today (the JMS selector grammar can't express
+  nested paths); user properties of the same name still take precedence over value fields. Note that
+  for proto3, an unset singular scalar decodes to its type default (`0` / `""` / `false`).
+- The no-arg `newConsumer()` is unchanged and remains wire-identical: it forwards no value schema,
+  and selectors then match on key, topic, properties, and best-effort JSON only.
 
 > Note: structured-schema decode assumes the default namespace (`schemaValidationEnforced=false`).
 > A hardened namespace could refuse a structured-schema consumer on the raw-bytes private topic.
