@@ -66,6 +66,51 @@ class ProtobufNativeValueDecoderTests {
         assertThat(fields.get("active")).isEqualTo(true);
     }
 
+    /** proto3 with a nested message: {@code Order { string sym=1; Address address=2; }}. */
+    static Descriptor orderDescriptor() throws Exception {
+        FileDescriptorProto file = FileDescriptorProto.newBuilder()
+                .setName("order.proto")
+                .setSyntax("proto3")
+                .addMessageType(DescriptorProto.newBuilder()
+                        .setName("Address")
+                        .addField(field("city", 1, Type.TYPE_STRING))
+                        .addField(field("zip", 2, Type.TYPE_INT32)))
+                .addMessageType(DescriptorProto.newBuilder()
+                        .setName("Order")
+                        .addField(field("sym", 1, Type.TYPE_STRING))
+                        .addField(FieldDescriptorProto.newBuilder()
+                                .setName("address").setNumber(2)
+                                .setType(Type.TYPE_MESSAGE).setTypeName(".Address")
+                                .setLabel(Label.LABEL_OPTIONAL)))
+                .build();
+        FileDescriptor fd = FileDescriptor.buildFrom(file, new FileDescriptor[0]);
+        return fd.findMessageTypeByName("Order");
+    }
+
+    @Test
+    void decodesNestedMessageToNestedMap() throws Exception {
+        Descriptor order = orderDescriptor();
+        Descriptor address = order.getFile().findMessageTypeByName("Address");
+        DynamicMessage addr = DynamicMessage.newBuilder(address)
+                .setField(address.findFieldByName("city"), "NYC")
+                .setField(address.findFieldByName("zip"), 10001)
+                .build();
+        DynamicMessage ord = DynamicMessage.newBuilder(order)
+                .setField(order.findFieldByName("sym"), "AAPL")
+                .setField(order.findFieldByName("address"), addr)
+                .build();
+
+        byte[] schemaData = ProtobufNativeSchemaUtils.serialize(order);
+        Map<String, Object> fields = new ProtobufNativeValueDecoder(schemaData).decode(ord.toByteArray());
+
+        assertThat(fields.get("sym")).isEqualTo("AAPL");
+        assertThat(fields.get("address")).isInstanceOf(Map.class);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> a = (Map<String, Object>) fields.get("address");
+        assertThat(a.get("city")).isEqualTo("NYC");
+        assertThat(((Number) a.get("zip")).intValue()).isEqualTo(10001);
+    }
+
     @Test
     void returnsNullForEmptyPayload() throws Exception {
         ProtobufNativeValueDecoder decoder = new ProtobufNativeValueDecoder(

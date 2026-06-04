@@ -56,12 +56,7 @@ final class AvroValueDecoder implements ValueDecoder {
         }
         try {
             BinaryDecoder decoder = DecoderFactory.get().binaryDecoder(payload, null);
-            GenericRecord record = reader.read(null, decoder);
-            Map<String, Object> fields = new HashMap<>();
-            for (Schema.Field f : schema.getFields()) {
-                fields.put(f.name(), coerce(record.get(f.pos())));
-            }
-            return fields;
+            return recordToMap(reader.read(null, decoder));
         } catch (Exception e) {
             // Not the expected Avro layout (corrupt/foreign bytes) — let the caller fall back.
             LOG.debug("Avro decode failed for schema {}: {}", schema.getFullName(), e.toString());
@@ -69,10 +64,19 @@ final class AvroValueDecoder implements ValueDecoder {
         }
     }
 
+    /** Convert a record to a field map, recursing into nested records (for dotted-path lookups). */
+    private static Map<String, Object> recordToMap(GenericRecord record) {
+        Map<String, Object> fields = new HashMap<>();
+        for (Schema.Field f : record.getSchema().getFields()) {
+            fields.put(f.name(), coerce(record.get(f.pos())));
+        }
+        return fields;
+    }
+
     /**
-     * Coerce an Avro field value to a JMS-comparable scalar: {@link String} / {@link Number} /
-     * {@link Boolean}. Non-scalar fields (records, arrays, maps, fixed, bytes) and {@code null}
-     * resolve to {@code null} — only top-level scalars are addressable.
+     * Coerce an Avro field value: scalars to {@link String} / {@link Number} / {@link Boolean}, a
+     * nested record to a nested {@code Map} (so {@code a.b} dotted paths resolve). Arrays, maps,
+     * fixed, bytes, and {@code null} resolve to {@code null}.
      */
     private static Object coerce(Object value) {
         if (value == null) {
@@ -86,6 +90,9 @@ final class AvroValueDecoder implements ValueDecoder {
         }
         if (value instanceof GenericEnumSymbol<?>) {
             return value.toString();
+        }
+        if (value instanceof GenericRecord nested) {
+            return recordToMap(nested);
         }
         return null;
     }

@@ -46,11 +46,22 @@ final class Parser {
     }
 
     private Expression parseAnd() {
-        Expression left = parsePredicate();
+        Expression left = parseNot();
         while (match(Token.Type.AND)) {
-            left = new Expression.And(left, parsePredicate());
+            left = new Expression.And(left, parseNot());
         }
         return left;
+    }
+
+    // NOT binds looser than comparison (standard SQL/JMS precedence): `NOT a = b` is `NOT (a = b)`.
+    // This is the P4 deliberate fix of ActiveMQ's non-standard quirk (it placed NOT at the unary
+    // level, making `NOT a = b` mean `(NOT a) = b`). It is a documented behavior change; see
+    // docs/selector-parser-design.md.
+    private Expression parseNot() {
+        if (match(Token.Type.NOT)) {
+            return new Expression.Not(parseNot());
+        }
+        return parsePredicate();
     }
 
     private Expression parsePredicate() {
@@ -110,13 +121,6 @@ final class Parser {
     }
 
     private Expression parseUnary() {
-        // NOTE: ActiveMQ's JMS selector grammar places NOT at the unary level, so it binds tighter
-        // than comparison — i.e. `NOT a = b` parses as `(NOT a) = b`, not `NOT (a = b)`. This is a
-        // non-standard quirk we replicate for strict parity with the parser being replaced; a
-        // documented fix (NOT below comparison) is a candidate for the P4 grammar work.
-        if (match(Token.Type.NOT)) {
-            return new Expression.Not(parseUnary());
-        }
         if (match(Token.Type.MINUS)) {
             return new Expression.Negate(parseUnary());
         }

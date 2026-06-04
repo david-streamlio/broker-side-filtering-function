@@ -43,9 +43,10 @@ class SelectorOracleTest {
             "region = 'US' OR tier = 'GOLD'",
             "region = 'US' OR tier = 'GOLD' AND price > 100",
             "(region = 'US' OR region = 'UK') AND tier = 'GOLD'",
+            // NOTE: bare `NOT a = b` is deliberately absent — P4 makes NOT bind looser than
+            // comparison (standard), an intentional divergence from ActiveMQ. Parenthesized NOT
+            // matches both engines and stays in the gate.
             "NOT (region = 'US')", "NOT (region = 'US' AND tier = 'GOLD')",
-            "NOT region = 'US'",                         // ActiveMQ NOT-precedence quirk
-            "NOT region = 'US' OR tier = 'GOLD'",
             // IN
             "region IN ('US','UK','DE')", "region NOT IN ('US','UK')", "tier IN ('GOLD')",
             // BETWEEN

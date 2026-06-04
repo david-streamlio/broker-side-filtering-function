@@ -10,6 +10,7 @@ import com.google.protobuf.Descriptors.EnumValueDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Descriptors.FileDescriptor;
 import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.Message;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,16 +53,20 @@ final class ProtobufNativeValueDecoder implements ValueDecoder {
             return null;
         }
         try {
-            DynamicMessage message = DynamicMessage.parseFrom(descriptor, payload);
-            Map<String, Object> fields = new HashMap<>();
-            for (FieldDescriptor field : descriptor.getFields()) {
-                fields.put(field.getName(), coerce(field, message));
-            }
-            return fields;
+            return messageToMap(DynamicMessage.parseFrom(descriptor, payload), descriptor);
         } catch (Exception e) {
             LOG.debug("Protobuf decode failed for {}: {}", descriptor.getFullName(), e.toString());
             return null;
         }
+    }
+
+    /** Convert a message to a field map, recursing into nested messages (for dotted-path lookups). */
+    private static Map<String, Object> messageToMap(Message message, Descriptor desc) {
+        Map<String, Object> fields = new HashMap<>();
+        for (FieldDescriptor field : desc.getFields()) {
+            fields.put(field.getName(), coerce(field, message));
+        }
+        return fields;
     }
 
     // ------------------------------------------------------------------ descriptor reconstruction
@@ -172,7 +177,7 @@ final class ProtobufNativeValueDecoder implements ValueDecoder {
      * {@code optional} proto3) an unset field is {@code null}; proto3 singular scalars have no
      * presence, so an unset value decodes to its type default (0 / "" / false) — document this.
      */
-    private static Object coerce(FieldDescriptor field, DynamicMessage message) {
+    private static Object coerce(FieldDescriptor field, Message message) {
         if (field.isRepeated() || field.isMapField()) {
             return null;
         }
@@ -191,10 +196,11 @@ final class ProtobufNativeValueDecoder implements ValueDecoder {
                 return value.toString();
             case ENUM:
                 return ((EnumValueDescriptor) value).getName();
-            case BYTE_STRING:
             case MESSAGE:
+                return messageToMap((Message) value, field.getMessageType());   // nested
+            case BYTE_STRING:
             default:
-                return null;                                    // not a top-level scalar
+                return null;                                    // not addressable as a scalar
         }
     }
 

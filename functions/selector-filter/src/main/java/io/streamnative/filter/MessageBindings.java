@@ -227,11 +227,30 @@ public final class MessageBindings {
         if (decoder != null) {
             Map<String, Object> fields = decodedValueFields(decoder);
             if (fields != null) {
-                return fields.get(name);
+                // Decoder is authoritative; {@code name} may be a dotted path into nested records.
+                return traverse(fields, name);
             }
             // Structured decode failed (corrupt/foreign bytes) — fall back to JSON best-effort.
         }
         return getJsonField(name);
+    }
+
+    /**
+     * Resolve {@code dottedName} ({@code a} or {@code a.b.c}) against a (possibly nested) field map.
+     * Returns {@code null} if any intermediate segment is missing or is not itself a nested map.
+     */
+    private static Object traverse(Map<String, Object> top, String dottedName) {
+        if (dottedName.indexOf('.') < 0) {
+            return top.get(dottedName);
+        }
+        Object current = top;
+        for (String segment : dottedName.split("\\.")) {
+            if (!(current instanceof Map<?, ?> map)) {
+                return null;
+            }
+            current = map.get(segment);
+        }
+        return current;
     }
 
     /**
@@ -279,7 +298,19 @@ public final class MessageBindings {
         if (payloadJson == null) {
             return null;
         }
-        JsonNode node = payloadJson.get(name);
+        JsonNode node;
+        if (name.indexOf('.') < 0) {
+            node = payloadJson.get(name);
+        } else {
+            // Dotted path into nested JSON objects: a.b.c walks object → object → leaf.
+            node = payloadJson;
+            for (String segment : name.split("\\.")) {
+                if (node == null || !node.isObject()) {
+                    return null;
+                }
+                node = node.get(segment);
+            }
+        }
         if (node == null || node.isNull() || node.isMissingNode()) {
             return null;
         }

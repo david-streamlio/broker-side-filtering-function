@@ -518,6 +518,30 @@ class MessageBindingsTests {
     }
 
     @Test
+    void nestedJsonPathResolved() {
+        byte[] payload = json("{\"address\":{\"city\":\"NYC\",\"zip\":10001},\"price\":50}");
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        assertThat(b.lookup("address.city")).isEqualTo("NYC");
+        assertThat(((Number) b.lookup("address.zip")).intValue()).isEqualTo(10001);
+        assertThat(b.lookup("address.missing")).isNull();
+        assertThat(b.lookup("address.city.deeper")).isNull(); // can't descend past a leaf
+        assertThat(b.lookup("missing.x")).isNull();
+    }
+
+    @Test
+    void nestedDecoderPathResolved() {
+        ValueDecoder decoder = payload -> Map.of(
+                "address", Map.of("city", "NYC", "zip", 10001),
+                "price", 50L);
+        MessageBindings b = new MessageBindings("k", null, Map.of(), new byte[]{1});
+        assertThat(b.lookup("address.city", decoder)).isEqualTo("NYC");
+        assertThat(((Number) b.lookup("address.zip", decoder)).intValue()).isEqualTo(10001);
+        assertThat(b.lookup("price", decoder)).isEqualTo(50L);
+        assertThat(b.lookup("address.missing", decoder)).isNull();
+        assertThat(b.lookup("missing.x", decoder)).isNull();
+    }
+
+    @Test
     void avroValueFieldSelectorEndToEnd() throws Exception {
         org.apache.pulsar.client.api.Schema<AvroValueDecoderTests.Trade> schema =
                 org.apache.pulsar.client.api.Schema.AVRO(AvroValueDecoderTests.Trade.class);

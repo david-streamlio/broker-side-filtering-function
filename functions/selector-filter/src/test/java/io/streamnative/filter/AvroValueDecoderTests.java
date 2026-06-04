@@ -24,6 +24,16 @@ class AvroValueDecoderTests {
         public boolean active;
     }
 
+    public static class Address {
+        public String city;
+        public int zip;
+    }
+
+    public static class Order {
+        public String sym;
+        public Address address;
+    }
+
     private static AvroValueDecoder decoderFor(Schema<?> schema) {
         String avsc = new String(schema.getSchemaInfo().getSchema(), StandardCharsets.UTF_8);
         return new AvroValueDecoder(avsc);
@@ -45,6 +55,26 @@ class AvroValueDecoderTests {
         assertThat(((Number) fields.get("price")).doubleValue()).isEqualTo(195.5);
         assertThat(((Number) fields.get("qty")).intValue()).isEqualTo(10);
         assertThat(fields.get("active")).isEqualTo(true);
+    }
+
+    @Test
+    void decodesNestedRecordToNestedMap() {
+        Schema<Order> schema = Schema.AVRO(Order.class);
+        Order o = new Order();
+        o.sym = "AAPL";
+        Address a = new Address();
+        a.city = "NYC";
+        a.zip = 10001;
+        o.address = a;
+
+        Map<String, Object> fields = decoderFor(schema).decode(schema.encode(o));
+
+        assertThat(fields.get("sym")).isEqualTo("AAPL");
+        assertThat(fields.get("address")).isInstanceOf(Map.class);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> addr = (Map<String, Object>) fields.get("address");
+        assertThat(addr.get("city")).isEqualTo("NYC");
+        assertThat(((Number) addr.get("zip")).intValue()).isEqualTo(10001);
     }
 
     @Test

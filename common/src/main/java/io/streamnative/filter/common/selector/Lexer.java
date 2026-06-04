@@ -116,10 +116,19 @@ final class Lexer {
     }
 
     private Token identifierOrKeyword(int start) {
-        while (pos < src.length() && isIdentPart(src.charAt(pos))) {
-            pos++;
+        consumeIdentSegment();
+        // Dotted path support (our extension beyond JMS): `address.city` is a single identifier.
+        // A `.` only continues the identifier when followed by another segment, so it never collides
+        // with a numeric literal (which the number() path handles) or any operator.
+        while (pos + 1 < src.length() && src.charAt(pos) == '.' && isIdentStart(src.charAt(pos + 1))) {
+            pos++; // consume '.'
+            consumeIdentSegment();
         }
         String text = src.substring(start, pos);
+        // Keyword / boolean / null forms are single-segment only; a dotted token is always an identifier.
+        if (text.indexOf('.') >= 0) {
+            return new Token(Token.Type.IDENTIFIER, text, null, start);
+        }
         String upper = text.toUpperCase();
         if (upper.equals("TRUE")) {
             return new Token(Token.Type.BOOLEAN, text, Boolean.TRUE, start);
@@ -159,6 +168,12 @@ final class Lexer {
                 return new Token(Token.Type.GT, ">", null, start);
             default:
                 throw new SelectorParseException("Unexpected character '" + c + "'", start);
+        }
+    }
+
+    private void consumeIdentSegment() {
+        while (pos < src.length() && isIdentPart(src.charAt(pos))) {
+            pos++;
         }
     }
 

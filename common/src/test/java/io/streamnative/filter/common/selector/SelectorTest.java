@@ -77,12 +77,14 @@ class SelectorTest {
     }
 
     @Test
-    void notBindsTighterThanComparison() {
-        // ActiveMQ quirk we replicate for parity: NOT is unary, so `NOT a = b` is `(NOT a) = b`.
-        // NOT of a (non-boolean) string is UNKNOWN, and UNKNOWN = 'US' is UNKNOWN → no match, even
-        // when region differs from 'US'. Use NOT (a = b) for real negation.
-        assertThat(match("NOT region = 'US'", Map.of("region", "UK"))).isFalse();
+    void notAppliesToWholeComparison() {
+        // P4 fix: NOT binds looser than comparison (standard SQL/JMS), so `NOT a = b` is `NOT (a = b)`
+        // — unlike ActiveMQ, which bound NOT tighter. This is a deliberate, documented divergence.
+        assertThat(match("NOT region = 'US'", Map.of("region", "UK"))).isTrue();
+        assertThat(match("NOT region = 'US'", Map.of("region", "US"))).isFalse();
         assertThat(match("NOT (region = 'US')", Map.of("region", "UK"))).isTrue();
+        // NOT of UNKNOWN (absent operand) stays UNKNOWN → no match.
+        assertThat(match("NOT region = 'US'", Map.of())).isFalse();
     }
 
     // ---------------------------------------------------------------- LIKE
@@ -163,6 +165,22 @@ class SelectorTest {
     @Test
     void referencedNamesIgnoreQuotedLiterals() {
         assertThat(Selector.compile("name = 'O''Reilly'").referencedNames()).containsExactly("name");
+    }
+
+    @Test
+    void dottedIdentifierIsOneName() {
+        // P4(b) extension: address.city parses as a single identifier (the JMS grammar can't).
+        Selector s = Selector.compile("address.city = 'NYC' AND trade.qty > 5");
+        assertThat(s.referencedNames()).containsExactlyInAnyOrder("address.city", "trade.qty");
+        assertThat(s.matches(Map.of("address.city", "NYC", "trade.qty", 10)::get)).isTrue();
+        assertThat(s.matches(Map.of("address.city", "LA", "trade.qty", 10)::get)).isFalse();
+    }
+
+    @Test
+    void dottedIdentifierDoesNotCollideWithNumericLiterals() {
+        // The `.` only continues an identifier when followed by an ident char — `1.5` stays numeric.
+        assertThat(match("price > 1.5", Map.of("price", 2.0d))).isTrue();
+        assertThat(match("price < 1.5", Map.of("price", 2.0d))).isFalse();
     }
 
     // ---------------------------------------------------------------- parse errors
