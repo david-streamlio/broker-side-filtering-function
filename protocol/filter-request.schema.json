@@ -44,6 +44,30 @@
             "minLength": 1,
             "description": "Fully-qualified class name of the consumer-side value deserializer, when known. Same comparison rules as keyDeserializer."
         },
+        "valueSchema": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "description": "Full description of the consumer's value schema, forwarded verbatim by the orchestrator into the per-function QueryMessage so the filter function can decode the message value for schema-aware filtering. Optional; null/absent for the byte[] and Kafka paths. A schema name alone cannot decode structured Avro/Protobuf values, so the definition travels too.",
+            "properties": {
+                "name": {
+                    "type": ["string", "null"],
+                    "description": "Schema name — Pulsar SchemaInfo.getName() (e.g. the POJO class name, or 'STRING')."
+                },
+                "type": {
+                    "type": ["string", "null"],
+                    "description": "Schema type — Pulsar SchemaType.name(): JSON, AVRO, PROTOBUF_NATIVE, STRING, BYTES, etc. PROTOBUF (non-native) is rejected by the SDK because the function needs the descriptor."
+                },
+                "definition": {
+                    "type": ["string", "null"],
+                    "description": "Base64 of Pulsar SchemaInfo.getSchema(): the Avro .avsc text for AVRO, the JSON-schema text for JSON, the serialized descriptor for PROTOBUF_NATIVE. Null/empty for STRING/BYTES."
+                },
+                "properties": {
+                    "type": ["object", "null"],
+                    "additionalProperties": { "type": "string" },
+                    "description": "Pulsar SchemaInfo.getProperties() (e.g. __alwaysAllowNull). Optional."
+                }
+            }
+        },
         "clientType": {
             "type": ["string", "null"],
             "enum": ["KAFKA", "PULSAR", null],
@@ -71,6 +95,20 @@
             "topicsPattern": "persistent://public/trades/.*",
             "outputTopic": "persistent://public/filtered/filtered-0e7b1c4a-9b1a-4f6e-d2a3-7890abcdef12",
             "selector": "__key__ IN ('AAPL','MSFT','GOOGL')",
+            "clientType": "PULSAR"
+        },
+        {
+            "command": "REGISTER",
+            "inputTopics": ["persistent://public/in/trades"],
+            "outputTopic": "persistent://public/filtered/filtered-7b1c4a0e-4f6e-9b1a-d2a3-abcdef127890",
+            "selector": "price > 50000",
+            "valueDeserializer": "com.acme.Trade",
+            "valueSchema": {
+                "name": "com.acme.Trade",
+                "type": "AVRO",
+                "definition": "eyJ0eXBlIjoicmVjb3JkIiwibmFtZSI6IlRyYWRlIn0=",
+                "properties": { "__alwaysAllowNull": "true" }
+            },
             "clientType": "PULSAR"
         },
         {

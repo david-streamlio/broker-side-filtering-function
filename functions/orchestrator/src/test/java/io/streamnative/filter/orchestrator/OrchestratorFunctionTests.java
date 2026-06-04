@@ -201,6 +201,42 @@ class OrchestratorFunctionTests {
     }
 
     @Test
+    void registerForwardsValueSchemaIntoQueryMessageAndPersistsIt() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        io.streamnative.filter.common.ValueSchemaInfo schema =
+                new io.streamnative.filter.common.ValueSchemaInfo(
+                        "com.acme.Trade", "AVRO", "eyJ0eXBlIjoicmVjb3JkIn0=", null);
+        FilterRequest req = FilterRequest.register(
+                List.of("persistent://public/in/trades"),
+                "persistent://public/filtered/filtered-vs",
+                "price > 100",
+                null, "com.acme.Trade", schema, ClientType.PULSAR);
+
+        // Spawn a registry entry from the request, mirroring DefaultFilterFunctionSpawner so the
+        // entry carries the value schema the orchestrator forwards.
+        RegistryEntry spawned = RegistryEntry.newEntry(
+                "persistent://public/filtered/ctrl-vs", "selector-filter-vs", req);
+        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        stubControlProducer(spawned.getControlTopic());
+
+        orchestrator.process(serialize(req), contextFor(queryId));
+
+        // The published QueryMessage carries the full value schema.
+        QueryMessage qm = MAPPER.readValue(
+                controlPublishes.get(spawned.getControlTopic()).get(0).value(), QueryMessage.class);
+        assertThat(qm.getValueSchema()).isEqualTo(schema);
+
+        // The persisted t: and q: entries both carry it (so reconcile/MODIFY republish preserve it).
+        RegistryEntry te = MAPPER.readValue(
+                tableStorage.get(RegistryStore.TOPIC_KEY_PREFIX + "persistent://public/in/trades"),
+                RegistryEntry.class);
+        assertThat(te.getValueSchema()).isEqualTo(schema);
+        QueryEntry qe = MAPPER.readValue(
+                tableStorage.get(RegistryStore.QUERY_KEY_PREFIX + queryId), QueryEntry.class);
+        assertThat(qe.getValueSchema()).isEqualTo(schema);
+    }
+
+    @Test
     void registerOnExistingInputTopicReusesAndDoesNotSpawn() throws Exception {
         String queryId = UUID.randomUUID().toString();
         FilterRequest req = FilterRequest.register(
@@ -383,6 +419,27 @@ class OrchestratorFunctionTests {
         QueryMessage qm = MAPPER.readValue(publishes.get(0).value(), QueryMessage.class);
         assertThat(qm.getSelector()).isEqualTo("region IN ('US','UK')");
         assertThat(qm.getOutputTopic()).isEqualTo("persistent://public/filtered/filtered-abc");
+    }
+
+    @Test
+    void modifyRepublishesPreservesValueSchemaFromQueryEntry() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        String controlTopic = "persistent://public/filtered/ctrl-vs";
+        io.streamnative.filter.common.ValueSchemaInfo schema =
+                new io.streamnative.filter.common.ValueSchemaInfo("com.acme.Trade", "AVRO", "AAA=", null);
+        // QueryEntry persisted at REGISTER carries the schema; MODIFY must republish it.
+        seedQueryEntry(queryId, new QueryEntry(
+                "persistent://public/filtered/filtered-vs",
+                List.of(controlTopic), List.of("persistent://public/in/trades"),
+                Instant.now().toString(), "price > 100", schema));
+        stubControlProducer(controlTopic);
+
+        orchestrator.process(serialize(FilterRequest.modify("price > 200")), contextFor(queryId));
+
+        QueryMessage qm = MAPPER.readValue(
+                controlPublishes.get(controlTopic).get(0).value(), QueryMessage.class);
+        assertThat(qm.getSelector()).isEqualTo("price > 200");
+        assertThat(qm.getValueSchema()).isEqualTo(schema);
     }
 
     @Test

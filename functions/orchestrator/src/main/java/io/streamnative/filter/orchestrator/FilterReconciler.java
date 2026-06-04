@@ -67,7 +67,8 @@ final class FilterReconciler implements AutoCloseable {
     /** Republishes a {@link io.streamnative.filter.common.QueryMessage} to a control topic. */
     @FunctionalInterface
     interface PublishQuery {
-        void publish(String controlTopic, String queryId, String selector, String outputTopic)
+        void publish(String controlTopic, String queryId, String selector, String outputTopic,
+                     io.streamnative.filter.common.ValueSchemaInfo valueSchema)
                 throws Exception;
     }
 
@@ -91,7 +92,7 @@ final class FilterReconciler implements AutoCloseable {
 
     FilterReconciler(RegistryStore registry, PulsarAdmin admin, OrchestratorConfig config,
                      Clock clock, FilterFunctionSpawner spawner) {
-        this(registry, admin, config, clock, spawner, (c, q, s, o) -> {}, (n, v) -> {});
+        this(registry, admin, config, clock, spawner, (c, q, s, o, vs) -> {}, (n, v) -> {});
     }
 
     FilterReconciler(RegistryStore registry, PulsarAdmin admin, OrchestratorConfig config,
@@ -288,7 +289,8 @@ final class FilterReconciler implements AutoCloseable {
                 LOG.warn("Reconcile repopulate: queryId={} has no persisted selector (legacy entry); "
                         + "republishing with identity selector '{}'", queryId, selector);
             }
-            publishQuery.publish(controlTopic, queryId, selector, q.getOutputTopic());
+            publishQuery.publish(controlTopic, queryId, selector, q.getOutputTopic(),
+                    q.getValueSchema());
             count++;
         }
         return count;

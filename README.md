@@ -454,6 +454,43 @@ What happens on `consumer.close()`:
    the function to retract the query. Tombstoning still happens if the underlying close throws.
 3. If `deleteOnClose=true` (the default), the private topic is deleted via `PulsarAdmin`.
 
+### Typed value schema
+
+`newConsumer()` (above) returns a `Consumer<byte[]>` and you decode payloads by hand. To consume
+typed values, pass a `Schema<V>` — `subscribe()` then returns a `Consumer<V>` that decodes each
+message client-side:
+
+```java
+try (Consumer<Trade> consumer = session.newConsumer(Schema.JSON(Trade.class))
+        .topic("persistent://public/quotes/trades")
+        .selector("region = 'US'")
+        .subscribe()) {
+
+    Message<Trade> msg = consumer.receive();
+    Trade trade = msg.getValue();   // decoded via the supplied schema
+    String key  = msg.getKey();     // key is ALWAYS a String — see below
+    consumer.acknowledge(msg);
+}
+```
+
+- **The key is always a `String`** (`msg.getKey()`). Pulsar has no key-schema concept, so the Pulsar
+  SDK exposes a value schema only. For a typed *key*, use the Kafka SDK (`key.deserializer`).
+- **Supported value types:** `BYTES`, `STRING`, `JSON(Pojo)`, `AVRO(Pojo)`, `PROTOBUF_NATIVE(Pojo)`,
+  and primitives. The filter forwards raw value bytes verbatim, so the supplied schema decodes them
+  on the client.
+- **Protobuf must be `PROTOBUF_NATIVE`** — plain `Schema.PROTOBUF` is rejected at `newConsumer(...)`
+  because it needs the generated class to decode and carries no descriptor. `AUTO_CONSUME` is
+  unsupported (no concrete reader schema).
+- The schema's full `SchemaInfo` (type + definition/descriptor) is forwarded to the orchestrator and
+  on to the filter function, which records it per query. **Schema-aware value *filtering* inside the
+  function (matching selectors on decoded JSON/Avro/Protobuf fields) is a follow-up; today the schema
+  is plumbed and stored but selectors still evaluate against the key, source topic, user properties,
+  and best-effort JSON payload fields.**
+- The no-arg `newConsumer()` is unchanged and remains wire-identical: it forwards no value schema.
+
+> Note: structured-schema decode assumes the default namespace (`schemaValidationEnforced=false`).
+> A hardened namespace could refuse a structured-schema consumer on the raw-bytes private topic.
+
 ### Dynamic selector updates — `FilterControl`
 
 Cast the returned `Consumer<byte[]>` to `FilterControl` to inspect or replace its selector at
@@ -967,7 +1004,7 @@ sdk/                                          -- client SDKs across all language
         SessionBuilder.java
         PrivateQuery.java                     -- value object passed between Session and SDKs
         FilterableConsumerBuilder.java        -- Pulsar-native consumer builder
-        FilteringPulsarConsumer.java          -- Consumer<byte[]> + FilterControl wrapper
+        FilteringPulsarConsumer.java          -- Consumer<V> + FilterControl wrapper
         FilterControl.java                    -- dynamic-selector cast interface
         PrivateTopicPolicy.java
         Selectors.java                        -- compose + validate selector syntax

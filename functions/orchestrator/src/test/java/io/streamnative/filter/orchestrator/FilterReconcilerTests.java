@@ -116,7 +116,7 @@ class FilterReconcilerTests {
 
     private FilterReconciler reconcilerWith(Clock clock) {
         return new FilterReconciler(registry, admin, config, clock, spawner,
-                (ct, qid, sel, out) -> published.add(new String[]{ct, qid, sel, out}),
+                (ct, qid, sel, out, vs) -> published.add(new String[]{ct, qid, sel, out}),
                 (n, v) -> {});
     }
 

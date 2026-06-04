@@ -93,6 +93,16 @@ class SelectorFilterFunctionTests {
         return json.getBytes(StandardCharsets.UTF_8);
     }
 
+    /** Like {@link #queryJson} but embeds a value schema in the QueryMessage. */
+    private byte[] queryJsonWithSchema(String selector, String outputTopic,
+                                       String schemaName, String schemaType, String definitionBase64) {
+        String json = String.format(
+                "{\"name\":\"q\",\"selector\":\"%s\",\"outputTopic\":\"%s\","
+                + "\"valueSchema\":{\"name\":\"%s\",\"type\":\"%s\",\"definition\":\"%s\"}}",
+                selector.replace("\"", "\\\""), outputTopic, schemaName, schemaType, definitionBase64);
+        return json.getBytes(StandardCharsets.UTF_8);
+    }
+
     // ---------------------- initialize ----------------------
 
     @Test
@@ -127,6 +137,37 @@ class SelectorFilterFunctionTests {
 
         fn.loadQueryForTest("q1", queryJson("__key__ = 'AAPL'", "persistent://public/filtered/out-1"));
         assertThat(fn.activeQueryCountForTest()).isEqualTo(1);
+    }
+
+    @Test
+    void valueSchemaIsStoredOnCompiledQuery() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        fn.loadQueryForTest("q1", queryJsonWithSchema(
+                "region = 'US'", "persistent://public/filtered/out-1",
+                "com.acme.Trade", "AVRO", "eyJ0eXBlIjoicmVjb3JkIn0="));
+
+        CompiledQuery cq = fn.queryForTest("q1");
+        assertThat(cq).isNotNull();
+        assertThat(cq.valueSchema()).isNotNull();
+        assertThat(cq.valueSchema().getName()).isEqualTo("com.acme.Trade");
+        assertThat(cq.valueSchema().getType()).isEqualTo("AVRO");
+        assertThat(cq.valueSchema().getDefinition()).isEqualTo("eyJ0eXBlIjoicmVjb3JkIn0=");
+        // PR1: the schema is stored but does not change matching — selector still compiles/evaluates.
+        assertThat(cq.evaluator().getExpression()).isEqualTo("region = 'US'");
+    }
+
+    @Test
+    void absentValueSchemaLeavesCompiledQueryNull() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        fn.loadQueryForTest("q1", queryJson("region = 'US'", "persistent://public/filtered/out-1"));
+
+        assertThat(fn.queryForTest("q1").valueSchema()).isNull();
     }
 
     @Test

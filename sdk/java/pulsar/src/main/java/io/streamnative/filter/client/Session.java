@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.ClientType;
 import io.streamnative.filter.common.FilterRequest;
+import io.streamnative.filter.common.ValueSchemaInfo;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Consumer;
@@ -16,11 +17,16 @@ import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.common.policies.data.InactiveTopicDeleteMode;
 import org.apache.pulsar.common.policies.data.InactiveTopicPolicies;
 import org.apache.pulsar.common.policies.data.RetentionPolicies;
+import org.apache.pulsar.common.schema.SchemaInfo;
+import org.apache.pulsar.common.schema.SchemaType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
+import java.util.Base64;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,9 +41,9 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Two consumer-construction paths use this session:
  * <ul>
- *   <li>The Pulsar-native path: {@link #newConsumer()} returns a builder whose
- *       {@code subscribe()} hands back a standard {@code Consumer<byte[]>} that also implements
- *       {@link FilterControl}.</li>
+ *   <li>The Pulsar-native path: {@link #newConsumer()} / {@link #newConsumer(Schema)} return a
+ *       builder whose {@code subscribe()} hands back a standard {@code Consumer<V>}
+ *       ({@code byte[]} for the no-schema overload) that also implements {@link FilterControl}.</li>
  *   <li>The Kafka path (in the {@code selector-filter-client-kafka} module): uses the public
  *       registration API — {@link #registerPrivateQuery}, {@link #updatePrivateQuery}, and
  *       {@link #retirePrivateQuery} — to drive its own real {@code KafkaConsumer} pointed at a
@@ -126,11 +132,60 @@ public final class Session implements Closeable {
     }
 
     /**
-     * Start building a Pulsar-native filtered consumer. Configure topic(s), selector, and
-     * optional subscription settings, then call {@link FilterableConsumerBuilder#subscribe()}.
+     * Start building a Pulsar-native filtered consumer over raw {@code byte[]} values. Configure
+     * topic(s), selector, and optional subscription settings, then call
+     * {@link FilterableConsumerBuilder#subscribe()}. Wire-identical to the pre-schema behavior: no
+     * value schema is forwarded to the orchestrator.
      */
-    public FilterableConsumerBuilder newConsumer() {
-        return new FilterableConsumerBuilder(this);
+    public FilterableConsumerBuilder<byte[]> newConsumer() {
+        return new FilterableConsumerBuilder<>(this, Schema.BYTES, null);
+    }
+
+    /**
+     * Start building a Pulsar-native filtered consumer whose value is decoded with the supplied
+     * {@code valueSchema}. {@link FilterableConsumerBuilder#subscribe()} returns a
+     * {@code Consumer<V>}; the message key remains a {@code String} (Pulsar has no key schema — use
+     * the Kafka SDK for a typed key). The schema's full {@code SchemaInfo} is forwarded to the
+     * orchestrator and on to the filter function so it can (in a follow-up) decode the value for
+     * schema-aware filtering.
+     *
+     * <p>Supported value types: {@code BYTES}, {@code STRING}, {@code JSON(Pojo)},
+     * {@code AVRO(Pojo)}, {@code PROTOBUF_NATIVE(Pojo)}, and primitives. {@code Schema.PROTOBUF}
+     * (non-native) is rejected because it needs the generated class to decode and carries no
+     * descriptor for the function — use {@code Schema.PROTOBUF_NATIVE} instead. {@code AUTO_CONSUME}
+     * is unsupported (it has no concrete reader schema).
+     *
+     * @throws IllegalArgumentException if {@code valueSchema} is {@code Schema.PROTOBUF} (non-native)
+     */
+    public <V> FilterableConsumerBuilder<V> newConsumer(Schema<V> valueSchema) {
+        Objects.requireNonNull(valueSchema, "valueSchema");
+        SchemaInfo si = valueSchema.getSchemaInfo();
+        if (si != null && si.getType() == SchemaType.PROTOBUF) {
+            throw new IllegalArgumentException(
+                    "Schema.PROTOBUF is not supported for filtered consumers because the filter "
+                    + "function needs the descriptor to decode the value; use Schema.PROTOBUF_NATIVE");
+        }
+        return new FilterableConsumerBuilder<>(this, valueSchema, toValueSchemaInfo(si));
+    }
+
+    /**
+     * Map a Pulsar {@link SchemaInfo} into the Pulsar-free {@link ValueSchemaInfo} carried on the
+     * wire. Returns {@code null} when there is no schema info (treated as the no-schema path).
+     */
+    static ValueSchemaInfo toValueSchemaInfo(SchemaInfo si) {
+        if (si == null) {
+            return null;
+        }
+        byte[] definition = si.getSchema();
+        String encoded = (definition == null || definition.length == 0)
+                ? null
+                : Base64.getEncoder().encodeToString(definition);
+        Map<String, String> props = si.getProperties();
+        return new ValueSchemaInfo(
+                si.getName(),
+                si.getType() == null ? null : si.getType().name(),
+                encoded,
+                (props == null || props.isEmpty()) ? null : props);
     }
 
     public String getControlTopic()                   { return controlTopic; }
@@ -235,6 +290,20 @@ public final class Session implements Closeable {
     public PrivateQuery registerPrivateQuery(List<String> sourceTopics, String userSelector,
                                              String keyDeserializer, String valueDeserializer,
                                              ClientType clientType) throws PulsarClientException {
+        return registerPrivateQuery(sourceTopics, userSelector, keyDeserializer, valueDeserializer,
+                null, clientType);
+    }
+
+    /**
+     * Full registration overload that also forwards the consumer's value {@link ValueSchemaInfo}
+     * (used by the Pulsar SDK's {@link #subscribeFiltered} so the filter function receives the value
+     * schema). See {@link #registerPrivateQuery(List, String, String, String, ClientType)} for the
+     * common contract; {@code valueSchema} may be {@code null}.
+     */
+    public PrivateQuery registerPrivateQuery(List<String> sourceTopics, String userSelector,
+                                             String keyDeserializer, String valueDeserializer,
+                                             ValueSchemaInfo valueSchema,
+                                             ClientType clientType) throws PulsarClientException {
         if (sourceTopics == null || sourceTopics.isEmpty()) {
             throw new IllegalArgumentException("At least one source topic is required");
         }
@@ -247,7 +316,7 @@ public final class Session implements Closeable {
         createAndConfigurePrivateTopic(privateTopic);
 
         FilterRequest req = FilterRequest.register(sourceTopics, privateTopic, userSelector,
-                keyDeserializer, valueDeserializer, clientType);
+                keyDeserializer, valueDeserializer, valueSchema, clientType);
         publishFilterRequest(queryId, req);
 
         // Track this queryId in our heartbeat set so subsequent heartbeats keep the orchestrator
@@ -306,24 +375,31 @@ public final class Session implements Closeable {
      * attaches a native Pulsar consumer to the private topic. Cleans up the registration on
      * Pulsar-subscribe failure.
      */
-    Consumer<byte[]> subscribeFiltered(List<String> sourceTopics,
-                                       String userSelector,
-                                       String subscriptionName,
-                                       SubscriptionType subscriptionType,
-                                       SubscriptionInitialPosition initialPosition) throws PulsarClientException {
-        PrivateQuery pq = registerPrivateQuery(sourceTopics, userSelector);
+    <V> Consumer<V> subscribeFiltered(List<String> sourceTopics,
+                                      String userSelector,
+                                      String subscriptionName,
+                                      SubscriptionType subscriptionType,
+                                      SubscriptionInitialPosition initialPosition,
+                                      Schema<V> valueSchema,
+                                      ValueSchemaInfo valueSchemaInfo) throws PulsarClientException {
+        // Forward the value schema name as the valueDeserializer (parity with the Kafka SDK's
+        // per-input-topic mismatch detection) and the full SchemaInfo for the function. No key
+        // schema — Pulsar keys are always Strings.
+        String valueDeserializer = valueSchemaInfo == null ? null : valueSchemaInfo.getName();
+        PrivateQuery pq = registerPrivateQuery(sourceTopics, userSelector,
+                null, valueDeserializer, valueSchemaInfo, ClientType.PULSAR);
         String resolvedSubName = (subscriptionName == null || subscriptionName.isBlank())
                 ? "session-" + UUID.randomUUID()
                 : subscriptionName;
         try {
-            Consumer<byte[]> underlying = pulsarClient.newConsumer(Schema.BYTES)
+            Consumer<V> underlying = pulsarClient.newConsumer(valueSchema)
                     .topic(pq.privateTopic())
                     .subscriptionName(resolvedSubName)
                     .subscriptionType(subscriptionType)
                     .subscriptionInitialPosition(initialPosition)
                     .subscribe();
             String storedUserSelector = (userSelector == null || userSelector.isBlank()) ? null : userSelector;
-            return new FilteringPulsarConsumer(this, pq, underlying, storedUserSelector);
+            return new FilteringPulsarConsumer<>(this, pq, underlying, storedUserSelector);
         } catch (RuntimeException | PulsarClientException e) {
             retirePrivateQuery(pq);
             throw e instanceof PulsarClientException

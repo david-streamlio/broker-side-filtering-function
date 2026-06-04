@@ -1,5 +1,6 @@
 package io.streamnative.filter.client;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Consumer;
@@ -52,6 +53,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SessionIT {
 
     private static final Logger LOG = LoggerFactory.getLogger(SessionIT.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /** Minimal POJO for the typed-value end-to-end case. Public fields so Jackson/Schema.JSON map it. */
+    public static class Trade {
+        public String sym;
+        public double price;
+    }
 
     private static final String FN_TENANT          = "public";
     private static final String FN_NAMESPACE       = "default";
@@ -173,6 +181,41 @@ class SessionIT {
             consumer.close();
 
             assertTopicEventuallyDeleted(privateTopic, 15_000L);
+        }
+    }
+
+    @Test
+    void typedJsonSchemaEndToEnd() throws Exception {
+        // The filter forwards raw value bytes verbatim; the SDK consumer decodes them client-side
+        // with the supplied Schema.JSON. Produce JSON bytes through the byte[] inputProducer, then
+        // consume as a typed Trade. The key stays a String (Pulsar has no key schema).
+        try (Session session = newSession();
+             Consumer<Trade> consumer = session.newConsumer(Schema.JSON(Trade.class))
+                     .topic(INPUT_TOPIC)
+                     .selector("region = 'US'")
+                     .subscribe()) {
+
+            waitForSpawnedFilter(INPUT_TOPIC);
+
+            Trade aapl = new Trade(); aapl.sym = "AAPL"; aapl.price = 195.5;
+            Trade bmw  = new Trade(); bmw.sym  = "BMW";  bmw.price  = 88.0;
+            inputProducer.newMessage().key("AAPL").property("region", "US")
+                    .value(JSON.writeValueAsBytes(aapl)).send();
+            inputProducer.newMessage().key("BMW").property("region", "DE")
+                    .value(JSON.writeValueAsBytes(bmw)).send();
+
+            Message<Trade> m1 = consumer.receive(30, TimeUnit.SECONDS);
+            assertThat(m1).as("US message should pass the selector").isNotNull();
+            // Key is still the plain String key.
+            assertThat(m1.getKey()).isEqualTo("AAPL");
+            // Value decoded client-side via Schema.JSON — no IncompatibleSchemaException.
+            Trade decoded = m1.getValue();
+            assertThat(decoded.sym).isEqualTo("AAPL");
+            assertThat(decoded.price).isEqualTo(195.5);
+
+            assertThat(consumer.receive(5, TimeUnit.SECONDS))
+                    .as("Only US messages should pass the selector").isNull();
+            consumer.acknowledge(m1);
         }
     }
 

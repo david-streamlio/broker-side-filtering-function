@@ -210,6 +210,13 @@ public final class MessageBindings {
      * <p>Many financial APIs (including Coinbase) encode prices and volumes as quoted
      * decimals: {@code "price":"77351.21"}. This method coerces such strings to
      * {@link Double} so numeric comparisons work correctly.
+     *
+     * <p><strong>Decoder seam (follow-up).</strong> This best-effort JSON path is where a
+     * schema-aware value decoder plugs in. The compiled query now carries the consumer's
+     * {@code ValueSchemaInfo} ({@code CompiledQuery.valueSchema}); a follow-up will construct a
+     * {@code ValueDecoder} from it (JSON / Avro / Protobuf-native) and resolve {@code name} against
+     * the decoded value here, falling back to this JSON parse when no schema is present. The schema
+     * is plumbed end-to-end and stored, but not yet consulted — value-field resolution is unchanged.
      */
     private Object getJsonField(String name) {
         if (!payloadResolved) {

@@ -486,7 +486,8 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
             recordMetric(METRIC_QUERIES_BAD, 1.0);
             return;
         }
-        compiled.put(queryId, new CompiledQuery(queryId, qm.getName(), qm.getOutputTopic(), evaluator));
+        compiled.put(queryId, new CompiledQuery(queryId, qm.getName(), qm.getOutputTopic(), evaluator,
+                qm.getValueSchema()));
         LOG.info("Loaded query id={} name='{}' selector=[{}] -> {}",
                 queryId, qm.getName(), qm.getSelector(), qm.getOutputTopic());
         recordMetric(METRIC_QUERIES_LOADED, 1.0);
@@ -541,6 +542,11 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     /** Test-only hook: number of currently loaded queries. */
     int activeQueryCountForTest() {
         return compiled.size();
+    }
+
+    /** Test-only hook: the loaded {@link CompiledQuery} for {@code queryId}, or {@code null}. */
+    CompiledQuery queryForTest(String queryId) {
+        return compiled.get(queryId);
     }
 
     @Override
