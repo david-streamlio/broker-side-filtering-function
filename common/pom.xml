@@ -37,5 +37,20 @@
             <artifactId>jackson-databind</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- Oracle for the selector engine's differential tests: the ActiveMQ-based JMS selector
+             parser the homegrown engine is replacing. Test-scope only; removed in P3 once parity is
+             established and the production call sites have switched over. -->
+        <dependency>
+            <groupId>io.streamnative</groupId>
+            <artifactId>pulsar-jms-filters</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- slf4j-api is needed at test runtime by the JMS oracle above. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>
