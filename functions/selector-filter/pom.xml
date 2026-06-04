@@ -52,6 +52,14 @@
             <artifactId>jackson-databind</artifactId>
         </dependency>
 
+        <!-- Bundled in the NAR so the function can decode Schema.AVRO message values for
+             schema-aware value filtering. The NAR's isolated classloader keeps this unshaded
+             org.apache.avro copy separate from Pulsar's shaded one. -->
+        <dependency>
+            <groupId>org.apache.avro</groupId>
+            <artifactId>avro</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>

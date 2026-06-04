@@ -15,6 +15,7 @@ import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -264,6 +265,59 @@ class SelectorFilterFunctionTests {
         verify(record, never()).fail();
         // No source message present (record.getMessage() is empty) → no event time to forward.
         verify(builder, never()).eventTime(anyLong());
+    }
+
+    @Test
+    void processAvroValueFieldSelectorMatchesAndFansOut() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        String outputTopic = "persistent://public/filtered/avro-out";
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(outputTopic, CompletableFuture.completedFuture(null));
+
+        // Encode a record with Pulsar's Avro schema; carry the same .avsc in the query's valueSchema.
+        // "price" is not a user property, so the selector resolves it from the decoded Avro value.
+        Schema<AvroValueDecoderTests.Trade> avro = Schema.AVRO(AvroValueDecoderTests.Trade.class);
+        AvroValueDecoderTests.Trade t = new AvroValueDecoderTests.Trade();
+        t.sym = "AAPL";
+        t.price = 195.5;
+        byte[] payload = avro.encode(t);
+        String avscB64 = Base64.getEncoder().encodeToString(avro.getSchemaInfo().getSchema());
+
+        fn.loadQueryForTest("q1", queryJsonWithSchema(
+                "price > 100", outputTopic, "AvroTrade", "AVRO", avscB64));
+
+        CompletableFuture<Void> result = fn.process(payload, ctx);
+
+        assertThat(result).isCompleted();
+        verify(builder).value(payload);
+        verify(builder).sendAsync();
+        verify(record).ack();
+        verify(record, never()).fail();
+    }
+
+    @Test
+    void processAvroValueFieldSelectorDropsNonMatch() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        Schema<AvroValueDecoderTests.Trade> avro = Schema.AVRO(AvroValueDecoderTests.Trade.class);
+        AvroValueDecoderTests.Trade t = new AvroValueDecoderTests.Trade();
+        t.sym = "BMW";
+        t.price = 50.0;
+        byte[] payload = avro.encode(t);
+        String avscB64 = Base64.getEncoder().encodeToString(avro.getSchemaInfo().getSchema());
+
+        fn.loadQueryForTest("q1", queryJsonWithSchema(
+                "price > 100", "persistent://public/filtered/avro-out", "AvroTrade", "AVRO", avscB64));
+
+        CompletableFuture<Void> result = fn.process(payload, ctx);
+
+        assertThat(result).isCompleted();
+        verify(record).ack();
+        verify(ctx, never()).newOutputMessage(anyString(), any(Schema.class));
     }
 
     @Test

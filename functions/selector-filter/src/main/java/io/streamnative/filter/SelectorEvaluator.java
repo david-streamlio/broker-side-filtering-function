@@ -49,8 +49,19 @@ public final class SelectorEvaluator {
     }
 
     public boolean matches(MessageBindings bindings) {
+        return matches(bindings, null);
+    }
+
+    /**
+     * Evaluate the selector, resolving value-field references through {@code decoder} when one is
+     * present (a query with a structured value schema). When {@code decoder} is {@code null},
+     * value-field references fall back to best-effort JSON parsing — identical to {@link #matches(MessageBindings)}.
+     */
+    public boolean matches(MessageBindings bindings, ValueDecoder decoder) {
         try {
-            return support.matches(bindings::lookup);
+            return decoder == null
+                    ? support.matches(bindings::lookup)
+                    : support.matches(name -> bindings.lookup(name, decoder));
         } catch (JMSException | RuntimeException e) {
             // Logged at DEBUG, not WARN: per-message failures on a single bad selector would
             // otherwise flood logs. The "nothing matched" outcome is already visible via the

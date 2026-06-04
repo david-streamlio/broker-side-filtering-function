@@ -1,0 +1,70 @@
+package io.streamnative.filter;
+
+import org.apache.pulsar.client.api.Schema;
+import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/**
+ * Validates {@link AvroValueDecoder} against bytes produced by Pulsar's own {@code Schema.AVRO}
+ * encoder — i.e. the exact wire format the filter receives. The encoder uses Pulsar's shaded Avro
+ * while the decoder uses the unshaded bundled Avro; this test confirms they interoperate.
+ */
+class AvroValueDecoderTests {
+
+    /** POJO mapped by Pulsar's reflective Avro schema. Public fields keep the .avsc simple. */
+    public static class Trade {
+        public String sym;
+        public double price;
+        public int qty;
+        public boolean active;
+    }
+
+    private static AvroValueDecoder decoderFor(Schema<?> schema) {
+        String avsc = new String(schema.getSchemaInfo().getSchema(), StandardCharsets.UTF_8);
+        return new AvroValueDecoder(avsc);
+    }
+
+    @Test
+    void decodesPulsarAvroEncodedRecordToTopLevelScalars() {
+        Schema<Trade> schema = Schema.AVRO(Trade.class);
+        Trade t = new Trade();
+        t.sym = "AAPL";
+        t.price = 195.5;
+        t.qty = 10;
+        t.active = true;
+
+        Map<String, Object> fields = decoderFor(schema).decode(schema.encode(t));
+
+        assertThat(fields).isNotNull();
+        assertThat(fields.get("sym")).isEqualTo("AAPL");
+        assertThat(((Number) fields.get("price")).doubleValue()).isEqualTo(195.5);
+        assertThat(((Number) fields.get("qty")).intValue()).isEqualTo(10);
+        assertThat(fields.get("active")).isEqualTo(true);
+    }
+
+    @Test
+    void returnsNullForEmptyOrUndecodablePayload() {
+        AvroValueDecoder decoder = decoderFor(Schema.AVRO(Trade.class));
+        assertThat(decoder.decode(null)).isNull();
+        assertThat(decoder.decode(new byte[0])).isNull();
+        assertThat(decoder.decode("not avro at all".getBytes(StandardCharsets.UTF_8))).isNull();
+    }
+
+    @Test
+    void rejectsNonRecordSchema() {
+        assertThatThrownBy(() -> new AvroValueDecoder("\"string\""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("record");
+    }
+
+    @Test
+    void rejectsMalformedSchema() {
+        assertThatThrownBy(() -> new AvroValueDecoder("{ not valid avsc"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+}

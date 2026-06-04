@@ -79,6 +79,12 @@ public final class MessageBindings {
     private JsonNode payloadJson;
     private boolean payloadResolved;
 
+    // Lazily-decoded structured value (via a ValueDecoder), decoded at most once per bindings.
+    // cachedDecoder lets the rare multi-schema-per-function case re-decode instead of going stale.
+    private ValueDecoder cachedDecoder;
+    private Map<String, Object> decodedFields;
+    private boolean decodedAttempted;
+
     // Lazily-built base64-decode state. The format-parse runs at most once per record; the cache
     // is populated on demand and holds one entry per base64-flagged property that has been looked
     // up so far (decoded or raw fallback).
@@ -174,6 +180,19 @@ public final class MessageBindings {
     }
 
     public Object lookup(String name) {
+        return lookup(name, null);
+    }
+
+    /**
+     * Resolve a selector binding, using {@code decoder} for value-field references when present.
+     *
+     * <p>Resolution order is unchanged: {@code __key__}, {@code __topic__}, then user properties,
+     * then the message value. When a {@code decoder} is supplied (a query with a structured value
+     * schema) the value is decoded through it; otherwise — or if structured decode fails — value
+     * fields fall back to best-effort JSON parsing. Properties still shadow value fields of the same
+     * name, exactly as before.
+     */
+    public Object lookup(String name, ValueDecoder decoder) {
         if (KEY_BINDING.equals(name)) {
             return getKey();
         }
@@ -193,11 +212,40 @@ public final class MessageBindings {
             }
             return raw;
         }
-        // Properties did not contain the name — fall through to JSON payload fields.
-        // This allows selectors like `side = 'buy'` or `price > 50000` to work against
-        // messages (e.g. KoP-bridged Coinbase tickers) whose payload is JSON but whose
-        // Pulsar properties map is empty.
+        // Properties did not contain the name — fall through to the message value.
+        return getValueField(name, decoder);
+    }
+
+    /**
+     * Resolve a value-field reference. With a structured {@code decoder} (e.g. Avro), decode the
+     * payload once (cached for the lifetime of these bindings) and look the field up there; with no
+     * decoder, or if structured decode yields nothing, fall back to best-effort JSON parsing. This
+     * is what lets selectors like {@code side = 'buy'} / {@code price > 50000} match a structured or
+     * JSON message value whose Pulsar properties map is empty.
+     */
+    private Object getValueField(String name, ValueDecoder decoder) {
+        if (decoder != null) {
+            Map<String, Object> fields = decodedValueFields(decoder);
+            if (fields != null) {
+                return fields.get(name);
+            }
+            // Structured decode failed (corrupt/foreign bytes) — fall back to JSON best-effort.
+        }
         return getJsonField(name);
+    }
+
+    /**
+     * Decode the payload's top-level fields via {@code decoder}, at most once per bindings instance.
+     * Keyed by decoder identity so the rare case of differently-schema'd queries on one function
+     * re-decodes rather than returning a stale map.
+     */
+    private Map<String, Object> decodedValueFields(ValueDecoder decoder) {
+        if (!decodedAttempted || cachedDecoder != decoder) {
+            cachedDecoder = decoder;
+            decodedAttempted = true;
+            decodedFields = (payload == null || payload.length == 0) ? null : decoder.decode(payload);
+        }
+        return decodedFields;
     }
 
     /**
@@ -211,12 +259,9 @@ public final class MessageBindings {
      * decimals: {@code "price":"77351.21"}. This method coerces such strings to
      * {@link Double} so numeric comparisons work correctly.
      *
-     * <p><strong>Decoder seam (follow-up).</strong> This best-effort JSON path is where a
-     * schema-aware value decoder plugs in. The compiled query now carries the consumer's
-     * {@code ValueSchemaInfo} ({@code CompiledQuery.valueSchema}); a follow-up will construct a
-     * {@code ValueDecoder} from it (JSON / Avro / Protobuf-native) and resolve {@code name} against
-     * the decoded value here, falling back to this JSON parse when no schema is present. The schema
-     * is plumbed end-to-end and stored, but not yet consulted — value-field resolution is unchanged.
+     * <p>This is the fallback value-resolution path: it serves messages with no value schema and
+     * JSON-schema'd values, and backstops a structured {@link ValueDecoder} (e.g. Avro) when its
+     * decode fails. Structured decode itself runs in {@link #getValueField(String, ValueDecoder)}.
      */
     private Object getJsonField(String name) {
         if (!payloadResolved) {

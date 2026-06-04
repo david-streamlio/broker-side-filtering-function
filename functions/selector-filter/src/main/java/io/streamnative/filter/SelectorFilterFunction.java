@@ -224,7 +224,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         boolean forwardPropertiesResolved = false;
 
         for (CompiledQuery cq : compiled.values()) {
-            if (cq.evaluator().matches(bindings)) {
+            if (cq.evaluator().matches(bindings, cq.valueDecoder())) {
                 TypedMessageBuilder<byte[]> builder = ctx.newOutputMessage(cq.outputTopic(), Schema.BYTES)
                         .value(payload);
                 if (!forwardPropertiesResolved) {
@@ -486,8 +486,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
             recordMetric(METRIC_QUERIES_BAD, 1.0);
             return;
         }
+        ValueDecoder valueDecoder = ValueDecoderFactory.from(qm.getValueSchema());
         compiled.put(queryId, new CompiledQuery(queryId, qm.getName(), qm.getOutputTopic(), evaluator,
-                qm.getValueSchema()));
+                qm.getValueSchema(), valueDecoder));
         LOG.info("Loaded query id={} name='{}' selector=[{}] -> {}",
                 queryId, qm.getName(), qm.getSelector(), qm.getOutputTopic());
         recordMetric(METRIC_QUERIES_LOADED, 1.0);

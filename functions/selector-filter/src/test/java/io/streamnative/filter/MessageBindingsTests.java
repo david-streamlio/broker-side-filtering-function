@@ -467,4 +467,71 @@ class MessageBindingsTests {
         assertThat(topCoins.matches(new MessageBindings("BTC", null, Map.of(), btc))).isTrue();
         assertThat(topCoins.matches(new MessageBindings("ADA", null, Map.of(), ada))).isFalse();
     }
+
+    // ── Structured ValueDecoder integration ───────────────────────────────────
+
+    @Test
+    void valueFieldsResolvedViaDecoder() {
+        ValueDecoder decoder = payload -> Map.of("price", 195.5, "side", "buy");
+        MessageBindings b = new MessageBindings("AAPL", null, Map.of(), new byte[]{1, 2, 3});
+        assertThat(b.lookup("price", decoder)).isEqualTo(195.5);
+        assertThat(b.lookup("side", decoder)).isEqualTo("buy");
+        assertThat(b.lookup("missing", decoder)).isNull();
+    }
+
+    @Test
+    void propertyShadowsDecodedValueField() {
+        ValueDecoder decoder = payload -> Map.of("region", "FROM_VALUE");
+        MessageBindings b = new MessageBindings("k", null, Map.of("region", "FROM_PROP"), new byte[]{1});
+        assertThat(b.lookup("region", decoder)).isEqualTo("FROM_PROP");
+    }
+
+    @Test
+    void fallsBackToJsonWhenNoDecoder() {
+        byte[] payload = json("{\"price\":195.5}");
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        // lookup(name, null) is the explicit no-decoder form; resolves via best-effort JSON.
+        assertThat(((Number) b.lookup("price", null)).doubleValue()).isEqualTo(195.5);
+    }
+
+    @Test
+    void fallsBackToJsonWhenDecoderReturnsNull() {
+        // Decoder present but decode fails (e.g. corrupt bytes) → best-effort JSON still tried.
+        ValueDecoder failing = payload -> null;
+        byte[] payload = json("{\"price\":42}");
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        assertThat(((Number) b.lookup("price", failing)).intValue()).isEqualTo(42);
+    }
+
+    @Test
+    void decoderInvokedAtMostOncePerBindings() {
+        int[] calls = {0};
+        ValueDecoder counting = payload -> {
+            calls[0]++;
+            return Map.of("a", 1, "b", 2);
+        };
+        MessageBindings b = new MessageBindings("k", null, Map.of(), new byte[]{1});
+        b.lookup("a", counting);
+        b.lookup("b", counting);
+        b.lookup("a", counting);
+        assertThat(calls[0]).isEqualTo(1);
+    }
+
+    @Test
+    void avroValueFieldSelectorEndToEnd() throws Exception {
+        org.apache.pulsar.client.api.Schema<AvroValueDecoderTests.Trade> schema =
+                org.apache.pulsar.client.api.Schema.AVRO(AvroValueDecoderTests.Trade.class);
+        AvroValueDecoderTests.Trade t = new AvroValueDecoderTests.Trade();
+        t.sym = "AAPL";
+        t.price = 195.5;
+        byte[] payload = schema.encode(t);
+        ValueDecoder decoder = new AvroValueDecoder(
+                new String(schema.getSchemaInfo().getSchema(), StandardCharsets.UTF_8));
+
+        MessageBindings b = new MessageBindings("AAPL", null, Map.of(), payload);
+        SelectorEvaluator priceFilter = SelectorEvaluator.compile("price > 100 AND sym = 'AAPL'");
+
+        assertThat(priceFilter.matches(b, decoder)).isTrue();
+        assertThat(SelectorEvaluator.compile("price > 500").matches(b, decoder)).isFalse();
+    }
 }

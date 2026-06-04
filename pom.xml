@@ -33,6 +33,9 @@
         <kafka-clients.version>3.6.1</kafka-clients.version>
         <jackson.version>2.18.2</jackson.version>
         <slf4j.version>2.0.16</slf4j.version>
+        <!-- Avro 1.11.x line matches the version Pulsar 4.2.x builds against. Bundled in the
+             filter NAR so the function can decode Schema.AVRO message values. -->
+        <avro.version>1.11.4</avro.version>
 
         <junit.version>5.11.4</junit.version>
         <mockito.version>5.14.2</mockito.version>
@@ -101,6 +104,12 @@
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
                 <version>${jackson.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro</artifactId>
+                <version>${avro.version}</version>
             </dependency>
 
             <dependency>
