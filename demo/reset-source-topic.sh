@@ -74,7 +74,7 @@ echo ""
 # ── Confirmation ──────────────────────────────────────────────────────────────
 if [[ "${1:-}" != "--yes" ]]; then
   read -r -p "  Proceed? [y/N] " confirm
-  [[ "${confirm,,}" == "y" ]] || { echo "Aborted."; exit 0; }
+  [[ "$confirm" == "y" || "$confirm" == "Y" ]] || { echo "Aborted."; exit 0; }
 fi
 echo ""
 
