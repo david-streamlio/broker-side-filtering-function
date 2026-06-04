@@ -3,7 +3,7 @@ package io.streamnative.filter;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.QueryMessage;
-import javax.jms.JMSException;
+import io.streamnative.filter.common.selector.SelectorParseException;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.TableView;
@@ -481,7 +481,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         SelectorEvaluator evaluator;
         try {
             evaluator = SelectorEvaluator.compile(qm.getSelector());
-        } catch (JMSException e) {
+        } catch (SelectorParseException e) {
             LOG.warn("Query id={} has invalid selector [{}]: {}", queryId, qm.getSelector(), e.getMessage());
             recordMetric(METRIC_QUERIES_BAD, 1.0);
             return;

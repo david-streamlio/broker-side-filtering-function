@@ -111,7 +111,7 @@ public final class FilterableConsumerBuilder<V> {
      *
      * @throws IllegalArgumentException if {@code selector} is non-blank but fails to parse
      *                                  against the JMS-selector grammar; the cause is the
-     *                                  underlying {@code javax.jms.JMSException}.
+     *                                  underlying {@code SelectorParseException}.
      * @throws PulsarClientException    if the underlying Pulsar subscribe or control-topic
      *                                  publish fails.
      */

@@ -1,6 +1,6 @@
 package io.streamnative.filter;
 
-import javax.jms.JMSException;
+import io.streamnative.filter.common.selector.SelectorParseException;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -24,17 +24,17 @@ class SelectorEvaluatorTests {
     @Test
     void malformedExpressionThrows() {
         assertThatThrownBy(() -> SelectorEvaluator.compile("region = "))
-                .isInstanceOf(JMSException.class);
+                .isInstanceOf(SelectorParseException.class);
     }
 
     @Test
     void emptyExpressionThrows() {
         assertThatThrownBy(() -> SelectorEvaluator.compile(""))
-                .isInstanceOf(JMSException.class);
+                .isInstanceOf(SelectorParseException.class);
         assertThatThrownBy(() -> SelectorEvaluator.compile(null))
-                .isInstanceOf(JMSException.class);
+                .isInstanceOf(SelectorParseException.class);
         assertThatThrownBy(() -> SelectorEvaluator.compile("   "))
-                .isInstanceOf(JMSException.class);
+                .isInstanceOf(SelectorParseException.class);
     }
 
     @Test
@@ -60,9 +60,6 @@ class SelectorEvaluatorTests {
 
     @Test
     void stringEqualityOnStringProperty() throws Exception {
-        // Pulsar user properties are always String. Numeric comparisons against string-typed
-        // properties evaluate to UNKNOWN per JMS selector semantics. Authors should rely on
-        // string equality / LIKE / IN for property filtering.
         SelectorEvaluator e = SelectorEvaluator.compile("price = '150.5'");
         assertThat(e.matches(bindings(null, null, Map.of("price", "150.5")))).isTrue();
         assertThat(e.matches(bindings(null, null, Map.of("price", "50.0")))).isFalse();
@@ -70,7 +67,6 @@ class SelectorEvaluatorTests {
 
     @Test
     void numericComparisonAgainstStringPropertyIsUnknown() throws Exception {
-        // Documents the JMS-selector quirk: String > Number => UNKNOWN => no match.
         SelectorEvaluator e = SelectorEvaluator.compile("price > 100");
         assertThat(e.matches(bindings(null, null, Map.of("price", "150.5")))).isFalse();
     }
@@ -142,18 +138,16 @@ class SelectorEvaluatorTests {
     }
 
     @Test
-    void identifierExtractorIgnoresKeywordsAndQuotedLiterals() {
-        // The literal 'foo' must not be picked up as a binding even though it would otherwise
-        // match the identifier pattern.
-        assertThat(SelectorEvaluator.extractReferencedNames(
-                "region = 'foo' AND status IN ('ACTIVE','PENDING') OR __key__ IS NOT NULL"))
+    void referencedNamesIgnoreKeywordsAndQuotedLiterals() {
+        assertThat(SelectorEvaluator.compile(
+                "region = 'foo' AND status IN ('ACTIVE','PENDING') OR __key__ IS NOT NULL")
+                .getReferencedNames())
                 .containsExactlyInAnyOrder("region", "status", "__key__");
     }
 
     @Test
-    void identifierExtractorHandlesEscapedQuotesInLiterals() {
-        // Within 'O''Reilly', the inner '' is the escaped single quote — Reilly is NOT a binding.
-        assertThat(SelectorEvaluator.extractReferencedNames("name = 'O''Reilly'"))
+    void referencedNamesHandleEscapedQuotesInLiterals() {
+        assertThat(SelectorEvaluator.compile("name = 'O''Reilly'").getReferencedNames())
                 .containsExactly("name");
     }
 
@@ -177,11 +171,7 @@ class SelectorEvaluatorTests {
     }
 
     @Test
-    void selectorEngineFailureDuringMatchReturnsFalse() throws Exception {
-        // Safety net: if the underlying selector engine ever throws during evaluation (e.g.
-        // because a selector references a name whose typed accessor inside the engine cannot
-        // tolerate the binding we return), our wrapper catches the exception and the query
-        // simply does not match. One bad query must not poison the fan-out.
+    void missingBindingDuringMatchReturnsFalse() throws Exception {
         SelectorEvaluator e = SelectorEvaluator.compile("JMSPriority = 5");
         assertThat(e.matches(bindings("k", "t", Map.of()))).isFalse();
     }
