@@ -321,6 +321,37 @@ class SelectorFilterFunctionTests {
     }
 
     @Test
+    void processProtobufNativeValueFieldSelectorMatchesAndFansOut() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        String outputTopic = "persistent://public/filtered/proto-out";
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(outputTopic, CompletableFuture.completedFuture(null));
+
+        // Build a descriptor + message with protobuf runtime APIs; carry Pulsar's real schema bytes.
+        com.google.protobuf.Descriptors.Descriptor trade = ProtobufNativeValueDecoderTests.tradeDescriptor();
+        byte[] schemaData = org.apache.pulsar.client.impl.schema.ProtobufNativeSchemaUtils.serialize(trade);
+        String defB64 = Base64.getEncoder().encodeToString(schemaData);
+        byte[] payload = com.google.protobuf.DynamicMessage.newBuilder(trade)
+                .setField(trade.findFieldByName("sym"), "AAPL")
+                .setField(trade.findFieldByName("price"), 195.5)
+                .build()
+                .toByteArray();
+
+        fn.loadQueryForTest("q1", queryJsonWithSchema(
+                "price > 100", outputTopic, "Trade", "PROTOBUF_NATIVE", defB64));
+
+        CompletableFuture<Void> result = fn.process(payload, ctx);
+
+        assertThat(result).isCompleted();
+        verify(builder).value(payload);
+        verify(builder).sendAsync();
+        verify(record).ack();
+        verify(record, never()).fail();
+    }
+
+    @Test
     void processForwardsSourceEventTime() throws Exception {
         givenControlTopic("persistent://public/control/queries");
         SelectorFilterFunction fn = new SelectorFilterFunction();

@@ -13,12 +13,12 @@ import java.util.Base64;
  *
  * <p>Decoder coverage:
  * <ul>
- *   <li><strong>AVRO</strong> → {@link AvroValueDecoder} (this PR).</li>
+ *   <li><strong>AVRO</strong> → {@link AvroValueDecoder}.</li>
+ *   <li><strong>PROTOBUF_NATIVE</strong> → {@link ProtobufNativeValueDecoder}.</li>
  *   <li><strong>JSON</strong> → {@code null}; JSON values are already resolved by
  *       {@link MessageBindings}' best-effort JSON path, so no dedicated decoder is needed.</li>
- *   <li><strong>STRING / BYTES / PROTOBUF_NATIVE / other / absent</strong> → {@code null}; no
- *       structured value decode (PROTOBUF_NATIVE is a planned follow-up). Selectors still match on
- *       key, topic, and user properties.</li>
+ *   <li><strong>STRING / BYTES / other / absent</strong> → {@code null}; no structured value
+ *       decode. Selectors still match on key, topic, and user properties.</li>
  * </ul>
  *
  * <p>A schema that names a decoder but can't be built (e.g. a malformed Avro {@code .avsc}) yields
@@ -40,8 +40,10 @@ final class ValueDecoderFactory {
         switch (schema.getType()) {
             case "AVRO":
                 return buildAvro(schema);
+            case "PROTOBUF_NATIVE":
+                return buildProtobufNative(schema);
             default:
-                // JSON handled by the best-effort JSON path; others unsupported in this PR.
+                // JSON handled by the best-effort JSON path; STRING/BYTES/others unsupported.
                 return null;
         }
     }
@@ -58,6 +60,23 @@ final class ValueDecoderFactory {
             return new AvroValueDecoder(avsc);
         } catch (RuntimeException e) {
             LOG.warn("Failed to build Avro decoder for value schema '{}': {}",
+                    schema.getName(), e.toString());
+            return null;
+        }
+    }
+
+    private static ValueDecoder buildProtobufNative(ValueSchemaInfo schema) {
+        String definition = schema.getDefinition();
+        if (definition == null || definition.isBlank()) {
+            LOG.warn("PROTOBUF_NATIVE value schema '{}' carries no definition; value-field decoding disabled",
+                    schema.getName());
+            return null;
+        }
+        try {
+            byte[] schemaData = Base64.getDecoder().decode(definition);
+            return new ProtobufNativeValueDecoder(schemaData);
+        } catch (RuntimeException e) {
+            LOG.warn("Failed to build Protobuf-native decoder for value schema '{}': {}",
                     schema.getName(), e.toString());
             return null;
         }

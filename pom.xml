@@ -36,6 +36,9 @@
         <!-- Avro 1.11.x line matches the version Pulsar 4.2.x builds against. Bundled in the
              filter NAR so the function can decode Schema.AVRO message values. -->
         <avro.version>1.11.4</avro.version>
+        <!-- protobuf-java 3.25.x matches Pulsar 4.2.x (which keeps com.google.protobuf unshaded).
+             Bundled in the filter NAR to decode Schema.PROTOBUF_NATIVE message values. -->
+        <protobuf.version>3.25.5</protobuf.version>
 
         <junit.version>5.11.4</junit.version>
         <mockito.version>5.14.2</mockito.version>
@@ -110,6 +113,12 @@
                 <groupId>org.apache.avro</groupId>
                 <artifactId>avro</artifactId>
                 <version>${avro.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-java</artifactId>
+                <version>${protobuf.version}</version>
             </dependency>
 
             <dependency>

@@ -60,6 +60,14 @@
             <artifactId>avro</artifactId>
         </dependency>
 
+        <!-- Bundled in the NAR to decode Schema.PROTOBUF_NATIVE message values: the descriptor
+             travels in the schema, so the function reconstructs it and reads fields via
+             DynamicMessage without needing the generated protobuf class. -->
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
