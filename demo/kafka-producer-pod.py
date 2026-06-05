@@ -23,6 +23,7 @@ Usage:
 """
 
 import os
+import sys
 import json
 import time
 import random
@@ -72,6 +73,7 @@ def main():
     ap.add_argument("--throttle-ms", type=int, default=100)
     args = ap.parse_args()
 
+    sys.stdout.reconfigure(line_buffering=True)
     print("== Kafka Producer (in-cluster, kafka-python) ==")
     print(f"  bootstrap={BOOTSTRAP}  protocol={PROTOCOL}")
     print(f"  user={USERNAME}  topic={args.topic}  key={args.key}  count={args.count or 'inf'}\n")
@@ -90,6 +92,8 @@ def main():
 
     sent = ok = 0
     fail = 0
+    send_times: list[float] = []
+    REPORT_INTERVAL = 5  # seconds between stat lines
 
     def on_ok(md):
         nonlocal ok
@@ -98,9 +102,26 @@ def main():
     def on_err(e):
         nonlocal fail
         fail += 1
-        print(f"  x send failed: {e}")
+
+    def print_stats(window_sent: int, window_ok: int, window_fail: int,
+                    window_ms: list[float], elapsed: float) -> None:
+        rate = window_sent / max(elapsed, 0.001)
+        if window_ms:
+            window_ms.sort()
+            n = len(window_ms)
+            p50 = window_ms[n // 2]
+            p99 = window_ms[min(int(n * 0.99), n - 1)]
+            lat = f"p50={p50*1000:.0f}ms  p99={p99*1000:.0f}ms"
+        else:
+            lat = "p50=—  p99=—"
+        print(f"  [{time.strftime('%H:%M:%S')}]  sent={window_sent:>5}  ok={window_ok:>5}"
+              f"  fail={window_fail}  rate={rate:.1f}/s  {lat}", flush=True)
 
     try:
+        window_sent = window_ok = window_fail = 0
+        window_ms: list[float] = []
+        window_start = time.time()
+
         while args.count == 0 or sent < args.count:
             q = make_quote()
             headers = [
@@ -108,9 +129,32 @@ def main():
                 ("sector",   q["sector"].encode()),
                 ("side",     q["side"].encode()),
             ]
-            producer.send(args.topic, key=args.key, value=q, headers=headers).add_callback(on_ok).add_errback(on_err)
+            t0 = time.time()
+
+            def _ok(md, t=t0):
+                nonlocal ok, window_ok
+                ok += 1
+                window_ok += 1
+                window_ms.append(time.time() - t)
+
+            def _err(e):
+                nonlocal fail, window_fail
+                fail += 1
+                window_fail += 1
+
+            producer.send(args.topic, key=args.key, value=q, headers=headers) \
+                    .add_callback(_ok).add_errback(_err)
             sent += 1
-            print(f"  -> [{sent:>4}] key={args.key} seq={q['seq']} {q['exchange']} {q['sector']} price={q['price']} side={q['side']}")
+            window_sent += 1
+
+            now = time.time()
+            if now - window_start >= REPORT_INTERVAL:
+                print_stats(window_sent, window_ok, window_fail,
+                            window_ms, now - window_start)
+                window_sent = window_ok = window_fail = 0
+                window_ms = []
+                window_start = now
+
             if args.throttle_ms:
                 time.sleep(args.throttle_ms / 1000)
     except KeyboardInterrupt:
@@ -119,7 +163,7 @@ def main():
         producer.flush(10)
         producer.close(5)
 
-    print(f"\n  sent={sent} delivered={ok} failed={fail}")
+    print(f"\n  total: sent={sent} delivered={ok} failed={fail}")
 
 
 if __name__ == "__main__":

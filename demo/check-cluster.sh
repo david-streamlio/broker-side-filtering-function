@@ -58,15 +58,28 @@ check_token() {
     fail "$label token file not found: $file"
     return
   fi
-  # Decode JWT expiry (middle base64 segment)
+  # Decode JWT expiry — uses Python to handle base64url padding correctly
   local exp
-  exp=$(echo "$token" | cut -d. -f2 | base64 -d 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('exp',0))" 2>/dev/null || echo 0)
+  exp=$(python3 -c "
+import base64, json, sys
+token = '''$token'''.strip()
+parts = token.split('.')
+if len(parts) != 3:
+    print(0); sys.exit()
+payload = parts[1]
+payload += '=' * ((4 - len(payload) % 4) % 4)
+try:
+    d = json.loads(base64.b64decode(payload))
+    print(d.get('exp', 0))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
   local now
   now=$(date +%s)
   if [[ "$exp" -eq 0 ]]; then
-    warn "$label token — could not decode expiry (API key format)"
+    warn "$label token — could not decode expiry (not a JWT?)"
   elif [[ "$exp" -lt "$now" ]]; then
-    fail "$label token EXPIRED ($(date -r $exp '+%Y-%m-%d' 2>/dev/null || echo 'unknown'))"
+    fail "$label token EXPIRED ($(date -r "$exp" '+%Y-%m-%d' 2>/dev/null || echo 'unknown'))"
   else
     local days_left=$(( (exp - now) / 86400 ))
     ok "$label token valid — expires in ${days_left} days"

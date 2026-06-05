@@ -1,259 +1,183 @@
 # Berlin Buzzwords 2026 — Demo Runbook
 
-## Setup checklist (before going on stage)
+**Time budget: 10 minutes** | **Format: UI-first, no CLI on stage**
+Focus: cost savings · latency transparency · live reconfiguration
+
+---
+
+## Pre-demo checklist (5 min before stage)
 
 ```bash
-cd /Users/arodriguez/Code/berlinbuzzword2026/DavidRefactor18thMay/broker-side-filtering-function
+# 1. Health check — must pass before you walk up
+./demo/check-cluster.sh
+./demo/check-docker.sh
 
-# Verify all containers are running
-docker ps
+# 2. Verify all local containers are up
+docker ps --format 'table {{.Names}}\t{{.Status}}' | grep -E "shadow|query|observ"
+# Expected: 3 rows, all "Up"
 
-# Expected:
-#   stock-quotes-shadowtraffic   Up
-#   filter-observability         Up (healthy)
-#   multi-query-demo             Up
+# 3. Ensure colocated producer is running (key=COLOCATED, in-cluster toolset pod)
+# If not running: ./demo/launch-toolset-producer.sh -n 0 -t 50 -k COLOCATED -d
 
-# Observability UI
+# 4. Open browser before you walk up
 open http://localhost:3200
 ```
 
----
+**Silence monitoring alerts:**
+→ StreamNative Cloud console → Monitoring → mute instance for 2 hours.
 
-## Step 1 — Show ShadowTraffic: a Kafka producer running on your machine
-
-**Concept:** _"This is a synthetic stock-quote feed. It's just a Kafka producer — the same library your team already uses."_
-
-```bash
-# Show the config file (43 symbols, random price/volume/sector/exchange/side)
-cat demo/shadowtraffic/stock-quotes.json
-
-# Show it's running
-docker ps | grep shadow
-
-# Kafka producer metrics (built-in Prometheus endpoint)
-docker exec stock-quotes-shadowtraffic curl -s localhost:9400/metrics \
-  | grep -E "generator_events_sent_total|generator_iteration_duration"
-
-# Shows:
-#   generator_events_sent_total{...} 450000        ← total events sent
-#   generator_iteration_duration_seconds p99 < 0.001  ← < 1ms producer latency
-
-# Increase speed for impact (optional)
-./demo/shadowtraffic-fast.sh     # throttleMs=1 → ~800 msg/s
-
-# Restore normal
-./demo/shadowtraffic-normal.sh   # throttleMs=5 → ~150 msg/s
-```
-
-**Key point:** ShadowTraffic produces to `stock-quotes` using `SASL_SSL` — exactly like any production Kafka producer.
+**Browser tabs to have open:**
+1. `http://localhost:3200` — Overview (primary screen)
+2. `http://localhost:3200` — second tab for navigation
 
 ---
 
-## Step 2 — Show the observability with active filters
+## 10-minute demo
 
-**URL:** http://localhost:3200
+### [~1.5 min] Step 1 — Cold open: it's already running, and saving
 
-**Walk the UI:**
+**URL:** http://localhost:3200 → Overview
 
-1. **Overview** — hero banner: `source=150 msg/s → forwarded=148 → drop=2%`
-   - 9 queries running simultaneously on ONE source topic
-   - Each query gets a private filtered output topic
+1. Click **▶ Start counting** immediately as you walk up — the savings counter starts ticking.
 
-2. **Click the filter function name** → Filter Detail page
-   - See all 8 selectors inline (tech-titans, bank-watch, nasdaq-only…)
-   - Live charts: In / Match / Drop%
-   - The `bad-syntax-demo` query fires `selector-compile-fail` flag → red badge
+2. Point to the hero numbers:
+   - **~170 msg/s** flowing through `stock-quotes`
+   - **Active queries · latency monitored** — each has a private output topic
 
-3. **Click any output topic** (e.g. `filtered-xxx`) → Topic Detail
-   - Blue "Filter in action" panel shows the JMS selector + source link
-   - Recent messages show real stock data with `p0` partition badge
+3. Point at the **Fanout bar** — the green block (Data NOT sent) dominates the tiny blue (Data sent):
+   - `95% not sent` → data that never left the broker for each subscriber
+   - `$0.69/hr · 8 GB/hr not delivered`
 
-4. **Click a query** → Query Detail
-   - p50 / p90 / p99 end-to-end latency
-   - Drop % specific to this selector
-
-**Stop ShadowTraffic to show observability reacts:**
-```bash
-docker stop stock-quotes-shadowtraffic
-# → source drops to 0, SOURCE_TOPIC_STALLED flag appears within 5s
-docker start stock-quotes-shadowtraffic
-# → traffic resumes, flag clears
-```
+> _"A single Kafka topic, nine subscribers. Each gets only the slice they asked for.
+> Everything else is dropped at the broker — it never travels over the network.
+> You pay for ingestion once. Traditional fan-out pays per consumer, per message."_
 
 ---
 
-## Step 3 — Create a new filter live from the web UI
+### [~2 min] Step 2 — Latency: what you're actually measuring
+
+**URL:** http://localhost:3200 → Overview → Active queries · latency monitored
+
+**Set the scene first — where is everything running?**
+
+> _"Quick picture of the setup. The data producer — ShadowTraffic — is running here on my laptop.
+> It speaks Kafka protocol, connects to the cluster over the network, and the broker ingests it
+> through the KoP layer — Kafka on Pulsar. That's the bridge between the Kafka API and the
+> Pulsar storage engine."_
+
+> _"The consumers are also running locally — a small Java app that registered these queries
+> and now reads from the private output topics via Kafka. Standard Kafka consumer API,
+> no changes to the consumer code, it just subscribes to a different topic."_
+
+> _"And then there's a second producer — running as a pod inside the cluster itself,
+> colocated with the broker. No network hop at all."_
+
+1. Point at any `filtered-*` query — **p50 will vary (typically 100–400ms on WiFi)**. Frame it proactively:
+
+> _"This number will vary depending on the network between my laptop and the cloud cluster.
+> I'm on conference WiFi right now, so you might see it drift — that's expected and actually
+> makes the next comparison more interesting."_
+
+2. Find the `watchlist-COLOCATED` query (key=COLOCATED, in-cluster producer) — **p50 ≈ 15ms**:
+
+> _"This producer runs inside the cluster itself — no WiFi, no KoP bridge, no external network hop.
+> 15 milliseconds. That's the actual filter processing time: selector evaluation and message
+> forwarding. Everything else you saw is the wire, not the filter."_
+
+> _"The better your network, the closer those two numbers get. On a co-located producer
+> the filter is effectively free."_
+
+3. Point to the **last message timestamp** next to each query — aligned with the live clock top-right.
+
+> _"Every query shows when the last correlated message arrived — real-time, not an aggregate."_
+
+**Presenter note:** if p90 is very high (>2s) due to bad WiFi, lean into it —
+_"p90 is high because the conference network is inconsistent — watch the COLOCATED query,
+which bypasses the WiFi entirely and stays flat."_
+
+---
+
+**More queries = more savings** — point at the Fanout section:
+
+> _"The more subscribers on this topic, the more dramatic the savings.
+> Right now we have 9 queries. If we had 50, the 'Data NOT sent' bar grows proportionally —
+> the source pays once, every additional subscriber is nearly free."_
+
+---
+
+### [~1 min] Step 3 — What's inside
+
+**URL:** http://localhost:3200 → click the filter function name
+
+1. Show all **N selectors running inside one function instance** — IN/MATCH/DROP% per selector.
+2. Point to `bad-syntax-demo` red badge → _"Bad selectors fail gracefully — they don't crash the function."_
+3. Click any **output topic** → **"Filter in action"** blue panel shows the JMS selector + source link.
+4. Scroll messages — real stock symbols, real fields.
+
+> _"One function, N selectors, N private output topics.
+> Adding a new subscriber doesn't spawn a new consumer group on the source —
+> it adds one more selector expression to this function."_
+
+---
+
+### [~2 min] Step 4 — Create a live filter: AAPL + price threshold
 
 **URL:** http://localhost:3200 → Simulator tab
 
-1. Click **Register filter** in the Simulator
-2. Select symbols (e.g. AAPL, TSLA) or type a custom selector
-3. Click **Register filter** → new query appears in Overview within seconds
-4. Navigate to the new output topic → "Filter in action" panel shows your selector
-5. Click ✎ to modify the selector live (no restart)
-6. Click ✕ to remove the query
+1. In the JMS selector textarea type directly:
+   ```
+   __key__ = 'AAPL' AND price > 0
+   ```
+2. Click **Register filter** → new query appears in Overview within seconds.
+3. Navigate to the output topic → click through recent messages → show AAPL records with price values.
 
-**Show the selector edit:**
-- Change `__key__ IN ('AAPL')` to `__key__ IN ('TSLA')`  
-- The output topic immediately starts showing TSLA instead of AAPL
-- No restart. No downtime. Reconfigured at the broker.
+> _"That's a field-level filter — it's evaluating the message payload in the broker,
+> not in your consumer. This is standard JMS selector syntax running server-side."_
 
 ---
 
-## Step 4 — Live query creation with timing measurement
+### [~2.5 min] Step 5 — Modify live: price > 1000 (instant empty)
 
-**Concept:** _"How long from 'I want this filter' to 'first matching message arrives'?"_
+1. Click **✎** on the AAPL query you just created.
+2. Change the selector to:
+   ```
+   __key__ = 'AAPL' AND price > 1000
+   ```
+3. Save. Switch to the output topic — **messages stop arriving immediately**.
+4. Point at the source rate (still 170 msg/s) — data is still flowing, nothing matches.
 
-```bash
-# Default selector: AAPL + MSFT + NVDA
-./demo/live-query-demo.sh
+> _"ShadowTraffic generates prices between $50 and $500. Nothing passes $1,000.
+> The filter changed in place — no restart, no redeployment. Your consumer kept running
+> and now receives nothing because nothing qualifies."_
 
-# Custom selectors
-./demo/live-query-demo.sh "__key__ IN ('TSLA')"
-./demo/live-query-demo.sh "sector = 'tech' AND side = 'B'"
-./demo/live-query-demo.sh "exchange = 'NYSE' AND sector IN ('finance','tech')"
-```
+5. Click **✕** to remove the query. Back to Overview.
 
-**Expected output:**
-```
-✓ Query registered at 14:19:50.524
-✓ Filter function active after 790ms
-✓ First message key: COST
+6. Point at the **Start counting** total — `$X.XX saved · Y GB not sent` since you walked on stage.
 
-Time to first message: 1332ms
-  Orchestrator activation: ~790ms
-  Filter processing:       ~648ms
-```
-
-**After running:** open the printed URLs to show:
-- Output topic with "Filter in action" panel
-- Query detail with live latency metrics
+> _"In the time it took to show you this, the broker saved Y gigabytes of network traffic
+> that would have been pushed to every subscriber in a traditional fan-out system.
+> This is the O(1) vs O(N) cost model for data delivery."_
 
 ---
 
-## Step 5 — Live filter modification (AAPL → TSLA)
+## Fallback plan
 
-**Concept:** _"Reconfigure a running filter in milliseconds."_
-
-```bash
-# Default: AAPL → TSLA
-./demo/live-modify-demo.sh
-
-# Custom
-./demo/live-modify-demo.sh "__key__ IN ('JPM')" "__key__ IN ('NVDA')"
-./demo/live-modify-demo.sh "sector = 'tech'" "sector = 'energy'"
-```
-
-**Expected output:**
-```
-[3/5] Letting filter run for 3 seconds...
-  3s — recent keys: AAPL, AAPL, AAPL
-
-[4/5] MODIFYING selector live (no restart!)
-  ✓ Selector modified at 14:19:50.524
-
-Time from MODIFY → first TSLA message: 3552ms
-```
-
-**What to say:** _"Same output topic. No restart. The broker reconfigured the filter instantly. Your Kafka consumers keep running — they just start receiving different messages."_
-
----
-
-## Step 6 — Python Kafka consumer running on your machine
-
-**Concept:** _"Your existing Kafka consumers work unchanged — just subscribe to the private filtered topic."_
-
-```bash
-# Step A: Create a query and get the topic name
-./demo/live-query-demo.sh "__key__ IN ('AAPL','NVDA')"
-# Note the outputTopic: persistent://public/default/live-demo-xxxxx
-
-# Step B: Show the consumer code
-cat demo/kafka-consumer.py   # standard confluent-kafka Consumer
-
-# Step C: Run it (15 second window with latency stats)
-python3 demo/kafka-consumer.py live-demo-xxxxx
-# or with custom duration:
-python3 demo/kafka-consumer.py live-demo-xxxxx 30
-```
-
-**Output shows:**
-```
-  [    1]  13:12:15.322  13:12:15.539    217ms  AAPL  side=S, exchange=NYSE, sector=consumer  seq=723857...
-  [    2]  13:12:15.377  13:12:15.665    288ms  AAPL  side=S, exchange=NASDAQ, sector=finance  ...
-
-End-to-end transit latency (15s window)
-  p50 (median) : 215ms
-  p90          : 300ms
-  p99          : 641ms
-```
-
-**Key point:** `produce_time` = when ShadowTraffic called `send()`, `receive_time` = when Python consumer received it. The difference is the full broker-side filtering pipeline.
-
----
-
-## Step 6b — Fallback: local Kafka producer (if latencies look bad)
-
-If transit latencies are high (ShadowTraffic → SN Cloud network overhead),
-show that a LOCAL producer running on your machine gets much lower numbers
-since it doesn't go through the KoP bridge batching delay:
-
-```bash
-# Create a query that matches the LOCAL key
-./demo/live-query-demo.sh "__key__ IN ('LOCAL')"
-# Note the outputTopic
-
-# Run the validated local producer (sends to stock-quotes with key=LOCAL)
-./launch-toolset-producer.sh
-
-# In a second terminal, consume from the filtered output:
-python3 demo/kafka-consumer.py live-demo-xxxxx 15
-```
-
-The local producer shows that the ~200ms transit is the KoP bridge overhead
-from ShadowTraffic (running in Docker, routing through the Kafka-to-Pulsar bridge),
-not the filter function itself. The filter function adds only ~15ms.
-
----
-
-## Quick reference — all demo commands
-
-```bash
-# Speed
-./demo/shadowtraffic-fast.sh         # ~800 msg/s
-./demo/shadowtraffic-normal.sh       # ~150 msg/s
-
-# Create query + measure time-to-first-message
-./demo/live-query-demo.sh [selector]
-
-# Modify query live + measure time-to-first-new-message
-./demo/live-modify-demo.sh [from-sel] [to-sel]
-
-# Python Kafka consumer with latency stats
-python3 demo/kafka-consumer.py <topic> [seconds]
-
-# Local producer (key=LOCAL, fallback for latency demo)
-./launch-toolset-producer.sh
-
-# Cleanup all Simulator queries
-# Use ✕ buttons in the UI, or:
-curl -s http://localhost:3200/api/overview | python3 -c "
-import sys,json,re,urllib.request
-raw=re.sub(r'[\x00-\x1f]','',sys.stdin.read())
-d=json.loads(raw)
-for q in d.get('queries',[]):
-    qid=q['queryId']
-    req=urllib.request.Request(f'http://localhost:3200/api/query/{qid}',method='DELETE')
-    try: urllib.request.urlopen(req); print(f'deleted {qid[:8]}')
-    except: pass
-"
-```
+| Symptom | Fix |
+|---|---|
+| Filter function not spawning | `docker restart multi-query-demo` |
+| Simulator query not appearing | Refresh page — heartbeat every 15s |
+| No traffic on overview | `docker start stock-quotes-shadowtraffic` |
+| COLOCATED query not showing latency | Check toolset producer: `./demo/launch-toolset-producer.sh -n 0 -k COLOCATED -d` |
+| p50 shows — ⚠ | Click **↺ Reset sampler** in the Functions section header |
+| Filter receiving 0 messages | `./demo/reset-source-topic.sh` |
+| Cluster unreachable | `./demo/check-cluster.sh` |
 
 ---
 
 ## Notes
 
-- **kafkaEntryFormat** must be `pulsar_non_batched` on the source topic — bootstrap.sh sets this. If the filter stops receiving, run: `make demo-down && make demo-cloud`
-- **Simulator queries** are lost if the observability restarts (heartbeat TTL 90s). Re-run the curl/script.
-- **multi-query-app queries** (from queries.yaml) survive restarts — they're owned by the multi-query-app container.
-- **`bad-syntax-demo`** in queries.yaml is intentional — fires `selector-compile-fail` flag for the demo.
+- **"Start counting"** — click it as you walk up, not before. The audience sees it from zero.
+- **COLOCATED query** — must be in `watchlist-*` group (created via Simulator or `live-query-demo.sh`). Pre-register it in the pre-demo checklist if it's not already there.
+- **ShadowTraffic price range** — `uniform(50.0, 500.0)`. `price > 500` will be empty; `price > 1000` is guaranteed empty.
+- **`bad-syntax-demo`** in queries.yaml is intentional — fires `selector-compile-fail` badge.
+- **Simulator queries** heartbeat every 15s from the observability app. Survive up to 600s (10 min) without a heartbeat.

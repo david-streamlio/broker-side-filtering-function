@@ -128,9 +128,19 @@ services:
     command: >
       'export KAFKA_PASSWORD=$(cat /var/run/secrets/pulsar.token);
        exec java $$JAVA_OPTS -jar /app/app.jar'
+    healthcheck:
+      # Verify the Pulsar admin endpoint is still reachable from inside the
+      # container. wget exit 6 = HTTP 401 (auth required) which means the
+      # cluster IS up — treat that as healthy. Only truly unreachable (timeout,
+      # DNS failure, connection refused) maps to exit 1 (unhealthy).
+      test: ["CMD-SHELL", "wget -qO/dev/null --timeout=5 $$PULSAR_ADMIN_URL/admin/v2/clusters 2>&1; EC=$$?; [ $$EC -eq 0 ] || [ $$EC -eq 6 ]"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 
   observability:
-    image: ghcr.io/david-streamlio/broker-side-filter-observability:${OBSERVABILITY_IMAGE_TAG:-0.3.0}
+    image: ${OBSERVABILITY_IMAGE:-ghcr.io/david-streamlio/broker-side-filter-observability}:${OBSERVABILITY_IMAGE_TAG:-0.3.1}
     container_name: filter-observability
     restart: unless-stopped
     ports:
