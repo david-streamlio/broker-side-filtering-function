@@ -60,40 +60,51 @@ open http://localhost:3200
 
 **Set the scene first — where is everything running?**
 
-> _"Quick picture of the setup. The data producer — ShadowTraffic — is running here on my laptop.
-> It speaks Kafka protocol, connects to the cluster over the network, and the broker ingests it
-> through the KoP layer — Kafka on Pulsar. That's the bridge between the Kafka API and the
-> Pulsar storage engine."_
+> _"Quick picture of the setup. ShadowTraffic — here on my laptop — speaks Kafka protocol and
+> connects to the cluster over the network. The broker ingests it through KoP, Kafka on Pulsar:
+> the bridge between the Kafka API and the Pulsar storage engine. Both producers use
+> the Apache Kafka client — ShadowTraffic uses the Java library, the colocated one uses Python.
+> Same protocol. Same bridge. Same filter."_
 
 > _"The consumers are also running locally — a small Java app that registered these queries
-> and now reads from the private output topics via Kafka. Standard Kafka consumer API,
-> no changes to the consumer code, it just subscribes to a different topic."_
+> and reads from the private output topics via the standard Kafka consumer API.
+> No changes to the consumer code. It just subscribes to a different topic."_
 
-> _"And then there's a second producer — running as a pod inside the cluster itself,
-> colocated with the broker. No network hop at all."_
+> _"And then there's a second producer — a Python script running as a pod colocated with
+> the broker inside the cluster. Intra-cluster network, essentially zero extra latency."_
 
 1. Point at any `filtered-*` query — **p50 will vary (typically 100–400ms on WiFi)**. Frame it proactively:
 
-> _"This number will vary depending on the network between my laptop and the cloud cluster.
-> I'm on conference WiFi right now, so you might see it drift — that's expected and actually
-> makes the next comparison more interesting."_
+> _"This number will vary depending on the network between my laptop and the cluster.
+> Conference WiFi — expected to drift. That's actually what makes the next comparison interesting."_
 
-2. Find the `watchlist-COLOCATED` query (key=COLOCATED, in-cluster producer) — **p50 ≈ 15ms**:
+2. Find the `watchlist-COLOCATED` query (key=COLOCATED) — **p50 ≈ 8ms**:
 
-> _"This producer runs inside the cluster itself — no WiFi, no KoP bridge, no external network hop.
-> 15 milliseconds. That's the actual filter processing time: selector evaluation and message
-> forwarding. Everything else you saw is the wire, not the filter."_
+> _"Same Kafka client, same KoP bridge — but intra-cluster. No WiFi.
+> p50 is 8 milliseconds. The colocated producer itself gets a 7ms produce ack,
+> so the filter adds about 1 millisecond on top. That's it."_
 
-> _"The better your network, the closer those two numbers get. On a co-located producer
-> the filter is effectively free."_
+3. **The proof that selector complexity doesn't matter** — look at the other queries:
 
-3. Point to the **last message timestamp** next to each query — aligned with the live clock top-right.
+> _"Here's what's interesting. These other queries — `side = 'S' AND sector = 'tech'`,
+> `exchange = 'NYSE' AND side = 'S'` — they're evaluating fields in the message payload,
+> not just the key. And they also show p50 of 8ms. Field-level filtering costs the same
+> as key filtering. The JMS selector evaluation is negligible — the latency is the wire,
+> not the logic."_
+
+4. Point to the **last message timestamp** next to each query — aligned with the live clock top-right.
 
 > _"Every query shows when the last correlated message arrived — real-time, not an aggregate."_
 
-**Presenter note:** if p90 is very high (>2s) due to bad WiFi, lean into it —
-_"p90 is high because the conference network is inconsistent — watch the COLOCATED query,
-which bypasses the WiFi entirely and stays flat."_
+**Key numbers to have ready:**
+- Colocated produce ack: **p50 ≈ 7ms** (Python kafka-python → intra-cluster KoP)
+- Filter end-to-end: **p50 ≈ 8ms** (above + selector eval + output write)
+- Filter overhead: **~1ms** regardless of selector complexity
+- ShadowTraffic: **p50 ≈ 150ms** — same stack, 140ms is your WiFi
+
+**Presenter note:** if p90 is very high (>2s) for ShadowTraffic queries, lean into it —
+_"p90 is inconsistent because the conference WiFi is inconsistent. Watch the COLOCATED query —
+same KoP bridge, intra-cluster network — it stays flat. The filter is not the variable here."_
 
 ---
 

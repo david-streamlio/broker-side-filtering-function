@@ -144,6 +144,47 @@ print(int((now-started).total_seconds()))
   fi
 fi
 
+# ── [3] Container DNS — can containers resolve the cluster hostname? ───────────
+# Docker Desktop's internal DNS cache goes stale after containers run for many
+# hours; containers stop resolving external hostnames even when the host can.
+# Fix is always a full container restart (docker compose restart).
+echo ""
+echo -e "${BOLD}[3] Container DNS (cluster hostname resolution)${NC}"
+
+if [[ -f "$ENV_FILE" ]]; then
+  source "$ENV_FILE" 2>/dev/null || true
+  CLUSTER_HOST="${PULSAR_ADMIN_URL#https://}"
+  CLUSTER_HOST="${CLUSTER_HOST#http://}"
+
+  # Test DNS from inside the observability container (it's always running)
+  CONTAINER="filter-observability"
+  STATUS=$(docker inspect "$CONTAINER" --format '{{.State.Status}}' 2>/dev/null || echo "not running")
+
+  if [[ "$STATUS" == "running" ]]; then
+    DNS_OK=$(docker exec "$CONTAINER" sh -c \
+      "wget -qO/dev/null --timeout=5 https://${CLUSTER_HOST}/admin/v2/clusters 2>&1; EC=\$?; [ \$EC -eq 0 ] || [ \$EC -eq 6 ] && echo ok || echo fail" \
+      2>/dev/null || echo "fail")
+
+    if [[ "$DNS_OK" == "ok" ]]; then
+      ok "Container DNS: ${CLUSTER_HOST} resolves ✓"
+    else
+      fail "Container DNS: cannot resolve ${CLUSTER_HOST} from inside containers"
+      echo -e "       This is a Docker Desktop DNS stale cache issue (happens after long uptime)."
+      if [[ "$FIX" == "--fix" ]]; then
+        echo -e "       Restarting all containers..."
+        docker compose -f "$DEMO_DIR/docker-compose.yml" restart > /dev/null 2>&1
+        ok "All containers restarted — DNS cache refreshed"
+      else
+        echo -e "       Fix: docker compose -f demo/docker-compose.yml restart"
+      fi
+    fi
+  else
+    warn "Container DNS: skipped (${CONTAINER} not running)"
+  fi
+else
+  warn "Container DNS: skipped (demo/.env not found)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}═══════════════════════════════════════════════════${NC}"
