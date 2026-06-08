@@ -1,7 +1,38 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter.client;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.protobuf.DescriptorProtos.DescriptorProto;
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto;
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Label;
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Type;
+import com.google.protobuf.DescriptorProtos.FileDescriptorProto;
+import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Descriptors.FileDescriptor;
+import com.google.protobuf.DynamicMessage;
+import io.streamnative.filter.common.ClientType;
+import io.streamnative.filter.common.ValueSchemaInfo;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
+import org.apache.pulsar.client.impl.schema.ProtobufNativeSchemaUtils;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.Producer;
@@ -25,8 +56,11 @@ import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -52,6 +86,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SessionIT {
 
     private static final Logger LOG = LoggerFactory.getLogger(SessionIT.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /** Minimal POJO for the typed-value end-to-end case. Public fields so Jackson/Schema.JSON map it. */
+    public static class Trade {
+        public String sym;
+        public double price;
+    }
 
     private static final String FN_TENANT          = "public";
     private static final String FN_NAMESPACE       = "default";
@@ -63,6 +104,13 @@ class SessionIT {
 
     private static final String INPUT_TOPIC        = "persistent://public/default/trades-sdk-it";
     private static final String EXTRA_INPUT_TOPIC  = "persistent://public/default/extra-sdk-it";
+
+    // Each value-field test gets its own input topic so its spawned filter has a distinct name; this
+    // keeps the snapshot-diff readiness check (waitForNewSpawnedFilter) from latching onto a stale
+    // filter left mid-teardown by a sibling value-field test running earlier in the same broker.
+    private static final String VF_AVRO_TOPIC      = "persistent://public/default/trades-vf-avro-sdk-it";
+    private static final String VF_JSON_TOPIC      = "persistent://public/default/trades-vf-json-sdk-it";
+    private static final String VF_PROTOBUF_TOPIC  = "persistent://public/default/trades-vf-protobuf-sdk-it";
 
     private static final Path FILTER_NAR       = findFilterNar();
     private static final Path ORCHESTRATOR_NAR = findOrchestratorNar();
@@ -86,6 +134,9 @@ class SessionIT {
         admin.topics().createNonPartitionedTopic(ORCH_STATE_TOPIC);
         admin.topics().createNonPartitionedTopic(INPUT_TOPIC);
         admin.topics().createNonPartitionedTopic(EXTRA_INPUT_TOPIC);
+        admin.topics().createNonPartitionedTopic(VF_AVRO_TOPIC);
+        admin.topics().createNonPartitionedTopic(VF_JSON_TOPIC);
+        admin.topics().createNonPartitionedTopic(VF_PROTOBUF_TOPIC);
         admin.namespaces().setAutoTopicCreation("public/default",
                 org.apache.pulsar.common.policies.data.AutoTopicCreationOverride.builder()
                         .allowAutoTopicCreation(true)
@@ -174,6 +225,167 @@ class SessionIT {
 
             assertTopicEventuallyDeleted(privateTopic, 15_000L);
         }
+    }
+
+    @Test
+    void typedJsonSchemaEndToEnd() throws Exception {
+        // The filter forwards raw value bytes verbatim; the SDK consumer decodes them client-side
+        // with the supplied Schema.JSON. Produce JSON bytes through the byte[] inputProducer, then
+        // consume as a typed Trade. The key stays a String (Pulsar has no key schema).
+        try (Session session = newSession();
+             Consumer<Trade> consumer = session.newConsumer(Schema.JSON(Trade.class))
+                     .topic(INPUT_TOPIC)
+                     .selector("region = 'US'")
+                     .subscribe()) {
+
+            waitForSpawnedFilter(INPUT_TOPIC);
+
+            Trade aapl = new Trade(); aapl.sym = "AAPL"; aapl.price = 195.5;
+            Trade bmw  = new Trade(); bmw.sym  = "BMW";  bmw.price  = 88.0;
+            inputProducer.newMessage().key("AAPL").property("region", "US")
+                    .value(JSON.writeValueAsBytes(aapl)).send();
+            inputProducer.newMessage().key("BMW").property("region", "DE")
+                    .value(JSON.writeValueAsBytes(bmw)).send();
+
+            Message<Trade> m1 = consumer.receive(30, TimeUnit.SECONDS);
+            assertThat(m1).as("US message should pass the selector").isNotNull();
+            // Key is still the plain String key.
+            assertThat(m1.getKey()).isEqualTo("AAPL");
+            // Value decoded client-side via Schema.JSON — no IncompatibleSchemaException.
+            Trade decoded = m1.getValue();
+            assertThat(decoded.sym).isEqualTo("AAPL");
+            assertThat(decoded.price).isEqualTo(195.5);
+
+            assertThat(consumer.receive(5, TimeUnit.SECONDS))
+                    .as("Only US messages should pass the selector").isNull();
+            consumer.acknowledge(m1);
+        }
+    }
+
+    // ---------------------------------------------------------------- value-schema server-side decode
+    //
+    // These three exercise the filter decoding the message VALUE on the broker — via the unshaded
+    // avro / protobuf-java the NAR bundles, or the best-effort JSON path — to evaluate a selector on
+    // a value field. The two messages in each test share identical (absent) properties and differ
+    // ONLY in the value field `price`; the private topic is consumed as raw bytes, so a routed
+    // message proves the decode happened server-side (the typed client-side decode is covered by
+    // typedJsonSchemaEndToEnd). They are the regression guard for the bundled avro-/protobuf-java/
+    // jackson versions: a library bump that breaks the unshaded-vs-broker-shaded coexistence fails
+    // these against a live broker, where the byte-level unit tests can't.
+
+    @Test
+    void avroValueFieldSelectorDecodedServerSide() throws Exception {
+        Schema<Trade> avro = Schema.AVRO(Trade.class);
+        ValueSchemaInfo vsi = Session.toValueSchemaInfo(avro.getSchemaInfo());
+        byte[] routed = singleRoutedByValueField(vsi, "avro", VF_AVRO_TOPIC,
+                avro.encode(tradeOf("AAPL", 195.5)), "AAPL",
+                avro.encode(tradeOf("PENNY", 5.0)), "PENNY");
+        Trade decoded = avro.decode(routed);
+        assertThat(decoded.sym).isEqualTo("AAPL");
+        assertThat(decoded.price).isEqualTo(195.5);
+    }
+
+    @Test
+    void jsonValueFieldSelectorDecodedServerSide() throws Exception {
+        Schema<Trade> json = Schema.JSON(Trade.class);
+        ValueSchemaInfo vsi = Session.toValueSchemaInfo(json.getSchemaInfo());
+        byte[] routed = singleRoutedByValueField(vsi, "json", VF_JSON_TOPIC,
+                JSON.writeValueAsBytes(tradeOf("MSFT", 420.0)), "MSFT",
+                JSON.writeValueAsBytes(tradeOf("CENT", 1.0)), "CENT");
+        Trade decoded = JSON.readValue(routed, Trade.class);
+        assertThat(decoded.sym).isEqualTo("MSFT");
+        assertThat(decoded.price).isEqualTo(420.0);
+    }
+
+    @Test
+    void protobufNativeValueFieldSelectorDecodedServerSide() throws Exception {
+        // PROTOBUF_NATIVE carries the descriptor in the schema; the filter rebuilds it and decodes
+        // with bundled protobuf-java. Build the descriptor by hand (no generated class) and serialize
+        // it exactly as Pulsar does.
+        Descriptor trade = tradeProtoDescriptor();
+        ValueSchemaInfo vsi = new ValueSchemaInfo("Trade", "PROTOBUF_NATIVE",
+                Base64.getEncoder().encodeToString(ProtobufNativeSchemaUtils.serialize(trade)), null);
+        byte[] routed = singleRoutedByValueField(vsi, "protobuf", VF_PROTOBUF_TOPIC,
+                protoTrade(trade, "GOOG", 1500.0), "GOOG",
+                protoTrade(trade, "MICRO", 2.0), "MICRO");
+        DynamicMessage got = DynamicMessage.parseFrom(trade, routed);
+        assertThat(got.getField(trade.findFieldByName("sym"))).isEqualTo("GOOG");
+        assertThat(((Number) got.getField(trade.findFieldByName("price"))).doubleValue()).isEqualTo(1500.0);
+    }
+
+    /**
+     * Registers a {@code price > 100} value-field selector carrying {@code vsi} on {@code inputTopic},
+     * produces {@code hi} (price&gt;100) then {@code lo} (price&le;100) as raw value bytes, and asserts
+     * exactly the {@code hi} record is routed to the private topic — i.e. the filter decoded the value
+     * server-side. Returns the routed value bytes for format-specific checks.
+     *
+     * <p>Each caller passes its own {@code inputTopic} and we wait for the specific filter newly
+     * spawned for this query (see {@link #waitForNewSpawnedFilter}), so sibling value-field tests
+     * cycling filters in the same broker can't make us produce into a stale/torn-down filter.
+     */
+    private byte[] singleRoutedByValueField(ValueSchemaInfo vsi, String label, String inputTopic,
+                                            byte[] hi, String hiKey,
+                                            byte[] lo, String loKey) throws Exception {
+        try (Session session = newSession();
+             Producer<byte[]> producer = client.newProducer(Schema.BYTES).topic(inputTopic).create()) {
+            Set<String> filtersBefore = spawnedFilterNames();
+            PrivateQuery pq = session.registerPrivateQuery(List.of(inputTopic), "price > 100",
+                    null, vsi.getName(), vsi, ClientType.PULSAR);
+            try (Consumer<byte[]> consumer = client.newConsumer(Schema.BYTES)
+                    .topic(pq.privateTopic())
+                    .subscriptionName("vf-it-" + pq.queryId())
+                    .subscribe()) {
+
+                waitForNewSpawnedFilter(filtersBefore);
+
+                producer.newMessage().key(hiKey).value(hi).send();
+                producer.newMessage().key(loKey).value(lo).send();
+
+                Message<byte[]> m = consumer.receive(30, TimeUnit.SECONDS);
+                assertThat(m).as("price>100 %s value should pass the value-field selector", label).isNotNull();
+                byte[] data = m.getData();
+                consumer.acknowledge(m);
+                assertThat(consumer.receive(5, TimeUnit.SECONDS))
+                        .as("price<=100 %s value must be filtered out server-side", label).isNull();
+                return data;
+            } finally {
+                session.retirePrivateQuery(pq);
+            }
+        }
+    }
+
+    private static Trade tradeOf(String sym, double price) {
+        Trade t = new Trade();
+        t.sym = sym;
+        t.price = price;
+        return t;
+    }
+
+    /** proto3 {@code Trade { string sym=1; double price=2; int32 qty=3; bool active=4; }}. */
+    private static Descriptor tradeProtoDescriptor() throws Exception {
+        FileDescriptorProto file = FileDescriptorProto.newBuilder()
+                .setName("trade_it.proto").setSyntax("proto3")
+                .addMessageType(DescriptorProto.newBuilder().setName("Trade")
+                        .addField(protoField("sym", 1, Type.TYPE_STRING))
+                        .addField(protoField("price", 2, Type.TYPE_DOUBLE))
+                        .addField(protoField("qty", 3, Type.TYPE_INT32))
+                        .addField(protoField("active", 4, Type.TYPE_BOOL)))
+                .build();
+        return FileDescriptor.buildFrom(file, new FileDescriptor[0]).findMessageTypeByName("Trade");
+    }
+
+    private static FieldDescriptorProto protoField(String name, int number, Type type) {
+        return FieldDescriptorProto.newBuilder()
+                .setName(name).setNumber(number).setType(type).setLabel(Label.LABEL_OPTIONAL).build();
+    }
+
+    private static byte[] protoTrade(Descriptor trade, String sym, double price) {
+        return DynamicMessage.newBuilder(trade)
+                .setField(trade.findFieldByName("sym"), sym)
+                .setField(trade.findFieldByName("price"), price)
+                .setField(trade.findFieldByName("qty"), 1)
+                .setField(trade.findFieldByName("active"), true)
+                .build().toByteArray();
     }
 
     @Test
@@ -291,6 +503,50 @@ class SessionIT {
      * {@code TopicKeySanitizer} the orchestrator uses, computed via the function-status admin API
      * — we don't reach into the orchestrator's internal class here.
      */
+    /** Names of currently-known spawned filter functions (excludes the orchestrator itself). */
+    private Set<String> spawnedFilterNames() throws Exception {
+        Set<String> names = new HashSet<>();
+        for (String name : admin.functions().getFunctions(FN_TENANT, FN_NAMESPACE)) {
+            if (name.startsWith("selector-filter-") && !name.equals(ORCH_NAME)) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    /**
+     * Waits for a filter function that did <em>not</em> exist in {@code before} to reach RUNNING.
+     * Unlike {@link #waitForSpawnedFilter}, this ignores stale/dying filters left by earlier tests —
+     * essential when value-field tests each register a query (on their own input topic) and retire it,
+     * cycling filters within one broker lifetime. Matching only a brand-new function name guarantees we
+     * gate on <em>this</em> test's filter, never a sibling's leftover.
+     */
+    private void waitForNewSpawnedFilter(Set<String> before) throws Exception {
+        long deadline = System.currentTimeMillis() + 90_000L;
+        String foundName = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                for (String name : admin.functions().getFunctions(FN_TENANT, FN_NAMESPACE)) {
+                    if (!name.startsWith("selector-filter-") || name.equals(ORCH_NAME) || before.contains(name)) {
+                        continue;
+                    }
+                    FunctionStatus status = admin.functions().getFunctionStatus(FN_TENANT, FN_NAMESPACE, name);
+                    if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) {
+                        foundName = name;
+                        break;
+                    }
+                }
+                if (foundName != null) break;
+            } catch (Exception ignored) {}
+            Thread.sleep(500);
+        }
+        if (foundName == null) {
+            throw new IllegalStateException("No newly-spawned filter function reached RUNNING within 90s");
+        }
+        LOG.info("Newly-spawned filter function {} is RUNNING", foundName);
+        Thread.sleep(3_000); // grace for the filter function's TableView to load the QueryMessage
+    }
+
     private void waitForSpawnedFilter(String inputTopic) throws Exception {
         // The orchestrator names spawned functions "selector-filter-<sanitized>-<8-hex-hash>".
         // We don't reproduce the sanitizer here; instead we poll the function list for any name

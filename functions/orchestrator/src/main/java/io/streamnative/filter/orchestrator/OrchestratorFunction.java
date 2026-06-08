@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter.orchestrator;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -271,14 +290,15 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             registry.putInputTopicEntry(key, entry);
 
             publishQuery(entry.getControlTopic(), queryId, normalizedSelector(req.getSelector()),
-                    req.getOutputTopic());
+                    req.getOutputTopic(), entry.getValueSchema());
             publishedControlTopics.add(entry.getControlTopic());
             publishedRegistryKeys.add(key);
         }
 
         registry.putQueryEntry(queryId, new QueryEntry(
                 req.getOutputTopic(), publishedControlTopics, publishedRegistryKeys,
-                Instant.now(clock).toString(), normalizedSelector(req.getSelector())));
+                Instant.now(clock).toString(), normalizedSelector(req.getSelector()),
+                req.getValueSchema()));
         ctx.recordMetric("orchestrator.requests.accepted", 1);
         LOG.info("REGISTER queryId={} outputTopic={} controlTopics={}",
                 queryId, req.getOutputTopic(), publishedControlTopics);
@@ -296,7 +316,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         }
         String selector = normalizedSelector(req.getSelector());
         for (String controlTopic : q.getControlTopics()) {
-            publishQuery(controlTopic, queryId, selector, q.getOutputTopic());
+            publishQuery(controlTopic, queryId, selector, q.getOutputTopic(), q.getValueSchema());
         }
         // Persist the new selector (authoritative for reconcile repopulation) and touch lastSeen —
         // a MODIFY counts as a liveness signal just like a heartbeat.
@@ -400,9 +420,10 @@ public class OrchestratorFunction implements Function<byte[], Void> {
      * Publish a {@link QueryMessage} to a per-function control topic. The filter function reads
      * this topic via TableView and adds/updates the compiled selector for the queryId key.
      */
-    private void publishQuery(String controlTopic, String queryId, String selector, String outputTopic)
+    private void publishQuery(String controlTopic, String queryId, String selector, String outputTopic,
+                              io.streamnative.filter.common.ValueSchemaInfo valueSchema)
             throws PulsarClientException {
-        QueryMessage qm = new QueryMessage("session-" + queryId, selector, outputTopic);
+        QueryMessage qm = new QueryMessage("session-" + queryId, selector, outputTopic, valueSchema);
         byte[] payload;
         try {
             payload = MAPPER.writeValueAsBytes(qm);

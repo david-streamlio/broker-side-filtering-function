@@ -22,6 +22,30 @@
             "description": "Fully-qualified Pulsar topic the function writes matching messages to. The function honors forwardSourceMessageProperty and retainKeyOrdering, so payload bytes, key, and user properties are forwarded verbatim. Must be a persistent or non-persistent Pulsar topic FQN.",
             "minLength": 1,
             "pattern": "^(persistent|non-persistent)://[^/]+/[^/]+/[^/]+$"
+        },
+        "valueSchema": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "description": "Full description of the consumer's value schema (forwarded by the orchestrator from the originating FilterRequest) so the function can decode the message value for schema-aware filtering. Optional; null/absent when the registering SDK supplied no value schema (byte[] / Kafka paths). Stored on the compiled query; the function uses it to construct a value decoder.",
+            "properties": {
+                "name": {
+                    "type": ["string", "null"],
+                    "description": "Schema name — Pulsar SchemaInfo.getName()."
+                },
+                "type": {
+                    "type": ["string", "null"],
+                    "description": "Schema type — Pulsar SchemaType.name(): JSON, AVRO, PROTOBUF_NATIVE, STRING, BYTES, etc."
+                },
+                "definition": {
+                    "type": ["string", "null"],
+                    "description": "Base64 of Pulsar SchemaInfo.getSchema(): Avro .avsc / JSON-schema text / PROTOBUF_NATIVE descriptor. Null/empty for STRING/BYTES."
+                },
+                "properties": {
+                    "type": ["object", "null"],
+                    "additionalProperties": { "type": "string" },
+                    "description": "Pulsar SchemaInfo.getProperties(). Optional."
+                }
+            }
         }
     },
     "examples": [

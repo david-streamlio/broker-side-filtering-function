@@ -1,9 +1,29 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter.orchestrator;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.streamnative.filter.common.ValueSchemaInfo;
 
 import java.time.Instant;
 import java.util.List;
@@ -42,18 +62,33 @@ final class QueryEntry {
     private final List<String> registryKeys;
     private final String lastSeen;
     private final String selector;
+    /**
+     * Value schema forwarded to the per-function {@code QueryMessage}. Persisted on the QueryEntry
+     * (not just the RegistryEntry) because MODIFY and the existence-reconcile loop republish the
+     * QueryMessage from this entry and must preserve the schema across hot-reloads. {@code null} for
+     * the byte[] / Kafka paths.
+     */
+    private final ValueSchemaInfo valueSchema;
 
     @JsonCreator
     QueryEntry(@JsonProperty("outputTopic") String outputTopic,
                @JsonProperty("controlTopics") List<String> controlTopics,
                @JsonProperty("registryKeys") List<String> registryKeys,
                @JsonProperty("lastSeen") String lastSeen,
-               @JsonProperty("selector") String selector) {
+               @JsonProperty("selector") String selector,
+               @JsonProperty("valueSchema") ValueSchemaInfo valueSchema) {
         this.outputTopic   = Objects.requireNonNull(outputTopic, "outputTopic");
         this.controlTopics = List.copyOf(controlTopics);
         this.registryKeys  = registryKeys == null ? null : List.copyOf(registryKeys);
         this.lastSeen      = lastSeen;
         this.selector      = selector;
+        this.valueSchema   = valueSchema;
+    }
+
+    /** 5-arg constructor without a value schema — preserved for existing callers/tests. */
+    QueryEntry(String outputTopic, List<String> controlTopics, List<String> registryKeys,
+               String lastSeen, String selector) {
+        this(outputTopic, controlTopics, registryKeys, lastSeen, selector, null);
     }
 
     /** 4-arg constructor — used by callers that don't yet persist the selector. */
@@ -77,13 +112,15 @@ final class QueryEntry {
     public List<String> getRegistryKeys()  { return registryKeys; }
     public String getLastSeen()            { return lastSeen; }
     public String getSelector()            { return selector; }
+    public ValueSchemaInfo getValueSchema() { return valueSchema; }
 
     /**
      * Return a copy with {@code lastSeen} stamped to {@code now}. Used by REGISTER (creation),
      * MODIFY (touch), and HEARTBEAT (touch). All other fields are preserved.
      */
     QueryEntry withLastSeen(Instant now) {
-        return new QueryEntry(outputTopic, controlTopics, registryKeys, now.toString(), selector);
+        return new QueryEntry(outputTopic, controlTopics, registryKeys, now.toString(), selector,
+                valueSchema);
     }
 
     /**
@@ -92,7 +129,8 @@ final class QueryEntry {
      * — callers that also want a liveness touch chain {@link #withLastSeen(Instant)}.
      */
     QueryEntry withSelector(String newSelector) {
-        return new QueryEntry(outputTopic, controlTopics, registryKeys, lastSeen, newSelector);
+        return new QueryEntry(outputTopic, controlTopics, registryKeys, lastSeen, newSelector,
+                valueSchema);
     }
 
     @Override
@@ -102,12 +140,13 @@ final class QueryEntry {
                 && Objects.equals(controlTopics, that.controlTopics)
                 && Objects.equals(registryKeys, that.registryKeys)
                 && Objects.equals(lastSeen, that.lastSeen)
-                && Objects.equals(selector, that.selector);
+                && Objects.equals(selector, that.selector)
+                && Objects.equals(valueSchema, that.valueSchema);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(outputTopic, controlTopics, registryKeys, lastSeen, selector);
+        return Objects.hash(outputTopic, controlTopics, registryKeys, lastSeen, selector, valueSchema);
     }
 
     @Override
@@ -116,6 +155,7 @@ final class QueryEntry {
                 + "', controlTopics=" + controlTopics
                 + ", registryKeys=" + registryKeys
                 + ", lastSeen='" + lastSeen
-                + "', selector='" + selector + "'}";
+                + "', selector='" + selector
+                + "', valueSchema=" + valueSchema + "}";
     }
 }

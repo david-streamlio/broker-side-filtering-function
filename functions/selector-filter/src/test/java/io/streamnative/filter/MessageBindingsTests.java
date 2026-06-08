@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter;
 
 import org.apache.pulsar.client.api.Message;
@@ -466,5 +485,96 @@ class MessageBindingsTests {
 
         assertThat(topCoins.matches(new MessageBindings("BTC", null, Map.of(), btc))).isTrue();
         assertThat(topCoins.matches(new MessageBindings("ADA", null, Map.of(), ada))).isFalse();
+    }
+
+    // ── Structured ValueDecoder integration ───────────────────────────────────
+
+    @Test
+    void valueFieldsResolvedViaDecoder() {
+        ValueDecoder decoder = payload -> Map.of("price", 195.5, "side", "buy");
+        MessageBindings b = new MessageBindings("AAPL", null, Map.of(), new byte[]{1, 2, 3});
+        assertThat(b.lookup("price", decoder)).isEqualTo(195.5);
+        assertThat(b.lookup("side", decoder)).isEqualTo("buy");
+        assertThat(b.lookup("missing", decoder)).isNull();
+    }
+
+    @Test
+    void propertyShadowsDecodedValueField() {
+        ValueDecoder decoder = payload -> Map.of("region", "FROM_VALUE");
+        MessageBindings b = new MessageBindings("k", null, Map.of("region", "FROM_PROP"), new byte[]{1});
+        assertThat(b.lookup("region", decoder)).isEqualTo("FROM_PROP");
+    }
+
+    @Test
+    void fallsBackToJsonWhenNoDecoder() {
+        byte[] payload = json("{\"price\":195.5}");
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        // lookup(name, null) is the explicit no-decoder form; resolves via best-effort JSON.
+        assertThat(((Number) b.lookup("price", null)).doubleValue()).isEqualTo(195.5);
+    }
+
+    @Test
+    void fallsBackToJsonWhenDecoderReturnsNull() {
+        // Decoder present but decode fails (e.g. corrupt bytes) → best-effort JSON still tried.
+        ValueDecoder failing = payload -> null;
+        byte[] payload = json("{\"price\":42}");
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        assertThat(((Number) b.lookup("price", failing)).intValue()).isEqualTo(42);
+    }
+
+    @Test
+    void decoderInvokedAtMostOncePerBindings() {
+        int[] calls = {0};
+        ValueDecoder counting = payload -> {
+            calls[0]++;
+            return Map.of("a", 1, "b", 2);
+        };
+        MessageBindings b = new MessageBindings("k", null, Map.of(), new byte[]{1});
+        b.lookup("a", counting);
+        b.lookup("b", counting);
+        b.lookup("a", counting);
+        assertThat(calls[0]).isEqualTo(1);
+    }
+
+    @Test
+    void nestedJsonPathResolved() {
+        byte[] payload = json("{\"address\":{\"city\":\"NYC\",\"zip\":10001},\"price\":50}");
+        MessageBindings b = new MessageBindings("k", null, Map.of(), payload);
+        assertThat(b.lookup("address.city")).isEqualTo("NYC");
+        assertThat(((Number) b.lookup("address.zip")).intValue()).isEqualTo(10001);
+        assertThat(b.lookup("address.missing")).isNull();
+        assertThat(b.lookup("address.city.deeper")).isNull(); // can't descend past a leaf
+        assertThat(b.lookup("missing.x")).isNull();
+    }
+
+    @Test
+    void nestedDecoderPathResolved() {
+        ValueDecoder decoder = payload -> Map.of(
+                "address", Map.of("city", "NYC", "zip", 10001),
+                "price", 50L);
+        MessageBindings b = new MessageBindings("k", null, Map.of(), new byte[]{1});
+        assertThat(b.lookup("address.city", decoder)).isEqualTo("NYC");
+        assertThat(((Number) b.lookup("address.zip", decoder)).intValue()).isEqualTo(10001);
+        assertThat(b.lookup("price", decoder)).isEqualTo(50L);
+        assertThat(b.lookup("address.missing", decoder)).isNull();
+        assertThat(b.lookup("missing.x", decoder)).isNull();
+    }
+
+    @Test
+    void avroValueFieldSelectorEndToEnd() throws Exception {
+        org.apache.pulsar.client.api.Schema<AvroValueDecoderTests.Trade> schema =
+                org.apache.pulsar.client.api.Schema.AVRO(AvroValueDecoderTests.Trade.class);
+        AvroValueDecoderTests.Trade t = new AvroValueDecoderTests.Trade();
+        t.sym = "AAPL";
+        t.price = 195.5;
+        byte[] payload = schema.encode(t);
+        ValueDecoder decoder = new AvroValueDecoder(
+                new String(schema.getSchemaInfo().getSchema(), StandardCharsets.UTF_8));
+
+        MessageBindings b = new MessageBindings("AAPL", null, Map.of(), payload);
+        SelectorEvaluator priceFilter = SelectorEvaluator.compile("price > 100 AND sym = 'AAPL'");
+
+        assertThat(priceFilter.matches(b, decoder)).isTrue();
+        assertThat(SelectorEvaluator.compile("price > 500").matches(b, decoder)).isFalse();
     }
 }

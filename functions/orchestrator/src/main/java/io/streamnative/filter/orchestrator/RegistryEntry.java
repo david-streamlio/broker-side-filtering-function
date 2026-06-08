@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter.orchestrator;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
@@ -6,6 +25,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.streamnative.filter.common.ClientType;
 import io.streamnative.filter.common.FilterRequest;
+import io.streamnative.filter.common.ValueSchemaInfo;
 
 import java.time.Instant;
 import java.util.Collections;
@@ -37,6 +57,13 @@ final class RegistryEntry {
     private final String filterFunctionName;
     private final String keyDeserializer;
     private final String valueDeserializer;
+    /**
+     * Full value schema forwarded from the originating {@link FilterRequest}, carried so the
+     * orchestrator can pass it into each per-function {@code QueryMessage}. Schema-mismatch detection
+     * still uses {@link #valueDeserializer} (the schema name); this field is the decode payload.
+     * {@code null} for the byte[] / Kafka paths.
+     */
+    private final ValueSchemaInfo valueSchema;
     private final ClientType clientType;
     private final String createdAt;
     private final Set<String> activeQueryIds;
@@ -57,6 +84,7 @@ final class RegistryEntry {
                   @JsonProperty("filterFunctionName") String filterFunctionName,
                   @JsonProperty("keyDeserializer") String keyDeserializer,
                   @JsonProperty("valueDeserializer") String valueDeserializer,
+                  @JsonProperty("valueSchema") ValueSchemaInfo valueSchema,
                   @JsonProperty("clientType") ClientType clientType,
                   @JsonProperty("createdAt") String createdAt,
                   @JsonProperty("activeQueryIds") Set<String> activeQueryIds,
@@ -66,6 +94,7 @@ final class RegistryEntry {
         this.filterFunctionName = Objects.requireNonNull(filterFunctionName, "filterFunctionName");
         this.keyDeserializer    = keyDeserializer;
         this.valueDeserializer  = valueDeserializer;
+        this.valueSchema        = valueSchema;
         this.clientType         = clientType;
         this.createdAt          = createdAt;
         this.activeQueryIds     = activeQueryIds == null
@@ -73,6 +102,18 @@ final class RegistryEntry {
                 : Collections.unmodifiableSet(new LinkedHashSet<>(activeQueryIds));
         this.idleSince          = idleSince;
         this.isPattern          = isPattern;
+    }
+
+    /**
+     * 9-arg constructor without a value schema — preserved for existing callers/tests. Delegates
+     * to the canonical constructor with {@code valueSchema = null}.
+     */
+    RegistryEntry(String controlTopic, String filterFunctionName,
+                  String keyDeserializer, String valueDeserializer,
+                  ClientType clientType, String createdAt,
+                  Set<String> activeQueryIds, String idleSince, boolean isPattern) {
+        this(controlTopic, filterFunctionName, keyDeserializer, valueDeserializer, null,
+                clientType, createdAt, activeQueryIds, idleSince, isPattern);
     }
 
     /** Legacy 8-arg constructor — pre-dates the isPattern flag; defaults it to {@code false}. */
@@ -96,14 +137,15 @@ final class RegistryEntry {
                                   FilterRequest req) {
         boolean pattern = req.getTopicsPattern() != null && !req.getTopicsPattern().isBlank();
         return new RegistryEntry(controlTopic, filterFunctionName,
-                req.getKeyDeserializer(), req.getValueDeserializer(), req.getClientType(),
-                Instant.now().toString(), null, null, pattern);
+                req.getKeyDeserializer(), req.getValueDeserializer(), req.getValueSchema(),
+                req.getClientType(), Instant.now().toString(), null, null, pattern);
     }
 
     public String getControlTopic()                  { return controlTopic; }
     public String getFilterFunctionName()            { return filterFunctionName; }
     public String getKeyDeserializer()               { return keyDeserializer; }
     public String getValueDeserializer()             { return valueDeserializer; }
+    public ValueSchemaInfo getValueSchema()          { return valueSchema; }
     public ClientType getClientType()                { return clientType; }
     public String getCreatedAt()                     { return createdAt; }
     public Set<String> getActiveQueryIds()           { return activeQueryIds; }
@@ -152,6 +194,7 @@ final class RegistryEntry {
                 filterFunctionName,
                 keyDeserializer == null ? req.getKeyDeserializer() : keyDeserializer,
                 valueDeserializer == null ? req.getValueDeserializer() : valueDeserializer,
+                valueSchema == null ? req.getValueSchema() : valueSchema,
                 clientType == null ? req.getClientType() : clientType,
                 createdAt,
                 activeQueryIds,
@@ -170,7 +213,7 @@ final class RegistryEntry {
         if (activeQueryIds != null) next.addAll(activeQueryIds);
         next.add(queryId);
         return new RegistryEntry(controlTopic, filterFunctionName,
-                keyDeserializer, valueDeserializer, clientType, createdAt,
+                keyDeserializer, valueDeserializer, valueSchema, clientType, createdAt,
                 next, null, isPattern);
     }
 
@@ -186,7 +229,7 @@ final class RegistryEntry {
         next.remove(queryId);
         String nextIdleSince = next.isEmpty() ? now.toString() : null;
         return new RegistryEntry(controlTopic, filterFunctionName,
-                keyDeserializer, valueDeserializer, clientType, createdAt,
+                keyDeserializer, valueDeserializer, valueSchema, clientType, createdAt,
                 next, nextIdleSince, isPattern);
     }
 
@@ -207,6 +250,7 @@ final class RegistryEntry {
                 && Objects.equals(filterFunctionName, that.filterFunctionName)
                 && Objects.equals(keyDeserializer, that.keyDeserializer)
                 && Objects.equals(valueDeserializer, that.valueDeserializer)
+                && Objects.equals(valueSchema, that.valueSchema)
                 && clientType == that.clientType
                 && Objects.equals(createdAt, that.createdAt)
                 && Objects.equals(activeQueryIds, that.activeQueryIds)
@@ -217,7 +261,8 @@ final class RegistryEntry {
     @Override
     public int hashCode() {
         return Objects.hash(controlTopic, filterFunctionName, keyDeserializer,
-                valueDeserializer, clientType, createdAt, activeQueryIds, idleSince, isPattern);
+                valueDeserializer, valueSchema, clientType, createdAt, activeQueryIds, idleSince,
+                isPattern);
     }
 
     @Override
@@ -226,7 +271,8 @@ final class RegistryEntry {
                 + "', filterFunctionName='" + filterFunctionName
                 + "', keyDeserializer='" + keyDeserializer
                 + "', valueDeserializer='" + valueDeserializer
-                + "', clientType=" + clientType
+                + "', valueSchema=" + valueSchema
+                + ", clientType=" + clientType
                 + ", createdAt='" + createdAt
                 + "', activeQueryIds=" + activeQueryIds
                 + ", idleSince='" + idleSince

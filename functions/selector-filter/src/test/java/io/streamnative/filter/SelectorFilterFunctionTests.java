@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter;
 
 import org.apache.pulsar.client.api.Message;
@@ -15,6 +34,7 @@ import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -93,6 +113,16 @@ class SelectorFilterFunctionTests {
         return json.getBytes(StandardCharsets.UTF_8);
     }
 
+    /** Like {@link #queryJson} but embeds a value schema in the QueryMessage. */
+    private byte[] queryJsonWithSchema(String selector, String outputTopic,
+                                       String schemaName, String schemaType, String definitionBase64) {
+        String json = String.format(
+                "{\"name\":\"q\",\"selector\":\"%s\",\"outputTopic\":\"%s\","
+                + "\"valueSchema\":{\"name\":\"%s\",\"type\":\"%s\",\"definition\":\"%s\"}}",
+                selector.replace("\"", "\\\""), outputTopic, schemaName, schemaType, definitionBase64);
+        return json.getBytes(StandardCharsets.UTF_8);
+    }
+
     // ---------------------- initialize ----------------------
 
     @Test
@@ -127,6 +157,37 @@ class SelectorFilterFunctionTests {
 
         fn.loadQueryForTest("q1", queryJson("__key__ = 'AAPL'", "persistent://public/filtered/out-1"));
         assertThat(fn.activeQueryCountForTest()).isEqualTo(1);
+    }
+
+    @Test
+    void valueSchemaIsStoredOnCompiledQuery() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        fn.loadQueryForTest("q1", queryJsonWithSchema(
+                "region = 'US'", "persistent://public/filtered/out-1",
+                "com.acme.Trade", "AVRO", "eyJ0eXBlIjoicmVjb3JkIn0="));
+
+        CompiledQuery cq = fn.queryForTest("q1");
+        assertThat(cq).isNotNull();
+        assertThat(cq.valueSchema()).isNotNull();
+        assertThat(cq.valueSchema().getName()).isEqualTo("com.acme.Trade");
+        assertThat(cq.valueSchema().getType()).isEqualTo("AVRO");
+        assertThat(cq.valueSchema().getDefinition()).isEqualTo("eyJ0eXBlIjoicmVjb3JkIn0=");
+        // PR1: the schema is stored but does not change matching — selector still compiles/evaluates.
+        assertThat(cq.evaluator().getExpression()).isEqualTo("region = 'US'");
+    }
+
+    @Test
+    void absentValueSchemaLeavesCompiledQueryNull() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        fn.loadQueryForTest("q1", queryJson("region = 'US'", "persistent://public/filtered/out-1"));
+
+        assertThat(fn.queryForTest("q1").valueSchema()).isNull();
     }
 
     @Test
@@ -223,6 +284,90 @@ class SelectorFilterFunctionTests {
         verify(record, never()).fail();
         // No source message present (record.getMessage() is empty) → no event time to forward.
         verify(builder, never()).eventTime(anyLong());
+    }
+
+    @Test
+    void processAvroValueFieldSelectorMatchesAndFansOut() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        String outputTopic = "persistent://public/filtered/avro-out";
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(outputTopic, CompletableFuture.completedFuture(null));
+
+        // Encode a record with Pulsar's Avro schema; carry the same .avsc in the query's valueSchema.
+        // "price" is not a user property, so the selector resolves it from the decoded Avro value.
+        Schema<AvroValueDecoderTests.Trade> avro = Schema.AVRO(AvroValueDecoderTests.Trade.class);
+        AvroValueDecoderTests.Trade t = new AvroValueDecoderTests.Trade();
+        t.sym = "AAPL";
+        t.price = 195.5;
+        byte[] payload = avro.encode(t);
+        String avscB64 = Base64.getEncoder().encodeToString(avro.getSchemaInfo().getSchema());
+
+        fn.loadQueryForTest("q1", queryJsonWithSchema(
+                "price > 100", outputTopic, "AvroTrade", "AVRO", avscB64));
+
+        CompletableFuture<Void> result = fn.process(payload, ctx);
+
+        assertThat(result).isCompleted();
+        verify(builder).value(payload);
+        verify(builder).sendAsync();
+        verify(record).ack();
+        verify(record, never()).fail();
+    }
+
+    @Test
+    void processAvroValueFieldSelectorDropsNonMatch() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        Schema<AvroValueDecoderTests.Trade> avro = Schema.AVRO(AvroValueDecoderTests.Trade.class);
+        AvroValueDecoderTests.Trade t = new AvroValueDecoderTests.Trade();
+        t.sym = "BMW";
+        t.price = 50.0;
+        byte[] payload = avro.encode(t);
+        String avscB64 = Base64.getEncoder().encodeToString(avro.getSchemaInfo().getSchema());
+
+        fn.loadQueryForTest("q1", queryJsonWithSchema(
+                "price > 100", "persistent://public/filtered/avro-out", "AvroTrade", "AVRO", avscB64));
+
+        CompletableFuture<Void> result = fn.process(payload, ctx);
+
+        assertThat(result).isCompleted();
+        verify(record).ack();
+        verify(ctx, never()).newOutputMessage(anyString(), any(Schema.class));
+    }
+
+    @Test
+    void processProtobufNativeValueFieldSelectorMatchesAndFansOut() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        String outputTopic = "persistent://public/filtered/proto-out";
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(outputTopic, CompletableFuture.completedFuture(null));
+
+        // Build a descriptor + message with protobuf runtime APIs; carry Pulsar's real schema bytes.
+        com.google.protobuf.Descriptors.Descriptor trade = ProtobufNativeValueDecoderTests.tradeDescriptor();
+        byte[] schemaData = org.apache.pulsar.client.impl.schema.ProtobufNativeSchemaUtils.serialize(trade);
+        String defB64 = Base64.getEncoder().encodeToString(schemaData);
+        byte[] payload = com.google.protobuf.DynamicMessage.newBuilder(trade)
+                .setField(trade.findFieldByName("sym"), "AAPL")
+                .setField(trade.findFieldByName("price"), 195.5)
+                .build()
+                .toByteArray();
+
+        fn.loadQueryForTest("q1", queryJsonWithSchema(
+                "price > 100", outputTopic, "Trade", "PROTOBUF_NATIVE", defB64));
+
+        CompletableFuture<Void> result = fn.process(payload, ctx);
+
+        assertThat(result).isCompleted();
+        verify(builder).value(payload);
+        verify(builder).sendAsync();
+        verify(record).ack();
+        verify(record, never()).fail();
     }
 
     @Test
