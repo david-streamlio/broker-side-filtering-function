@@ -57,8 +57,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -103,6 +105,13 @@ class SessionIT {
     private static final String INPUT_TOPIC        = "persistent://public/default/trades-sdk-it";
     private static final String EXTRA_INPUT_TOPIC  = "persistent://public/default/extra-sdk-it";
 
+    // Each value-field test gets its own input topic so its spawned filter has a distinct name; this
+    // keeps the snapshot-diff readiness check (waitForNewSpawnedFilter) from latching onto a stale
+    // filter left mid-teardown by a sibling value-field test running earlier in the same broker.
+    private static final String VF_AVRO_TOPIC      = "persistent://public/default/trades-vf-avro-sdk-it";
+    private static final String VF_JSON_TOPIC      = "persistent://public/default/trades-vf-json-sdk-it";
+    private static final String VF_PROTOBUF_TOPIC  = "persistent://public/default/trades-vf-protobuf-sdk-it";
+
     private static final Path FILTER_NAR       = findFilterNar();
     private static final Path ORCHESTRATOR_NAR = findOrchestratorNar();
 
@@ -125,6 +134,9 @@ class SessionIT {
         admin.topics().createNonPartitionedTopic(ORCH_STATE_TOPIC);
         admin.topics().createNonPartitionedTopic(INPUT_TOPIC);
         admin.topics().createNonPartitionedTopic(EXTRA_INPUT_TOPIC);
+        admin.topics().createNonPartitionedTopic(VF_AVRO_TOPIC);
+        admin.topics().createNonPartitionedTopic(VF_JSON_TOPIC);
+        admin.topics().createNonPartitionedTopic(VF_PROTOBUF_TOPIC);
         admin.namespaces().setAutoTopicCreation("public/default",
                 org.apache.pulsar.common.policies.data.AutoTopicCreationOverride.builder()
                         .allowAutoTopicCreation(true)
@@ -265,7 +277,7 @@ class SessionIT {
     void avroValueFieldSelectorDecodedServerSide() throws Exception {
         Schema<Trade> avro = Schema.AVRO(Trade.class);
         ValueSchemaInfo vsi = Session.toValueSchemaInfo(avro.getSchemaInfo());
-        byte[] routed = singleRoutedByValueField(vsi, "avro",
+        byte[] routed = singleRoutedByValueField(vsi, "avro", VF_AVRO_TOPIC,
                 avro.encode(tradeOf("AAPL", 195.5)), "AAPL",
                 avro.encode(tradeOf("PENNY", 5.0)), "PENNY");
         Trade decoded = avro.decode(routed);
@@ -277,7 +289,7 @@ class SessionIT {
     void jsonValueFieldSelectorDecodedServerSide() throws Exception {
         Schema<Trade> json = Schema.JSON(Trade.class);
         ValueSchemaInfo vsi = Session.toValueSchemaInfo(json.getSchemaInfo());
-        byte[] routed = singleRoutedByValueField(vsi, "json",
+        byte[] routed = singleRoutedByValueField(vsi, "json", VF_JSON_TOPIC,
                 JSON.writeValueAsBytes(tradeOf("MSFT", 420.0)), "MSFT",
                 JSON.writeValueAsBytes(tradeOf("CENT", 1.0)), "CENT");
         Trade decoded = JSON.readValue(routed, Trade.class);
@@ -293,7 +305,7 @@ class SessionIT {
         Descriptor trade = tradeProtoDescriptor();
         ValueSchemaInfo vsi = new ValueSchemaInfo("Trade", "PROTOBUF_NATIVE",
                 Base64.getEncoder().encodeToString(ProtobufNativeSchemaUtils.serialize(trade)), null);
-        byte[] routed = singleRoutedByValueField(vsi, "protobuf",
+        byte[] routed = singleRoutedByValueField(vsi, "protobuf", VF_PROTOBUF_TOPIC,
                 protoTrade(trade, "GOOG", 1500.0), "GOOG",
                 protoTrade(trade, "MICRO", 2.0), "MICRO");
         DynamicMessage got = DynamicMessage.parseFrom(trade, routed);
@@ -302,26 +314,32 @@ class SessionIT {
     }
 
     /**
-     * Registers a {@code price > 100} value-field selector carrying {@code vsi}, produces {@code hi}
-     * (price&gt;100) then {@code lo} (price&le;100) as raw value bytes through the byte[] input
-     * producer, and asserts exactly the {@code hi} record is routed to the private topic — i.e. the
-     * filter decoded the value server-side. Returns the routed value bytes for format-specific checks.
+     * Registers a {@code price > 100} value-field selector carrying {@code vsi} on {@code inputTopic},
+     * produces {@code hi} (price&gt;100) then {@code lo} (price&le;100) as raw value bytes, and asserts
+     * exactly the {@code hi} record is routed to the private topic — i.e. the filter decoded the value
+     * server-side. Returns the routed value bytes for format-specific checks.
+     *
+     * <p>Each caller passes its own {@code inputTopic} and we wait for the specific filter newly
+     * spawned for this query (see {@link #waitForNewSpawnedFilter}), so sibling value-field tests
+     * cycling filters in the same broker can't make us produce into a stale/torn-down filter.
      */
-    private byte[] singleRoutedByValueField(ValueSchemaInfo vsi, String label,
+    private byte[] singleRoutedByValueField(ValueSchemaInfo vsi, String label, String inputTopic,
                                             byte[] hi, String hiKey,
                                             byte[] lo, String loKey) throws Exception {
-        try (Session session = newSession()) {
-            PrivateQuery pq = session.registerPrivateQuery(List.of(INPUT_TOPIC), "price > 100",
+        try (Session session = newSession();
+             Producer<byte[]> producer = client.newProducer(Schema.BYTES).topic(inputTopic).create()) {
+            Set<String> filtersBefore = spawnedFilterNames();
+            PrivateQuery pq = session.registerPrivateQuery(List.of(inputTopic), "price > 100",
                     null, vsi.getName(), vsi, ClientType.PULSAR);
             try (Consumer<byte[]> consumer = client.newConsumer(Schema.BYTES)
                     .topic(pq.privateTopic())
                     .subscriptionName("vf-it-" + pq.queryId())
                     .subscribe()) {
 
-                waitForSpawnedFilter(INPUT_TOPIC);
+                waitForNewSpawnedFilter(filtersBefore);
 
-                inputProducer.newMessage().key(hiKey).value(hi).send();
-                inputProducer.newMessage().key(loKey).value(lo).send();
+                producer.newMessage().key(hiKey).value(hi).send();
+                producer.newMessage().key(loKey).value(lo).send();
 
                 Message<byte[]> m = consumer.receive(30, TimeUnit.SECONDS);
                 assertThat(m).as("price>100 %s value should pass the value-field selector", label).isNotNull();
@@ -485,6 +503,50 @@ class SessionIT {
      * {@code TopicKeySanitizer} the orchestrator uses, computed via the function-status admin API
      * — we don't reach into the orchestrator's internal class here.
      */
+    /** Names of currently-known spawned filter functions (excludes the orchestrator itself). */
+    private Set<String> spawnedFilterNames() throws Exception {
+        Set<String> names = new HashSet<>();
+        for (String name : admin.functions().getFunctions(FN_TENANT, FN_NAMESPACE)) {
+            if (name.startsWith("selector-filter-") && !name.equals(ORCH_NAME)) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    /**
+     * Waits for a filter function that did <em>not</em> exist in {@code before} to reach RUNNING.
+     * Unlike {@link #waitForSpawnedFilter}, this ignores stale/dying filters left by earlier tests —
+     * essential when value-field tests each register a query (on their own input topic) and retire it,
+     * cycling filters within one broker lifetime. Matching only a brand-new function name guarantees we
+     * gate on <em>this</em> test's filter, never a sibling's leftover.
+     */
+    private void waitForNewSpawnedFilter(Set<String> before) throws Exception {
+        long deadline = System.currentTimeMillis() + 90_000L;
+        String foundName = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                for (String name : admin.functions().getFunctions(FN_TENANT, FN_NAMESPACE)) {
+                    if (!name.startsWith("selector-filter-") || name.equals(ORCH_NAME) || before.contains(name)) {
+                        continue;
+                    }
+                    FunctionStatus status = admin.functions().getFunctionStatus(FN_TENANT, FN_NAMESPACE, name);
+                    if (status.getNumInstances() > 0 && status.getNumRunning() == status.getNumInstances()) {
+                        foundName = name;
+                        break;
+                    }
+                }
+                if (foundName != null) break;
+            } catch (Exception ignored) {}
+            Thread.sleep(500);
+        }
+        if (foundName == null) {
+            throw new IllegalStateException("No newly-spawned filter function reached RUNNING within 90s");
+        }
+        LOG.info("Newly-spawned filter function {} is RUNNING", foundName);
+        Thread.sleep(3_000); // grace for the filter function's TableView to load the QueryMessage
+    }
+
     private void waitForSpawnedFilter(String inputTopic) throws Exception {
         // The orchestrator names spawned functions "selector-filter-<sanitized>-<8-hex-hash>".
         // We don't reproduce the sanitizer here; instead we poll the function list for any name
