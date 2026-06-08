@@ -1,8 +1,19 @@
 package io.streamnative.filter.client;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.protobuf.DescriptorProtos.DescriptorProto;
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto;
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Label;
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Type;
+import com.google.protobuf.DescriptorProtos.FileDescriptorProto;
+import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Descriptors.FileDescriptor;
+import com.google.protobuf.DynamicMessage;
+import io.streamnative.filter.common.ClientType;
+import io.streamnative.filter.common.ValueSchemaInfo;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
+import org.apache.pulsar.client.impl.schema.ProtobufNativeSchemaUtils;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.Producer;
@@ -26,6 +37,7 @@ import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -217,6 +229,126 @@ class SessionIT {
                     .as("Only US messages should pass the selector").isNull();
             consumer.acknowledge(m1);
         }
+    }
+
+    // ---------------------------------------------------------------- value-schema server-side decode
+    //
+    // These three exercise the filter decoding the message VALUE on the broker — via the unshaded
+    // avro / protobuf-java the NAR bundles, or the best-effort JSON path — to evaluate a selector on
+    // a value field. The two messages in each test share identical (absent) properties and differ
+    // ONLY in the value field `price`; the private topic is consumed as raw bytes, so a routed
+    // message proves the decode happened server-side (the typed client-side decode is covered by
+    // typedJsonSchemaEndToEnd). They are the regression guard for the bundled avro-/protobuf-java/
+    // jackson versions: a library bump that breaks the unshaded-vs-broker-shaded coexistence fails
+    // these against a live broker, where the byte-level unit tests can't.
+
+    @Test
+    void avroValueFieldSelectorDecodedServerSide() throws Exception {
+        Schema<Trade> avro = Schema.AVRO(Trade.class);
+        ValueSchemaInfo vsi = Session.toValueSchemaInfo(avro.getSchemaInfo());
+        byte[] routed = singleRoutedByValueField(vsi, "avro",
+                avro.encode(tradeOf("AAPL", 195.5)), "AAPL",
+                avro.encode(tradeOf("PENNY", 5.0)), "PENNY");
+        Trade decoded = avro.decode(routed);
+        assertThat(decoded.sym).isEqualTo("AAPL");
+        assertThat(decoded.price).isEqualTo(195.5);
+    }
+
+    @Test
+    void jsonValueFieldSelectorDecodedServerSide() throws Exception {
+        Schema<Trade> json = Schema.JSON(Trade.class);
+        ValueSchemaInfo vsi = Session.toValueSchemaInfo(json.getSchemaInfo());
+        byte[] routed = singleRoutedByValueField(vsi, "json",
+                JSON.writeValueAsBytes(tradeOf("MSFT", 420.0)), "MSFT",
+                JSON.writeValueAsBytes(tradeOf("CENT", 1.0)), "CENT");
+        Trade decoded = JSON.readValue(routed, Trade.class);
+        assertThat(decoded.sym).isEqualTo("MSFT");
+        assertThat(decoded.price).isEqualTo(420.0);
+    }
+
+    @Test
+    void protobufNativeValueFieldSelectorDecodedServerSide() throws Exception {
+        // PROTOBUF_NATIVE carries the descriptor in the schema; the filter rebuilds it and decodes
+        // with bundled protobuf-java. Build the descriptor by hand (no generated class) and serialize
+        // it exactly as Pulsar does.
+        Descriptor trade = tradeProtoDescriptor();
+        ValueSchemaInfo vsi = new ValueSchemaInfo("Trade", "PROTOBUF_NATIVE",
+                Base64.getEncoder().encodeToString(ProtobufNativeSchemaUtils.serialize(trade)), null);
+        byte[] routed = singleRoutedByValueField(vsi, "protobuf",
+                protoTrade(trade, "GOOG", 1500.0), "GOOG",
+                protoTrade(trade, "MICRO", 2.0), "MICRO");
+        DynamicMessage got = DynamicMessage.parseFrom(trade, routed);
+        assertThat(got.getField(trade.findFieldByName("sym"))).isEqualTo("GOOG");
+        assertThat(((Number) got.getField(trade.findFieldByName("price"))).doubleValue()).isEqualTo(1500.0);
+    }
+
+    /**
+     * Registers a {@code price > 100} value-field selector carrying {@code vsi}, produces {@code hi}
+     * (price&gt;100) then {@code lo} (price&le;100) as raw value bytes through the byte[] input
+     * producer, and asserts exactly the {@code hi} record is routed to the private topic — i.e. the
+     * filter decoded the value server-side. Returns the routed value bytes for format-specific checks.
+     */
+    private byte[] singleRoutedByValueField(ValueSchemaInfo vsi, String label,
+                                            byte[] hi, String hiKey,
+                                            byte[] lo, String loKey) throws Exception {
+        try (Session session = newSession()) {
+            PrivateQuery pq = session.registerPrivateQuery(List.of(INPUT_TOPIC), "price > 100",
+                    null, vsi.getName(), vsi, ClientType.PULSAR);
+            try (Consumer<byte[]> consumer = client.newConsumer(Schema.BYTES)
+                    .topic(pq.privateTopic())
+                    .subscriptionName("vf-it-" + pq.queryId())
+                    .subscribe()) {
+
+                waitForSpawnedFilter(INPUT_TOPIC);
+
+                inputProducer.newMessage().key(hiKey).value(hi).send();
+                inputProducer.newMessage().key(loKey).value(lo).send();
+
+                Message<byte[]> m = consumer.receive(30, TimeUnit.SECONDS);
+                assertThat(m).as("price>100 %s value should pass the value-field selector", label).isNotNull();
+                byte[] data = m.getData();
+                consumer.acknowledge(m);
+                assertThat(consumer.receive(5, TimeUnit.SECONDS))
+                        .as("price<=100 %s value must be filtered out server-side", label).isNull();
+                return data;
+            } finally {
+                session.retirePrivateQuery(pq);
+            }
+        }
+    }
+
+    private static Trade tradeOf(String sym, double price) {
+        Trade t = new Trade();
+        t.sym = sym;
+        t.price = price;
+        return t;
+    }
+
+    /** proto3 {@code Trade { string sym=1; double price=2; int32 qty=3; bool active=4; }}. */
+    private static Descriptor tradeProtoDescriptor() throws Exception {
+        FileDescriptorProto file = FileDescriptorProto.newBuilder()
+                .setName("trade_it.proto").setSyntax("proto3")
+                .addMessageType(DescriptorProto.newBuilder().setName("Trade")
+                        .addField(protoField("sym", 1, Type.TYPE_STRING))
+                        .addField(protoField("price", 2, Type.TYPE_DOUBLE))
+                        .addField(protoField("qty", 3, Type.TYPE_INT32))
+                        .addField(protoField("active", 4, Type.TYPE_BOOL)))
+                .build();
+        return FileDescriptor.buildFrom(file, new FileDescriptor[0]).findMessageTypeByName("Trade");
+    }
+
+    private static FieldDescriptorProto protoField(String name, int number, Type type) {
+        return FieldDescriptorProto.newBuilder()
+                .setName(name).setNumber(number).setType(type).setLabel(Label.LABEL_OPTIONAL).build();
+    }
+
+    private static byte[] protoTrade(Descriptor trade, String sym, double price) {
+        return DynamicMessage.newBuilder(trade)
+                .setField(trade.findFieldByName("sym"), sym)
+                .setField(trade.findFieldByName("price"), price)
+                .setField(trade.findFieldByName("qty"), 1)
+                .setField(trade.findFieldByName("active"), true)
+                .build().toByteArray();
     }
 
     @Test
