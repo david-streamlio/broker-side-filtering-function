@@ -34,16 +34,23 @@ public final class QueryMessage {
     private final String selector;
     private final String outputTopic;
     private final ValueSchemaInfo valueSchema;
+    private final WindowSpec window;
+
+    public QueryMessage(String name, String selector, String outputTopic, ValueSchemaInfo valueSchema) {
+        this(name, selector, outputTopic, valueSchema, null);
+    }
 
     @JsonCreator
     public QueryMessage(@JsonProperty("name") String name,
                         @JsonProperty("selector") String selector,
                         @JsonProperty("outputTopic") String outputTopic,
-                        @JsonProperty("valueSchema") ValueSchemaInfo valueSchema) {
+                        @JsonProperty("valueSchema") ValueSchemaInfo valueSchema,
+                        @JsonProperty("window") WindowSpec window) {
         this.name = name;
         this.selector = selector;
         this.outputTopic = outputTopic;
         this.valueSchema = valueSchema;
+        this.window = window;
     }
 
     public String getName() {
@@ -67,23 +74,33 @@ public final class QueryMessage {
         return valueSchema;
     }
 
+    /**
+     * The time window of a windowed query, or {@code null} for a live query. A windowed query runs on
+     * a dedicated filter instance whose subscription was positioned at the window start.
+     */
+    public WindowSpec getWindow() {
+        return window;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (!(o instanceof QueryMessage that)) return false;
         return Objects.equals(name, that.name)
                 && Objects.equals(selector, that.selector)
                 && Objects.equals(outputTopic, that.outputTopic)
-                && Objects.equals(valueSchema, that.valueSchema);
+                && Objects.equals(valueSchema, that.valueSchema)
+                && Objects.equals(window, that.window);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, selector, outputTopic, valueSchema);
+        return Objects.hash(name, selector, outputTopic, valueSchema, window);
     }
 
     @Override
     public String toString() {
         return "QueryMessage{name='" + name + "', selector='" + selector + "', outputTopic='"
-                + outputTopic + "', valueSchema=" + valueSchema + '}';
+                + outputTopic + "', valueSchema=" + valueSchema
+                + (window != null ? ", window=" + window : "") + '}';
     }
 }

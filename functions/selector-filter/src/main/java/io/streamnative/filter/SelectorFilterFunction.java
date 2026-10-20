@@ -19,11 +19,16 @@
 
 package io.streamnative.filter;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.QueryMessage;
+import io.streamnative.filter.common.WindowProtocol;
+import io.streamnative.filter.common.WindowStats;
 import io.streamnative.filter.common.selector.SelectorParseException;
+import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.PulsarClient;
+import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.TableView;
 import org.apache.pulsar.client.api.TypedMessageBuilder;
@@ -33,6 +38,7 @@ import org.apache.pulsar.functions.api.Record;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -94,6 +100,8 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     static final String METRIC_QUERIES_BAD      = "filter.queries.bad";
 
     static final String METRIC_SEND_FAILURES = "filter.send.failures";
+    /** Windowed queries whose completion record was sent. */
+    static final String METRIC_WINDOWS_COMPLETED = "filter.windows.completed";
 
     /**
      * Per-message wall-clock processing time in milliseconds. Recorded as a sample (double) so
@@ -239,10 +247,35 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         final long srcEventTime = record.getMessage().map(m -> m.getEventTime()).orElse(0L);
 
         List<CompletableFuture<?>> sends = new ArrayList<>();
+        // Completion records of windowed queries: awaited before the ack, but not counted as matches.
+        List<CompletableFuture<?>> completionSends = null;
         Map<String, String> forwardProperties = null;
         boolean forwardPropertiesResolved = false;
+        // Resolved on the first windowed query only, so live-only functions pay nothing extra.
+        long logTime = 0L;
+        Message<?> srcMessage = null;
+        boolean windowFieldsResolved = false;
 
         for (CompiledQuery cq : compiled.values()) {
+            WindowState window = cq.window();
+            boolean completeAfterThis = false;
+            if (window != null) {
+                if (!windowFieldsResolved) {
+                    srcMessage = record.getMessage().orElse(null);
+                    logTime = srcMessage == null ? 0L : MessageBindings.logClockTime(srcMessage);
+                    windowFieldsResolved = true;
+                }
+                WindowState.Admission admission = window.admit(logTime, positionOf(srcMessage));
+                if (admission == WindowState.Admission.BEFORE_WINDOW || admission == WindowState.Admission.DONE) {
+                    continue;
+                }
+                if (admission == WindowState.Admission.PAST_WINDOW) {
+                    completionSends = append(completionSends, sendCompletion(ctx, cq));
+                    continue;
+                }
+                completeAfterThis = admission == WindowState.Admission.LAST_IN_WINDOW;
+                window.recordScanned(logTime, payloadBytes);
+            }
             if (cq.evaluator().matches(bindings, cq.valueDecoder())) {
                 TypedMessageBuilder<byte[]> builder = ctx.newOutputMessage(cq.outputTopic(), Schema.BYTES)
                         .value(payload);
@@ -259,6 +292,18 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                 }
                 if (srcEventTime > 0) {
                     builder = builder.eventTime(srcEventTime);
+                }
+                if (window != null) {
+                    // Windowed results carry their source position and log time, so clients can
+                    // dedupe at-least-once redeliveries and see where each event sat in the log.
+                    if (srcMessage != null) {
+                        builder = builder.property(WindowProtocol.SRC_MSGID_PROPERTY,
+                                String.valueOf(srcMessage.getMessageId()));
+                    }
+                    if (logTime > 0) {
+                        builder = builder.property(WindowProtocol.SRC_PUBLISH_TIME_PROPERTY, Long.toString(logTime));
+                    }
+                    window.recordMatched();
                 }
                 final String outputTopic = cq.outputTopic();
                 pendingSends.incrementAndGet();
@@ -280,10 +325,25 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                         });
                 sends.add(send);
             }
+            if (completeAfterThis) {
+                // Sent after this record's match on the same producer, so it follows it in the output.
+                completionSends = append(completionSends, sendCompletion(ctx, cq));
+            }
         }
 
         if (sends.isEmpty()) {
-            return ackAsDropped(ctx, record, payloadBytes, startNanos);
+            if (completionSends == null) {
+                return ackAsDropped(ctx, record, payloadBytes, startNanos);
+            }
+            return ackAfterCompletion(ctx, record, completionSends, startNanos);
+        }
+        final List<CompletableFuture<?>> awaited;
+        if (completionSends == null) {
+            awaited = sends;
+        } else {
+            // Ack only once both the matches and the completion records are written.
+            awaited = new ArrayList<>(sends);
+            awaited.addAll(completionSends);
         }
 
         // (b1) value-add latency: entry → all sends dispatched (deserialize + eval + build +
@@ -293,7 +353,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         final long evalDoneMs = System.currentTimeMillis();
 
         final int fanout = sends.size();
-        return CompletableFuture.allOf(sends.toArray(new CompletableFuture[0]))
+        return CompletableFuture.allOf(awaited.toArray(new CompletableFuture[0]))
                 .whenComplete((v, err) -> {
                     if (err != null) {
                         ctx.recordMetric(METRIC_SEND_FAILURES, 1.0);
@@ -362,6 +422,63 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                     pending > 0 ? " *** SENDS BLOCKED — flow-control will stall ***" : "");
             ctx.recordMetric("filter.pending.sends", pending);
         }
+    }
+
+    /**
+     * Write a windowed query's completion record ({@link WindowProtocol#COMPLETE_PROPERTY}, value =
+     * JSON {@link WindowStats}) to its output topic. It goes through the same output producer as the
+     * query's matches, so it follows every match already sent. If the send fails the window is
+     * reopened, so the redelivered record completes it again.
+     */
+    private CompletableFuture<?> sendCompletion(Context ctx, CompiledQuery cq) throws PulsarClientException {
+        WindowStats stats = cq.window().complete(cq.queryId());
+        byte[] value;
+        try {
+            value = MAPPER.writeValueAsBytes(stats);
+        } catch (JsonProcessingException e) {
+            throw new UncheckedIOException(e);
+        }
+        LOG.info("Window complete: {}", stats);
+        return ctx.newOutputMessage(cq.outputTopic(), Schema.BYTES)
+                .value(value)
+                .property(WindowProtocol.COMPLETE_PROPERTY, "true")
+                .sendAsync()
+                .whenComplete((r, e) -> {
+                    if (e != null) {
+                        LOG.warn("Completion record for query id={} failed; reopening window: {}",
+                                cq.queryId(), e.getMessage());
+                        cq.window().reopen();
+                    } else {
+                        ctx.recordMetric(METRIC_WINDOWS_COMPLETED, 1.0);
+                    }
+                });
+    }
+
+    /** Ack a record that matched nothing but ended one or more windows, once the completions are written. */
+    private CompletableFuture<Void> ackAfterCompletion(Context ctx, Record<?> record,
+                                                       List<CompletableFuture<?>> completionSends, long startNanos) {
+        return CompletableFuture.allOf(completionSends.toArray(new CompletableFuture[0]))
+                .whenComplete((v, err) -> {
+                    if (err != null) {
+                        ctx.recordMetric(METRIC_SEND_FAILURES, 1.0);
+                        record.fail();
+                    } else {
+                        record.ack();
+                    }
+                    recordProcessingTime(ctx, startNanos);
+                })
+                .thenApply(v -> null);
+    }
+
+    private static List<CompletableFuture<?>> append(List<CompletableFuture<?>> list, CompletableFuture<?> f) {
+        List<CompletableFuture<?>> out = list == null ? new ArrayList<>(2) : list;
+        out.add(f);
+        return out;
+    }
+
+    /** The message's position for window bounds, or {@code null} if unknown. */
+    private static MessagePosition positionOf(Message<?> message) {
+        return message == null ? null : MessagePosition.of(message.getMessageId());
     }
 
     private CompletableFuture<Void> ackAsDropped(Context ctx, Record<?> record, int payloadBytes, long startNanos) {
@@ -505,11 +622,23 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
             recordMetric(METRIC_QUERIES_BAD, 1.0);
             return;
         }
+        WindowState window = null;
+        if (qm.getWindow() != null) {
+            try {
+                qm.getWindow().validate();
+            } catch (IllegalArgumentException e) {
+                LOG.warn("Query id={} has an invalid window {}: {}", queryId, qm.getWindow(), e.getMessage());
+                recordMetric(METRIC_QUERIES_BAD, 1.0);
+                return;
+            }
+            window = new WindowState(qm.getWindow(), System::currentTimeMillis);
+        }
         ValueDecoder valueDecoder = ValueDecoderFactory.from(qm.getValueSchema());
         compiled.put(queryId, new CompiledQuery(queryId, qm.getName(), qm.getOutputTopic(), evaluator,
-                qm.getValueSchema(), valueDecoder));
-        LOG.info("Loaded query id={} name='{}' selector=[{}] -> {}",
-                queryId, qm.getName(), qm.getSelector(), qm.getOutputTopic());
+                qm.getValueSchema(), valueDecoder, window));
+        LOG.info("Loaded query id={} name='{}' selector=[{}] -> {}{}",
+                queryId, qm.getName(), qm.getSelector(), qm.getOutputTopic(),
+                window != null ? " window=" + qm.getWindow() : "");
         recordMetric(METRIC_QUERIES_LOADED, 1.0);
         recordMetric(METRIC_QUERIES_ACTIVE, compiled.size());
     }

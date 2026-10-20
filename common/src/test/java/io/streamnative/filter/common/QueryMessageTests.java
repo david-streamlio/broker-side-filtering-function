@@ -68,4 +68,38 @@ class QueryMessageTests {
         assertThat(parsed.getSelector()).isEqualTo("x = 1");
         assertThat(parsed.getValueSchema()).isNull();
     }
+
+    @Test
+    void roundTripsWithWindow() throws Exception {
+        WindowSpec window = new WindowSpec(1_000L, 2_000L, 17L, 42L, true);
+        QueryMessage qm = new QueryMessage(
+                "session-1", "__key__ = '8675309'", "persistent://public/filtered/out", null, window);
+
+        QueryMessage parsed = MAPPER.readValue(MAPPER.writeValueAsBytes(qm), QueryMessage.class);
+
+        assertThat(parsed).isEqualTo(qm);
+        assertThat(parsed.getWindow()).isEqualTo(window);
+        assertThat(parsed.getWindow().hasEndPosition()).isTrue();
+        assertThat(parsed.getWindow().isTruncatedByRetention()).isTrue();
+    }
+
+    @Test
+    void liveQueryHasNoWindowOnTheWire() throws Exception {
+        QueryMessage qm = new QueryMessage("s", "x = 1", "persistent://t/n/o", null);
+        assertThat(MAPPER.writeValueAsString(qm)).doesNotContain("window");
+        assertThat(MAPPER.readValue(MAPPER.writeValueAsBytes(qm), QueryMessage.class).getWindow()).isNull();
+    }
+
+    @Test
+    void windowWithoutEndPosition() throws Exception {
+        String json = """
+                {"name":"s","selector":"x = 1","outputTopic":"persistent://t/n/o",
+                 "window":{"fromMs":10,"toMs":20}}
+                """;
+        WindowSpec window = MAPPER.readValue(json, QueryMessage.class).getWindow();
+        assertThat(window.getFromMs()).isEqualTo(10L);
+        assertThat(window.getToMs()).isEqualTo(20L);
+        assertThat(window.hasEndPosition()).isFalse();
+        assertThat(window.isTruncatedByRetention()).isFalse();
+    }
 }

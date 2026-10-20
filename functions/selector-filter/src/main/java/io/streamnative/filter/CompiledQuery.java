@@ -30,11 +30,21 @@ import io.streamnative.filter.common.ValueSchemaInfo;
  * match on top-level value fields (e.g. an Avro {@code price > 50000}). {@code null} when no
  * structured value decode applies — selectors then match on key, topic, properties, and best-effort
  * JSON, exactly as before.
+ *
+ * <p>{@code window} is set for a windowed query (its {@code QueryMessage} carried a window) and
+ * {@code null} for a live query.
  */
 public record CompiledQuery(String queryId,
                             String name,
                             String outputTopic,
                             SelectorEvaluator evaluator,
                             ValueSchemaInfo valueSchema,
-                            ValueDecoder valueDecoder) {
+                            ValueDecoder valueDecoder,
+                            WindowState window) {
+
+    /** A live (non-windowed) query. */
+    public CompiledQuery(String queryId, String name, String outputTopic, SelectorEvaluator evaluator,
+                         ValueSchemaInfo valueSchema, ValueDecoder valueDecoder) {
+        this(queryId, name, outputTopic, evaluator, valueSchema, valueDecoder, null);
+    }
 }

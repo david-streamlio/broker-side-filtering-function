@@ -19,6 +19,9 @@
 
 package io.streamnative.filter;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.streamnative.filter.common.WindowProtocol;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
@@ -26,10 +29,12 @@ import org.apache.pulsar.client.api.TableView;
 import org.apache.pulsar.client.api.TableViewBuilder;
 import org.apache.pulsar.client.api.TypedMessageBuilder;
 import org.apache.pulsar.functions.api.Context;
+import org.apache.pulsar.client.impl.MessageIdImpl;
 import org.apache.pulsar.functions.api.Record;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
@@ -50,6 +55,7 @@ import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -96,6 +102,7 @@ class SelectorFilterFunctionTests {
         when(b.properties(any(Map.class))).thenReturn(b);
         when(b.key(anyString())).thenReturn(b);
         when(b.eventTime(anyLong())).thenReturn(b);
+        when(b.property(anyString(), anyString())).thenReturn(b);
         when(b.sendAsync()).thenReturn((CompletableFuture) sendResult);
         when(ctx.newOutputMessage(eq(outputTopic), any(Schema.class))).thenReturn((TypedMessageBuilder) b);
         outputBuilders.put(outputTopic, b);
@@ -891,5 +898,171 @@ class SelectorFilterFunctionTests {
         // here — we only assert initialize does not throw with overlapping outputs.
         fn.loadQueryForTest("q1", queryJson("region = 'US'", "persistent://public/quotes/trades"));
         assertThat(fn.activeQueryCountForTest()).isEqualTo(1);
+    }
+
+    // ---------------------- windowed queries ----------------------
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final String WINDOW_OUT = "persistent://public/filtered/window-out";
+
+    private byte[] windowedQueryJson(String selector, long from, long to, Long endLedger, Long endEntry) {
+        String end = endLedger == null ? "" : String.format(",\"endLedgerId\":%d,\"endEntryId\":%d", endLedger, endEntry);
+        String json = String.format(
+                "{\"name\":\"w\",\"selector\":\"%s\",\"outputTopic\":\"%s\",\"window\":{\"fromMs\":%d,\"toMs\":%d%s}}",
+                selector.replace("\"", "\\\""), WINDOW_OUT, from, to, end);
+        return json.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** Source message at log time {@code brokerTime}, position {@code ledger:entry}. */
+    @SuppressWarnings("unchecked")
+    private void givenSource(long brokerTime, long ledger, long entry) {
+        Message<byte[]> msg = (Message<byte[]>) Mockito.mock(Message.class);
+        when(msg.getPublishTime()).thenReturn(brokerTime - 80);   // producer clock trails the broker's
+        when(msg.getBrokerPublishTime()).thenReturn(Optional.of(brokerTime));
+        when(msg.getMessageId()).thenReturn(new MessageIdImpl(ledger, entry, -1));
+        when(record.getMessage()).thenReturn(Optional.of(msg));
+    }
+
+    private SelectorFilterFunction windowedFunction(Long endLedger, Long endEntry) throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+        fn.loadQueryForTest("w1", windowedQueryJson("__key__ = 'AAPL'", 1_000L, 2_000L, endLedger, endEntry));
+        return fn;
+    }
+
+    private static JsonNode completionStats(TypedMessageBuilder<byte[]> builder) throws Exception {
+        ArgumentCaptor<byte[]> values = ArgumentCaptor.forClass(byte[].class);
+        verify(builder, Mockito.atLeastOnce()).value(values.capture());
+        return JSON.readTree(values.getValue());
+    }
+
+    @Test
+    void windowedQueryLoadsWithItsWindow() throws Exception {
+        SelectorFilterFunction fn = windowedFunction(5L, 9L);
+        assertThat(fn.queryForTest("w1").window()).isNotNull();
+        assertThat(fn.queryForTest("w1").window().spec().getEndEntryId()).isEqualTo(9L);
+    }
+
+    @Test
+    void windowedQueryWithInvalidWindowIsRejected() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+        fn.loadQueryForTest("w1", windowedQueryJson("__key__ = 'AAPL'", 2_000L, 2_000L, null, null));
+        assertThat(fn.activeQueryCountForTest()).isZero();
+    }
+
+    @Test
+    void windowedQueryDropsRecordsBeforeTheWindow() throws Exception {
+        SelectorFilterFunction fn = windowedFunction(null, null);
+        mockOutputBuilder(WINDOW_OUT, CompletableFuture.completedFuture(null));
+        givenSource(999L, 5, 0);
+
+        assertThat(fn.process("p".getBytes(StandardCharsets.UTF_8), ctx)).isCompleted();
+
+        verify(ctx, never()).newOutputMessage(anyString(), any(Schema.class));
+        verify(record).ack();
+    }
+
+    @Test
+    void windowedMatchCarriesSourcePositionAndLogTime() throws Exception {
+        SelectorFilterFunction fn = windowedFunction(null, null);
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(WINDOW_OUT, CompletableFuture.completedFuture(null));
+        givenSource(1_500L, 5, 1);
+
+        assertThat(fn.process("p".getBytes(StandardCharsets.UTF_8), ctx)).isCompleted();
+
+        verify(builder).property(WindowProtocol.SRC_MSGID_PROPERTY, new MessageIdImpl(5, 1, -1).toString());
+        verify(builder).property(WindowProtocol.SRC_PUBLISH_TIME_PROPERTY, "1500");
+        verify(builder, never()).property(eq(WindowProtocol.COMPLETE_PROPERTY), anyString());
+        verify(record).ack();
+    }
+
+    @Test
+    void recordPastTheWindowSendsCompletionWithoutCountingAMatch() throws Exception {
+        SelectorFilterFunction fn = windowedFunction(null, null);
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(WINDOW_OUT, CompletableFuture.completedFuture(null));
+        givenSource(1_500L, 5, 1);
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);   // one in-window match
+        givenSource(2_500L, 5, 2);
+
+        assertThat(fn.process("p".getBytes(StandardCharsets.UTF_8), ctx)).isCompleted();
+
+        verify(builder).property(WindowProtocol.COMPLETE_PROPERTY, "true");
+        JsonNode stats = completionStats(builder);
+        assertThat(stats.get("queryId").asText()).isEqualTo("w1");
+        assertThat(stats.get("scanned").asLong()).isEqualTo(1L);
+        assertThat(stats.get("matched").asLong()).isEqualTo(1L);
+        assertThat(stats.get("endedBy").asText()).isEqualTo("WINDOW_END");
+        assertThat(stats.get("status").asText()).isEqualTo("COMPLETE");
+        // Matched metric only for the one real match, not for the completion record.
+        verify(ctx, times(1)).recordMetric(eq(SelectorFilterFunction.METRIC_MESSAGES_MATCHED), anyDouble());
+        verify(ctx).recordMetric(eq(SelectorFilterFunction.METRIC_WINDOWS_COMPLETED), anyDouble());
+        verify(record, times(2)).ack();
+    }
+
+    @Test
+    void lastRecordAtTheLogEndIsForwardedThenCompletes() throws Exception {
+        SelectorFilterFunction fn = windowedFunction(5L, 1L);
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(WINDOW_OUT, CompletableFuture.completedFuture(null));
+        givenSource(1_500L, 5, 1);
+        byte[] payload = "p".getBytes(StandardCharsets.UTF_8);
+
+        assertThat(fn.process(payload, ctx)).isCompleted();
+
+        InOrder order = inOrder(builder);
+        order.verify(builder).value(payload);
+        order.verify(builder).sendAsync();
+        order.verify(builder).property(WindowProtocol.COMPLETE_PROPERTY, "true");
+        order.verify(builder).sendAsync();
+        assertThat(completionStats(builder).get("endedBy").asText()).isEqualTo("LOG_END");
+        verify(record).ack();
+    }
+
+    @Test
+    void recordsAfterCompletionAreDropped() throws Exception {
+        SelectorFilterFunction fn = windowedFunction(null, null);
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(WINDOW_OUT, CompletableFuture.completedFuture(null));
+        givenSource(2_500L, 5, 2);
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);
+        givenSource(1_500L, 5, 3);   // in-window by time, but the window is done
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);
+
+        verify(builder, times(1)).sendAsync();   // only the completion record
+        verify(record, times(2)).ack();
+    }
+
+    @Test
+    void failedCompletionIsRetriedOnRedelivery() throws Exception {
+        SelectorFilterFunction fn = windowedFunction(null, null);
+        CompletableFuture<?> failed = new CompletableFuture<>();
+        failed.completeExceptionally(new RuntimeException("broker down"));
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(WINDOW_OUT, failed);
+        givenSource(2_500L, 5, 2);
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);
+        verify(record).fail();
+        assertThat(fn.queryForTest("w1").window().isDone()).isFalse();
+
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);   // redelivery
+        verify(builder, times(2)).property(WindowProtocol.COMPLETE_PROPERTY, "true");
+    }
+
+    @Test
+    void liveQueryOutputIsUnchanged() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+        String outputTopic = "persistent://public/filtered/live";
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(outputTopic, CompletableFuture.completedFuture(null));
+        fn.loadQueryForTest("q1", queryJson("__key__ = 'AAPL'", outputTopic));
+        givenSource(1_500L, 5, 1);
+
+        assertThat(fn.process("p".getBytes(StandardCharsets.UTF_8), ctx)).isCompleted();
+
+        verify(builder, never()).property(anyString(), anyString());
+        verify(record).ack();
     }
 }
