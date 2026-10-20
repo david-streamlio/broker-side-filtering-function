@@ -35,6 +35,7 @@
         <module>common</module>
         <module>functions/selector-filter</module>
         <module>functions/orchestrator</module>
+        <module>broker-filter</module>
         <module>sdk/java/pulsar</module>
         <module>sdk/java/kafka</module>
         <module>perf</module>
