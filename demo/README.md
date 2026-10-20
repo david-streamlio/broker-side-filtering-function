@@ -60,30 +60,30 @@ Two ways to run the same demo content:
 
 `bootstrap.sh` + `MultiQueryDemo.java` + the observability UI auto-detect the auth mode from the absence of `PULSAR_TOKEN_FILE` / `KAFKA_PASSWORD` env vars — same images run in both modes.
 
-### ⚠️ Known limitation: local-mode KoP entry format
+### KoP entry format (both modes)
 
-Local-mode brings the **entire pipeline up** — cluster, orchestrator,
-spawned filters, ShadowTraffic, observability UI — but the **spawned filter
-cannot decode the source messages** on the public `streamnative/sn-platform`
-image. ShadowTraffic produces via the Kafka protocol; KoP stores those as
-batched Pulsar entries; the orchestrator's spawned selector-filter is a
-plain Pulsar consumer that errors with
-`SingleMessageMetadata: Some required fields are missing` and discards
-every message (filter `receivedTotal` stays 0).
+ShadowTraffic produces via the Kafka protocol, and the orchestrator's spawned
+selector-filter is a plain Pulsar consumer. For the filter to decode those
+records, KoP must store them with `kafkaEntryFormat=pulsar_non_batched`, and
+for a **partitioned** source topic KoP reads that setting from the **parent
+topic's properties**. The namespace property alone isn't enough. Without the
+parent-topic property, KoP stores Kafka batches as batched Pulsar entries; the
+filter logs `SingleMessageMetadata: Some required fields are missing` /
+`Discarding corrupted message` and discards every message (filter
+`receivedTotal` stays 0).
 
-The cloud-mode fix — setting the `kafkaEntryFormat=pulsar_non_batched`
-namespace property — IS applied by `bootstrap.sh` and confirmed present
-(`pulsar-admin namespaces get-properties public/default` shows it), but the
-KoP version bundled in the public `sn-platform` images doesn't honor that
-value. SN Cloud's KoP does (cloud-mode works end-to-end — that's the demo's
-delivery path).
+`bootstrap.sh` Step 1c sets the parent-topic property with
+`pulsar-admin topics update-properties <topic> -p kafkaEntryFormat=pulsar_non_batched`
+and reads it back. In cloud-mode, `recreate.sh` / Terraform set it through the
+REST API. (Earlier versions of Step 1c called a nonexistent
+`topics set-property` command and printed success anyway. That, not the KoP
+build, is why local-mode filters used to receive nothing: the KoP in the
+public `sn-platform:4.2.0.6` image honors the parent-topic property.)
 
-Net: use **local-mode** for fast iteration on the multi-query app, the
-queries, and the observability UI (all of which work against the partial
-pipeline). Use **cloud-mode** for any end-to-end validation that needs the
-filter to actually process messages. Resolving the local-mode KoP gap likely
-requires a newer/SN-patched KoP build than the public images ship; tracked
-as a follow-up, not a blocker.
+If you create a source topic yourself, set the property **before** any Kafka
+producer writes to it, and don't let a Kafka producer auto-create it. Records
+written without it stay unreadable to the filter; `demo/reset-source-topic.sh`
+recreates a topic correctly, and `demo/check-cluster.sh` checks the property.
 
 ## Bootstrap service
 
@@ -184,7 +184,7 @@ Pulsar standalone takes ~30s to come up; orchestrator-deploy + bootstrap run in 
 
 ## Running (cloud-mode)
 
-Cloud-mode runs the broker + filtering on a real SN Cloud cluster — its KoP honors `kafkaEntryFormat=pulsar_non_batched`, so the spawned filters decode messages and you get **real end-to-end filtering** (unlike local-mode; see the limitation note above). The observability UI still runs locally on `:3200`; only the cluster is remote. **All commands below are from the repo root.**
+Cloud-mode runs the broker + filtering on a real SN Cloud cluster — its KoP honors `kafkaEntryFormat=pulsar_non_batched`, so the spawned filters decode messages and you get **real end-to-end filtering**. The observability UI still runs locally on `:3200`; only the cluster is remote. **All commands below are from the repo root.**
 
 **1. Provision the SN Cloud cluster + orchestrator** — one-time, ~10–15 min (re-runs against an existing cluster take ~30s). See [`infra/README.md`](infra/README.md) for prerequisites (`terraform`, `snctl` logged in, `pulsar-admin`, and `terraform/streamnative-key.json` from the SN Cloud console):
 

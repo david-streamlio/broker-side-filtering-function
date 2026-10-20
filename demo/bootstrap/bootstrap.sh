@@ -191,12 +191,24 @@ done
 # that the Pulsar function consumer cannot decode, logging "Discarding corrupted
 # message" for every entry and driving availablePermits negative — permanently
 # deadlocking message dispatch to the selector-filter function.
+#
+# `topics update-properties` is the 4.x CLI for this (there is no `topics set-property`).
+# A permission error is non-fatal, as in Step 1: in cloud-mode recreate.sh / Terraform set
+# the property with the superuser token. Any other error fails the bootstrap, and the
+# result is read back so a silent no-op can't report success.
 for t in "${SOURCE_TOPICS[@]}"; do
     echo -e "${BLUE}🔧 Step 1c — set kafkaEntryFormat=pulsar_non_batched on parent topic $t${NC}"
-    PA topics set-property "$t" \
-        --key kafkaEntryFormat \
-        --value pulsar_non_batched 2>&1 | grep -vE '^$' || true
-    echo -e "${GREEN}  ✅ parent topic property set (kafkaEntryFormat=pulsar_non_batched)${NC}"
+    if ! OUT=$(PA topics update-properties "$t" -p kafkaEntryFormat=pulsar_non_batched 2>&1); then
+        if ! echo "$OUT" | grep -qE '401|403|Unauthorized|Don.t have permission'; then
+            echo -e "${RED}  ❌ failed:${NC}"; echo "$OUT"; exit 1
+        fi
+        echo -e "${YELLOW}  ↻ no permission to set it here (managed out-of-band)${NC}"
+    fi
+    if PA topics get-properties "$t" 2>/dev/null | grep -qE 'kafkaEntryFormat.*pulsar_non_batched'; then
+        echo -e "${GREEN}  ✅ parent topic property set (kafkaEntryFormat=pulsar_non_batched)${NC}"
+    else
+        echo -e "${YELLOW}  ⚠️  could not confirm kafkaEntryFormat=pulsar_non_batched on $t — if it is not set, the filter function will discard every Kafka-produced message${NC}"
+    fi
 done
 
 # ── Step 2: ensure the control topic exists (non-partitioned) ────────────────
