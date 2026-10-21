@@ -111,6 +111,7 @@ class WindowedSessionIT {
     void setup() throws Exception {
         client = PulsarClient.builder().serviceUrl(pulsar.getPulsarBrokerUrl()).build();
         admin  = PulsarAdmin.builder().serviceHttpUrl(pulsar.getHttpServiceUrl()).build();
+        waitForDefaultNamespace(admin);
 
         admin.topics().createNonPartitionedTopic(SDK_INPUT_TOPIC);
         admin.topics().createNonPartitionedTopic(ORCH_STATE_TOPIC);
@@ -415,6 +416,24 @@ class WindowedSessionIT {
             Thread.sleep(500);
         }
         throw new IllegalStateException("No newly-spawned live filter reached RUNNING within 90s");
+    }
+
+    /** The container can report ready before standalone has created {@code public/default}; see SessionIT. */
+    private static void waitForDefaultNamespace(PulsarAdmin admin) throws Exception {
+        long deadline = System.currentTimeMillis() + 60_000L;
+        while (true) {
+            try {
+                if (admin.namespaces().getNamespaces("public").contains("public/default")) {
+                    return;
+                }
+            } catch (PulsarAdminException.NotFoundException tenantNotCreatedYet) {
+                // keep waiting
+            }
+            if (System.currentTimeMillis() > deadline) {
+                throw new IllegalStateException("Namespace public/default did not appear within 60s");
+            }
+            Thread.sleep(500);
+        }
     }
 
     private void deployWithLeaderRetry(FunctionConfig config, String pkg) throws Exception {
