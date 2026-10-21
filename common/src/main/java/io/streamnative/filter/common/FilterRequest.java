@@ -124,13 +124,15 @@ public final class FilterRequest {
     }
 
     /**
-     * Build a windowed REGISTER: read {@code inputTopic}'s history in {@code [fromMs, toMs]} (epoch ms on
-     * the log's clock) on a dedicated filter instance. The output topic ends with a completion record.
+     * Build a windowed REGISTER: read {@code inputTopic}'s history from {@code fromMs} (epoch ms on the
+     * log's clock) on a dedicated filter instance. Bounded ({@code toMs} set): the output ends with a
+     * completion record. Open-ended ({@code toMs} {@code null}): the output marks the end of history
+     * with a caught-up record and continues with live matches.
      */
     public static FilterRequest registerWindowed(String inputTopic, String outputTopic, String selector,
                                                  String keyDeserializer, String valueDeserializer,
                                                  ValueSchemaInfo valueSchema, ClientType clientType,
-                                                 long fromMs, long toMs) {
+                                                 long fromMs, Long toMs) {
         return new FilterRequest(Command.REGISTER,
                 Collections.singletonList(inputTopic), null,
                 outputTopic, selector, keyDeserializer, valueDeserializer, valueSchema, clientType, null,
@@ -236,10 +238,10 @@ public final class FilterRequest {
     }
 
     private void validateWindow(boolean hasInputs) {
-        if (windowFromMs == null || windowToMs == null) {
-            throw new IllegalArgumentException("windowed REGISTER requires both windowFromMs and windowToMs");
+        if (windowFromMs == null) {
+            throw new IllegalArgumentException("windowed REGISTER requires windowFromMs (windowToMs alone is not a window)");
         }
-        if (windowFromMs < 0 || windowToMs <= windowFromMs) {
+        if (windowFromMs < 0 || (windowToMs != null && windowToMs <= windowFromMs)) {
             throw new IllegalArgumentException("windowed REGISTER requires 0 <= windowFromMs < windowToMs");
         }
         if (!hasInputs || inputTopics.size() != 1) {
@@ -305,7 +307,7 @@ public final class FilterRequest {
                 + ", valueSchema=" + valueSchema
                 + ", clientType=" + clientType
                 + ", queryIds=" + queryIds
-                + (isWindowed() ? ", window=[" + windowFromMs + ", " + windowToMs + "]" : "")
+                + (isWindowed() ? ", window=[" + windowFromMs + ", " + (windowToMs == null ? "open" : windowToMs) + "]" : "")
                 + '}';
     }
 }

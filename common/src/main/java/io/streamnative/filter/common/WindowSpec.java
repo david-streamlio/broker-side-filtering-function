@@ -20,6 +20,7 @@
 package io.streamnative.filter.common;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -33,9 +34,12 @@ import java.util.Objects;
  * {@code resetCursor(timestamp)} positions by, so the window bounds and the cursor agree.
  *
  * <p>{@code endLedgerId}/{@code endEntryId} are the topic's last message position captured when the
- * query was registered. The window ends at whichever comes first: a record past {@code toMs}, or the
- * last record at or before that position. Without the position, a window whose {@code toMs} is "now"
- * would never end on a quiet topic. Both are {@code null} when no position was captured.
+ * query was registered: the end of history. A bounded window ({@code toMs} set) ends at whichever comes
+ * first, a record past {@code toMs} or the last record at or before that position; without the position,
+ * a window whose {@code toMs} is "now" would never end on a quiet topic. An open-ended window
+ * ({@code toMs} {@code null}) never ends: at that position the function marks the end of history with a
+ * caught-up record and keeps forwarding live matches. Both are {@code null} when no position was
+ * captured.
  *
  * <p>{@code truncatedByRetention} is set by the orchestrator when {@code fromMs} is earlier than the
  * earliest retained message, so the completion record can say the result doesn't cover the whole
@@ -46,14 +50,14 @@ import java.util.Objects;
 public final class WindowSpec {
 
     private final long fromMs;
-    private final long toMs;
+    private final Long toMs;
     private final Long endLedgerId;
     private final Long endEntryId;
     private final boolean truncatedByRetention;
 
     @JsonCreator
     public WindowSpec(@JsonProperty("fromMs") long fromMs,
-                      @JsonProperty("toMs") long toMs,
+                      @JsonProperty("toMs") Long toMs,
                       @JsonProperty("endLedgerId") Long endLedgerId,
                       @JsonProperty("endEntryId") Long endEntryId,
                       @JsonProperty("truncatedByRetention") boolean truncatedByRetention) {
@@ -65,10 +69,17 @@ public final class WindowSpec {
     }
 
     public long getFromMs()                  { return fromMs; }
-    public long getToMs()                    { return toMs; }
+    /** End of the window, or {@code null} for an open-ended window. */
+    public Long getToMs()                    { return toMs; }
     public Long getEndLedgerId()             { return endLedgerId; }
     public Long getEndEntryId()              { return endEntryId; }
     public boolean isTruncatedByRetention()  { return truncatedByRetention; }
+
+    /** True for an open-ended window: replay from {@code fromMs}, then keep streaming. */
+    @JsonIgnore
+    public boolean isOpenEnded() {
+        return toMs == null;
+    }
 
     /** True when an end-of-log position was captured. */
     public boolean hasEndPosition() {
@@ -77,7 +88,7 @@ public final class WindowSpec {
 
     /** @throws IllegalArgumentException if the window is empty or the end position is half-set */
     public void validate() {
-        if (fromMs < 0 || toMs <= fromMs) {
+        if (fromMs < 0 || (toMs != null && toMs <= fromMs)) {
             throw new IllegalArgumentException("window requires 0 <= fromMs < toMs, got [" + fromMs + ", " + toMs + "]");
         }
         if ((endLedgerId == null) != (endEntryId == null)) {
@@ -88,7 +99,7 @@ public final class WindowSpec {
     @Override
     public boolean equals(Object o) {
         if (!(o instanceof WindowSpec that)) return false;
-        return fromMs == that.fromMs && toMs == that.toMs
+        return fromMs == that.fromMs && Objects.equals(toMs, that.toMs)
                 && truncatedByRetention == that.truncatedByRetention
                 && Objects.equals(endLedgerId, that.endLedgerId)
                 && Objects.equals(endEntryId, that.endEntryId);
@@ -101,7 +112,7 @@ public final class WindowSpec {
 
     @Override
     public String toString() {
-        return "WindowSpec{[" + fromMs + ", " + toMs + "], end=" + endLedgerId + ":" + endEntryId
+        return "WindowSpec{[" + fromMs + ", " + (toMs == null ? "open" : toMs) + "], end=" + endLedgerId + ":" + endEntryId
                 + (truncatedByRetention ? ", truncatedByRetention" : "") + '}';
     }
 }

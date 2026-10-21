@@ -19,6 +19,10 @@
 
 package io.streamnative.filter.client;
 
+import io.streamnative.filter.api.FilterControl;
+import io.streamnative.filter.api.TimeWindow;
+import io.streamnative.filter.api.WindowControl;
+import io.streamnative.filter.api.internal.WindowProgress;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.ClientType;
@@ -90,6 +94,8 @@ public final class Session implements Closeable {
     private final String privateTopicTenant;
     private final String privateTopicNamespace;
     private final PrivateTopicPolicy privateTopicPolicy;
+    /** Policy for windowed queries' private topics; see {@link PrivateTopicPolicy#WINDOWED_DEFAULT}. */
+    private final PrivateTopicPolicy windowedPrivateTopicPolicy;
     private final Producer<byte[]> controlProducer;
     /** Stable identifier used as the HEARTBEAT message key. Arbitrary; orchestrator does not key on it. */
     private final String sessionId = UUID.randomUUID().toString();
@@ -98,6 +104,8 @@ public final class Session implements Closeable {
      * the heartbeat task to build each HEARTBEAT message body.
      */
     private final Set<String> liveQueryIds = ConcurrentHashMap.newKeySet();
+    /** The live queryIds that are windowed, so retirement applies the windowed topic policy. */
+    private final Set<String> windowedQueryIds = ConcurrentHashMap.newKeySet();
     /** {@code null} when heartbeats are disabled. */
     private final ScheduledExecutorService heartbeatScheduler;
     private final long heartbeatIntervalSeconds;
@@ -109,6 +117,20 @@ public final class Session implements Closeable {
             String privateTopicNamespace,
             PrivateTopicPolicy privateTopicPolicy,
             long heartbeatIntervalSeconds) throws PulsarClientException {
+        this(pulsarClient, ownsPulsarClient, pulsarAdmin, ownsPulsarAdmin, controlTopic, privateTopicTenant,
+                privateTopicNamespace, privateTopicPolicy, PrivateTopicPolicy.WINDOWED_DEFAULT,
+                heartbeatIntervalSeconds);
+    }
+
+    Session(PulsarClient pulsarClient, boolean ownsPulsarClient,
+            PulsarAdmin pulsarAdmin, boolean ownsPulsarAdmin,
+            String controlTopic,
+            String privateTopicTenant,
+            String privateTopicNamespace,
+            PrivateTopicPolicy privateTopicPolicy,
+            PrivateTopicPolicy windowedPrivateTopicPolicy,
+            long heartbeatIntervalSeconds) throws PulsarClientException {
+        this.windowedPrivateTopicPolicy = windowedPrivateTopicPolicy;
         this.pulsarClient        = pulsarClient;
         this.ownsPulsarClient    = ownsPulsarClient;
         this.pulsarAdmin         = pulsarAdmin;
@@ -332,7 +354,7 @@ public final class Session implements Closeable {
         String privateTopic = String.format("persistent://%s/%s/filtered-%s",
                 privateTopicTenant, privateTopicNamespace, queryId);
 
-        createAndConfigurePrivateTopic(privateTopic);
+        createAndConfigurePrivateTopic(privateTopic, privateTopicPolicy);
 
         FilterRequest req = FilterRequest.register(sourceTopics, privateTopic, userSelector,
                 keyDeserializer, valueDeserializer, valueSchema, clientType);
@@ -374,13 +396,15 @@ public final class Session implements Closeable {
         // Stop heartbeating this queryId BEFORE publishing UNREGISTER, so a heartbeat that races
         // with the UNREGISTER cannot re-touch a queryId we are about to retract.
         liveQueryIds.remove(pq.queryId());
+        PrivateTopicPolicy policy = windowedQueryIds.remove(pq.queryId())
+                ? windowedPrivateTopicPolicy : privateTopicPolicy;
         try {
             publishFilterRequest(pq.queryId(), FilterRequest.unregister());
             LOG.info("Retracted query queryId={}", pq.queryId());
         } catch (PulsarClientException e) {
             LOG.warn("Failed to retract queryId={}: {}", pq.queryId(), e.getMessage());
         }
-        if (privateTopicPolicy.isDeleteOnClose()) {
+        if (policy.isDeleteOnClose()) {
             safeDeletePrivateTopic(pq.privateTopic());
         }
     }
@@ -401,6 +425,23 @@ public final class Session implements Closeable {
                                       SubscriptionInitialPosition initialPosition,
                                       Schema<V> valueSchema,
                                       ValueSchemaInfo valueSchemaInfo) throws PulsarClientException {
+        return subscribeFiltered(sourceTopics, userSelector, subscriptionName, subscriptionType, initialPosition,
+                valueSchema, valueSchemaInfo, null);
+    }
+
+    /**
+     * As above; with {@code liveOnlyProgress} non-null ({@code TimeWindow.liveOnly()}), the consumer
+     * also implements {@link WindowControl}, caught up from the start. It runs on the same shared live
+     * filter as any other live query.
+     */
+    <V> Consumer<V> subscribeFiltered(List<String> sourceTopics,
+                                      String userSelector,
+                                      String subscriptionName,
+                                      SubscriptionType subscriptionType,
+                                      SubscriptionInitialPosition initialPosition,
+                                      Schema<V> valueSchema,
+                                      ValueSchemaInfo valueSchemaInfo,
+                                      WindowProgress liveOnlyProgress) throws PulsarClientException {
         // Forward the value schema name as the valueDeserializer (parity with the Kafka SDK's
         // per-input-topic mismatch detection) and the full SchemaInfo for the function. No key
         // schema — Pulsar keys are always Strings.
@@ -418,7 +459,81 @@ public final class Session implements Closeable {
                     .subscriptionInitialPosition(initialPosition)
                     .subscribe();
             String storedUserSelector = (userSelector == null || userSelector.isBlank()) ? null : userSelector;
-            return new FilteringPulsarConsumer<>(this, pq, underlying, storedUserSelector);
+            return liveOnlyProgress == null
+                    ? new FilteringPulsarConsumer<>(this, pq, underlying, storedUserSelector)
+                    : new WindowedPulsarConsumer<>(this, pq, underlying, storedUserSelector, liveOnlyProgress);
+        } catch (RuntimeException | PulsarClientException e) {
+            retirePrivateQuery(pq);
+            throw e instanceof PulsarClientException
+                    ? (PulsarClientException) e
+                    : PulsarClientException.unwrap(e);
+        }
+    }
+
+    /**
+     * Register a windowed query: the server reads {@code sourceTopic}'s history from {@code fromMs}
+     * (epoch ms on the log's clock: broker-entry time when the broker appends it; {@code 0} means from
+     * the beginning) into a fresh private topic configured with the windowed topic policy.
+     * Bounded ({@code toMs} set, possibly in the future): the matches end with a completion record.
+     * Open-ended ({@code toMs} {@code null}): the historical matches end with a caught-up record and
+     * live matches follow. See {@link TimeWindow#resolve} for how windows map to these bounds.
+     *
+     * @throws IllegalArgumentException if the selector is malformed or the window is empty
+     * @throws PulsarClientException    on control-topic publish failure
+     */
+    public PrivateQuery registerWindowedQuery(String sourceTopic, String userSelector,
+                                              String keyDeserializer, String valueDeserializer,
+                                              ValueSchemaInfo valueSchema, ClientType clientType,
+                                              long fromMs, Long toMs) throws PulsarClientException {
+        Objects.requireNonNull(sourceTopic, "sourceTopic");
+        if (fromMs < 0 || (toMs != null && toMs <= fromMs)) {
+            throw new IllegalArgumentException("window requires 0 <= from < to, got [" + fromMs + ", " + toMs + "]");
+        }
+        Selectors.validate(userSelector);
+
+        String queryId      = UUID.randomUUID().toString();
+        String privateTopic = String.format("persistent://%s/%s/filtered-%s",
+                privateTopicTenant, privateTopicNamespace, queryId);
+        createAndConfigurePrivateTopic(privateTopic, windowedPrivateTopicPolicy);
+
+        FilterRequest req = FilterRequest.registerWindowed(sourceTopic, privateTopic, userSelector,
+                keyDeserializer, valueDeserializer, valueSchema, clientType, fromMs, toMs);
+        publishFilterRequest(queryId, req);
+        liveQueryIds.add(queryId);
+        windowedQueryIds.add(queryId);
+
+        LOG.info("Registered windowed query queryId={} private={} source={} window=[{}, {}] selector=[{}] clientType={}",
+                queryId, privateTopic, sourceTopic, fromMs, toMs == null ? "open" : toMs, userSelector, clientType);
+        return new PrivateQuery(queryId, privateTopic, List.of(sourceTopic));
+    }
+
+    /**
+     * Windowed counterpart of {@link #subscribeFiltered}: registers the window, then subscribes from
+     * the start of the private topic (the windowed topic policy retains results until they're read).
+     */
+    <V> Consumer<V> subscribeWindowed(String sourceTopic,
+                                      String userSelector,
+                                      String subscriptionName,
+                                      SubscriptionType subscriptionType,
+                                      Schema<V> valueSchema,
+                                      ValueSchemaInfo valueSchemaInfo,
+                                      long fromMs, Long toMs) throws PulsarClientException {
+        String valueDeserializer = valueSchemaInfo == null ? null : valueSchemaInfo.getName();
+        PrivateQuery pq = registerWindowedQuery(sourceTopic, userSelector, null, valueDeserializer,
+                valueSchemaInfo, ClientType.PULSAR, fromMs, toMs);
+        String resolvedSubName = (subscriptionName == null || subscriptionName.isBlank())
+                ? "session-" + UUID.randomUUID()
+                : subscriptionName;
+        try {
+            Consumer<V> underlying = pulsarClient.newConsumer(valueSchema)
+                    .topic(pq.privateTopic())
+                    .subscriptionName(resolvedSubName)
+                    .subscriptionType(subscriptionType)
+                    .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest)
+                    .subscribe();
+            String storedUserSelector = (userSelector == null || userSelector.isBlank()) ? null : userSelector;
+            return new WindowedPulsarConsumer<>(this, pq, underlying, storedUserSelector,
+                    WindowProgress.forWindow(toMs == null));
         } catch (RuntimeException | PulsarClientException e) {
             retirePrivateQuery(pq);
             throw e instanceof PulsarClientException
@@ -431,7 +546,7 @@ public final class Session implements Closeable {
     // Internal helpers
     // =============================================================================
 
-    private void createAndConfigurePrivateTopic(String privateTopic) {
+    private void createAndConfigurePrivateTopic(String privateTopic, PrivateTopicPolicy privateTopicPolicy) {
         if (pulsarAdmin == null || !privateTopicPolicy.isApplyPerTopicPolicies()) {
             return;
         }

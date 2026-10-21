@@ -103,6 +103,8 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     static final String METRIC_SEND_FAILURES = "filter.send.failures";
     /** Windowed queries whose completion record was sent. */
     static final String METRIC_WINDOWS_COMPLETED = "filter.windows.completed";
+    /** Open-ended windows whose caught-up record was sent. */
+    static final String METRIC_WINDOWS_CAUGHT_UP = "filter.windows.caught_up";
 
     /**
      * Per-message wall-clock processing time in milliseconds. Recorded as a sample (double) so
@@ -260,6 +262,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         for (CompiledQuery cq : compiled.values()) {
             WindowState window = cq.window();
             boolean completeAfterThis = false;
+            boolean caughtUpAfterThis = false;
             if (window != null) {
                 if (!windowFieldsResolved) {
                     srcMessage = record.getMessage().orElse(null);
@@ -274,7 +277,12 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                     completionSends = append(completionSends, sendCompletion(ctx, cq));
                     continue;
                 }
+                if (admission == WindowState.Admission.FIRST_AFTER_HISTORY) {
+                    // Marks the end of history before this (live) record's match.
+                    completionSends = append(completionSends, sendCaughtUp(ctx, cq));
+                }
                 completeAfterThis = admission == WindowState.Admission.LAST_IN_WINDOW;
+                caughtUpAfterThis = admission == WindowState.Admission.LAST_OF_HISTORY;
                 window.recordScanned(logTime, payloadBytes);
             }
             if (cq.evaluator().matches(bindings, cq.valueDecoder())) {
@@ -329,6 +337,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
             if (completeAfterThis) {
                 // Sent after this record's match on the same producer, so it follows it in the output.
                 completionSends = append(completionSends, sendCompletion(ctx, cq));
+            }
+            if (caughtUpAfterThis) {
+                completionSends = append(completionSends, sendCaughtUp(ctx, cq));
             }
         }
 
@@ -426,31 +437,51 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     }
 
     /**
-     * Write a windowed query's completion record ({@link WindowProtocol#COMPLETE_PROPERTY}, value =
-     * JSON {@link WindowStats}) to its output topic. It goes through the same output producer as the
+     * Write a windowed query's completion record ({@link WindowProtocol#COMPLETE_PROPERTY}; null value,
+     * JSON {@link WindowStats} in {@link WindowProtocol#STATS_PROPERTY}) to its output topic. It goes through the same output producer as the
      * query's matches, so it follows every match already sent. If the send fails the window is
      * reopened, so the redelivered record completes it again.
      */
     private CompletableFuture<?> sendCompletion(Context ctx, CompiledQuery cq) throws PulsarClientException {
         WindowStats stats = cq.window().complete(cq.queryId());
-        byte[] value;
+        LOG.info("Window complete: {}", stats);
+        return sendMarker(ctx, cq, WindowProtocol.COMPLETE_PROPERTY, stats, cq.window()::reopen, METRIC_WINDOWS_COMPLETED);
+    }
+
+    /**
+     * Write an open-ended window's caught-up record ({@link WindowProtocol#CAUGHT_UP_PROPERTY}; stats for
+     * the historical part in {@link WindowProtocol#STATS_PROPERTY}): everything up to the end of history has been
+     * sent; live matches follow. Reopened on a failed send, like the completion record.
+     */
+    private CompletableFuture<?> sendCaughtUp(Context ctx, CompiledQuery cq) throws PulsarClientException {
+        WindowStats stats = cq.window().caughtUp(cq.queryId());
+        LOG.info("Window caught up: {}", stats);
+        return sendMarker(ctx, cq, WindowProtocol.CAUGHT_UP_PROPERTY, stats, cq.window()::reopenCaughtUp,
+                METRIC_WINDOWS_CAUGHT_UP);
+    }
+
+    private CompletableFuture<?> sendMarker(Context ctx, CompiledQuery cq, String property, WindowStats stats,
+                                            Runnable onFailure, String metric) throws PulsarClientException {
+        String statsJson;
         try {
-            value = MAPPER.writeValueAsBytes(stats);
+            statsJson = MAPPER.writeValueAsString(stats);
         } catch (JsonProcessingException e) {
             throw new UncheckedIOException(e);
         }
-        LOG.info("Window complete: {}", stats);
+        // Null value: a Kafka consumer's value deserializer (Avro, JSON schema, ...) accepts null, but
+        // would fail on a payload it doesn't expect. The stats travel as a property / header.
         return ctx.newOutputMessage(cq.outputTopic(), Schema.BYTES)
-                .value(value)
-                .property(WindowProtocol.COMPLETE_PROPERTY, "true")
+                .value(null)
+                .property(property, "true")
+                .property(WindowProtocol.STATS_PROPERTY, statsJson)
                 .sendAsync()
                 .whenComplete((r, e) -> {
                     if (e != null) {
-                        LOG.warn("Completion record for query id={} failed; reopening window: {}",
-                                cq.queryId(), e.getMessage());
-                        cq.window().reopen();
+                        LOG.warn("{} record for query id={} failed; will write it again on redelivery: {}",
+                                property, cq.queryId(), e.getMessage());
+                        onFailure.run();
                     } else {
-                        ctx.recordMetric(METRIC_WINDOWS_COMPLETED, 1.0);
+                        ctx.recordMetric(metric, 1.0);
                     }
                 });
     }

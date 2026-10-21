@@ -1075,6 +1075,7 @@ class OrchestratorFunctionTests {
         when(p.newMessage()).thenReturn(b);
         when(b.property(anyString(), anyString())).thenReturn(b);
         when(b.value(any(byte[].class))).thenReturn(b);
+        when(b.value(isNull())).thenReturn(b);
         return b;
     }
 
@@ -1132,9 +1133,10 @@ class OrchestratorFunctionTests {
         verify(spawner, never()).spawnWindowed(any(), any(), any(), any(), any(), any());
         verify(pulsarClient).newProducer(any(Schema.class));
         verify(completion).property(WindowProtocol.COMPLETE_PROPERTY, "true");
-        ArgumentCaptor<byte[]> value = ArgumentCaptor.forClass(byte[].class);
-        verify(completion).value(value.capture());
-        com.fasterxml.jackson.databind.JsonNode stats = MAPPER.readTree(value.getValue());
+        verify(completion).value(isNull());   // stats travel in a property, not the value
+        ArgumentCaptor<String> statsJson = ArgumentCaptor.forClass(String.class);
+        verify(completion).property(eq(WindowProtocol.STATS_PROPERTY), statsJson.capture());
+        com.fasterxml.jackson.databind.JsonNode stats = MAPPER.readTree(statsJson.getValue());
         assertThat(stats.get("matched").asLong()).isZero();
         assertThat(stats.get("status").asText()).isEqualTo("TRUNCATED_BY_RETENTION");
         assertThat(stats.get("endedBy").asText()).isEqualTo("LOG_END");
@@ -1208,5 +1210,60 @@ class OrchestratorFunctionTests {
         assertThat(t.getActiveQueryIds()).isEmpty();
         assertThat(t.getIdleSince()).isNotNull();
         assertThat(tableStorage).doesNotContainKey(RegistryStore.QUERY_KEY_PREFIX + queryId);
+    }
+
+    // ---------------------------------------------------------------- open-ended windowed REGISTER
+
+    private FilterRequest openEndedRequest() {
+        return FilterRequest.registerWindowed(WIN_SOURCE, WIN_OUTPUT, "__key__ = '8675309'",
+                null, null, null, ClientType.KAFKA, 1_000L, null);
+    }
+
+    /** Stubs spawnWindowed to run the publish callback against {@code ctrl}. */
+    private void stubWindowedSpawn(String ctrl) throws Exception {
+        stubControlProducer(ctrl);
+        doAnswer(inv -> {
+            ((FilterFunctionSpawner.ControlTopicAction) inv.getArgument(5)).accept(ctrl);
+            return RegistryEntry.newEntry(ctrl, "selector-filter-win-x", inv.getArgument(3));
+        }).when(spawner).spawnWindowed(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void openEndedWindowWithHistorySpawnsWithTheEndOfHistory() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        WindowPreparer preparer = mock(WindowPreparer.class);
+        WindowSpec spec = new WindowSpec(1_000L, null, 9L, 188L, false);
+        when(preparer.prepare(eq(WIN_SOURCE), eq("win-" + queryId), eq(1_000L), isNull()))
+                .thenReturn(new WindowPreparer.WindowPlan(spec, false));
+        String ctrl = "persistent://public/filtered/ctrl-win-x";
+        stubWindowedSpawn(ctrl);
+
+        orchestratorWith(preparer).process(serialize(openEndedRequest()), contextFor(queryId));
+
+        QueryMessage qm = MAPPER.readValue(controlPublishes.get(ctrl).get(0).value(), QueryMessage.class);
+        assertThat(qm.getWindow()).isEqualTo(spec);
+        assertThat(qm.getWindow().isOpenEnded()).isTrue();
+        verify(pulsarClient, never()).newProducer(any(Schema.class));   // no marker from the orchestrator
+    }
+
+    @Test
+    void openEndedWindowWithoutHistoryMarksCaughtUpAndStillSpawns() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        WindowPreparer preparer = mock(WindowPreparer.class);
+        when(preparer.prepare(any(), any(), org.mockito.ArgumentMatchers.anyLong(), isNull()))
+                .thenReturn(new WindowPreparer.WindowPlan(new WindowSpec(1_000L, null, 9L, 1L, false), true));
+        TypedMessageBuilder<byte[]> marker = stubOutputProducer();
+        String ctrl = "persistent://public/filtered/ctrl-win-x";
+        stubWindowedSpawn(ctrl);
+
+        orchestratorWith(preparer).process(serialize(openEndedRequest()), contextFor(queryId));
+
+        verify(marker).property(WindowProtocol.CAUGHT_UP_PROPERTY, "true");
+        verify(marker, never()).property(eq(WindowProtocol.COMPLETE_PROPERTY), anyString());
+        // Spawned for the live part, without an end position: the filter must not mark caught-up again.
+        QueryMessage qm = MAPPER.readValue(controlPublishes.get(ctrl).get(0).value(), QueryMessage.class);
+        assertThat(qm.getWindow().isOpenEnded()).isTrue();
+        assertThat(qm.getWindow().hasEndPosition()).isFalse();
+        assertThat(tableStorage).containsKey(RegistryStore.TOPIC_KEY_PREFIX + "window:" + queryId);
     }
 }

@@ -22,11 +22,24 @@ package io.streamnative.filter.common;
 /**
  * Reserved message properties on a windowed query's output topic. Kafka clients (via KoP) see them
  * as record headers.
+ *
+ * <p>The marker records ({@link #COMPLETE_PROPERTY}, {@link #CAUGHT_UP_PROPERTY}) have a null value and
+ * carry their {@link WindowStats} in {@link #STATS_PROPERTY}, so no consumer's value decoding (e.g. a
+ * Kafka Avro deserializer) ever sees a payload it doesn't expect.
  */
 public final class WindowProtocol {
 
-    /** Set to {@code "true"} on the completion record; its value is a JSON {@link WindowStats}. */
+    /** Set to {@code "true"} on the completion record: nothing follows it. */
     public static final String COMPLETE_PROPERTY = "__window_complete__";
+
+    /**
+     * Set to {@code "true"} on an open-ended window's caught-up record: everything up to the end of
+     * history (the log end when the query was registered) has been delivered; live matches follow.
+     */
+    public static final String CAUGHT_UP_PROPERTY = "__window_caught_up__";
+
+    /** On a marker record: the window's {@link WindowStats} as JSON (for the history, when caught up). */
+    public static final String STATS_PROPERTY = "__window_stats__";
 
     /** Source message ID of a forwarded match ({@code ledger:entry:partition:batch}); the dedupe key. */
     public static final String SRC_MSGID_PROPERTY = "__src_msgid__";

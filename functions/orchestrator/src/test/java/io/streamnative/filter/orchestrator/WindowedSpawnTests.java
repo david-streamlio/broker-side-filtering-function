@@ -170,6 +170,28 @@ class WindowedSpawnTests {
     }
 
     @Test
+    void openEndedWindowWithoutHistoryKeepsTheSubscriptionForLiveEvents() throws Exception {
+        givenTopic(0, true);
+        givenLog(9, 188, 500L, 900L);
+
+        WindowPreparer.WindowPlan plan = new ClientWindowPreparer(client, admin).prepare(TOPIC, SUB, 1_000L, null);
+
+        assertThat(plan.empty()).isTrue();
+        assertThat(plan.spec().isOpenEnded()).isTrue();
+        verify(consumer).close();
+        verify(consumer, never()).unsubscribe();
+    }
+
+    @Test
+    void windowFromTheBeginningIsNeverTruncated() throws Exception {
+        givenTopic(0, true);
+        givenLog(9, 188, 1_500L, 1_900L);
+
+        assertThat(new ClientWindowPreparer(client, admin).prepare(TOPIC, SUB, 0L, 2_000L).spec()
+                .isTruncatedByRetention()).isFalse();
+    }
+
+    @Test
     void singlePartitionTopicIsReadThroughItsPartition() throws Exception {
         givenTopic(1, true);
         givenLog(4, 7, 500L, 1_900L);

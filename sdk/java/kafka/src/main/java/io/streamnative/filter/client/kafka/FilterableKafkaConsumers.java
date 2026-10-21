@@ -19,6 +19,7 @@
 
 package io.streamnative.filter.client.kafka;
 
+import io.streamnative.filter.api.FilterControl;
 import io.streamnative.filter.client.Session;
 
 import java.util.Properties;

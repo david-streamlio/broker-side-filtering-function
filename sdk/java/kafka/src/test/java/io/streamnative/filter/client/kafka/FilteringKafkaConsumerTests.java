@@ -21,7 +21,7 @@ package io.streamnative.filter.client.kafka;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.streamnative.filter.client.FilterControl;
+import io.streamnative.filter.api.FilterControl;
 import io.streamnative.filter.client.kafka.KafkaTestFixtures.Mocks;
 import io.streamnative.filter.common.Command;
 import io.streamnative.filter.common.FilterRequest;

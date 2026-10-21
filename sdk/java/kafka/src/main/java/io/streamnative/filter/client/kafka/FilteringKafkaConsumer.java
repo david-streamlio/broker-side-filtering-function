@@ -19,7 +19,8 @@
 
 package io.streamnative.filter.client.kafka;
 
-import io.streamnative.filter.client.FilterControl;
+import io.streamnative.filter.api.FilterException;
+import io.streamnative.filter.api.FilterControl;
 import io.streamnative.filter.client.PrivateQuery;
 import io.streamnative.filter.client.Session;
 import org.apache.kafka.clients.consumer.Consumer;
@@ -56,9 +57,9 @@ import java.util.regex.Pattern;
  * builder time; callers who want a different subscription should build a new filtered consumer.
  *
  * <p>{@link #close()} closes the underlying Kafka consumer and retires the registered query on
- * the Pulsar control topic.
+ * the Pulsar control topic. {@link WindowedKafkaConsumer} extends it for windowed queries.
  */
-final class FilteringKafkaConsumer<K, V> implements Consumer<K, V>, FilterControl {
+class FilteringKafkaConsumer<K, V> implements Consumer<K, V>, FilterControl {
 
     private static final Logger LOG = LoggerFactory.getLogger(FilteringKafkaConsumer.class);
 
@@ -68,7 +69,7 @@ final class FilteringKafkaConsumer<K, V> implements Consumer<K, V>, FilterContro
 
     private final Session session;
     private final PrivateQuery query;
-    private final Consumer<K, V> delegate;
+    final Consumer<K, V> delegate;
     private volatile String userSelector;
     private volatile boolean closed;
 
@@ -82,11 +83,15 @@ final class FilteringKafkaConsumer<K, V> implements Consumer<K, V>, FilterContro
     // ------------------------------------------------------------------ FilterControl
 
     @Override
-    public synchronized void setSelector(String selector) throws PulsarClientException {
+    public synchronized void setSelector(String selector) {
         if (closed) {
             throw new IllegalStateException("Consumer is closed");
         }
-        session.updatePrivateQuery(query, selector);
+        try {
+            session.updatePrivateQuery(query, selector);
+        } catch (PulsarClientException e) {
+            throw new FilterException("Failed to change the selector of queryId=" + query.queryId(), e);
+        }
         this.userSelector = (selector == null || selector.isBlank()) ? null : selector;
     }
 

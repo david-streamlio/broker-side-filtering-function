@@ -19,7 +19,7 @@
 
 package io.streamnative.filter.client.kafka;
 
-import io.streamnative.filter.client.FilterControl;
+import io.streamnative.filter.api.FilterControl;
 import io.streamnative.filter.client.PrivateTopicPolicy;
 import io.streamnative.filter.client.Session;
 import org.apache.kafka.clients.consumer.Consumer;

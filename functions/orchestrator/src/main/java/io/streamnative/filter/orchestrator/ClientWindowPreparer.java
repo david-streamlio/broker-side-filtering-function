@@ -69,7 +69,7 @@ final class ClientWindowPreparer implements WindowPreparer {
     }
 
     @Override
-    public WindowPlan prepare(String sourceTopic, String subscription, long fromMs, long toMs) throws Exception {
+    public WindowPlan prepare(String sourceTopic, String subscription, long fromMs, Long toMs) throws Exception {
         String log = singleLog(sourceTopic);
         // Paused: positioning the subscription must not pull messages off it.
         Consumer<byte[]> consumer = client.newConsumer(Schema.BYTES)
@@ -87,15 +87,16 @@ final class ClientWindowPreparer implements WindowPreparer {
 
             Long earliestTime = hasMessages ? logTimeAt(log, MessageId.earliest, false) : null;
             Long lastTime = hasMessages ? logTimeAt(log, lastId, true) : null;
-            boolean truncated = earliestTime != null && earliestTime > fromMs;
+            // fromMs = 0 asks for everything retained: getting it is not a truncation.
+            boolean truncated = fromMs > 0 && earliestTime != null && earliestTime > fromMs;
             // The log's clock only moves forward (broker-entry time), so if the last message is
             // before the window start, nothing in the window exists.
             boolean empty = !hasMessages || lastTime == null || lastTime < fromMs;
 
             WindowSpec spec = new WindowSpec(fromMs, toMs,
                     hasMessages ? end.ledgerId() : null, hasMessages ? end.entryId() : null, truncated);
-            if (empty) {
-                consumer.unsubscribe();   // no filter will use it
+            if (empty && toMs != null) {
+                consumer.unsubscribe();   // a bounded empty window: no filter will use it
             } else {
                 consumer.close();         // the subscription stays, positioned at fromMs
             }

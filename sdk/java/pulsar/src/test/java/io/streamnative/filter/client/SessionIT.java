@@ -19,6 +19,7 @@
 
 package io.streamnative.filter.client;
 
+import io.streamnative.filter.api.FilterControl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.DescriptorProtos.DescriptorProto;
 import com.google.protobuf.DescriptorProtos.FieldDescriptorProto;

@@ -19,7 +19,7 @@
 
 package io.streamnative.filter.demo;
 
-import io.streamnative.filter.client.FilterControl;
+import io.streamnative.filter.api.FilterControl;
 import io.streamnative.filter.client.Session;
 import io.streamnative.filter.client.kafka.FilterableKafkaConsumerBuilder;
 import io.streamnative.filter.client.kafka.FilterableKafkaConsumers;
@@ -175,7 +175,7 @@ public final class MultiQueryDemo {
                             .subscribe();
                     consumers.add(consumer);
                     // The SDK's consumer implements both Kafka's Consumer<K,V> AND
-                    // io.streamnative.filter.client.FilterControl — cast to read
+                    // io.streamnative.filter.api.FilterControl — cast to read
                     // the orchestrator-assigned queryId for correlation with the UI.
                     String queryId = ((FilterControl) consumer).queryId();
                     logger.info("Registered '{}' as queryId={}  (topics: {})  (selector: {})",

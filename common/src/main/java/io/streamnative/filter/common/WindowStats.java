@@ -26,9 +26,11 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.Objects;
 
 /**
- * Completion evidence for a windowed query: the value of the completion record the filter function
- * writes to the query's output topic (property {@link WindowProtocol#COMPLETE_PROPERTY}) after the
- * last match.
+ * Completion evidence for a windowed query, carried as JSON in the {@link WindowProtocol#STATS_PROPERTY}
+ * of the record that closes a window's history on its output topic. For a bounded window that is the completion record (property
+ * {@link WindowProtocol#COMPLETE_PROPERTY}) after the last match; for an open-ended window, the
+ * caught-up record ({@link WindowProtocol#CAUGHT_UP_PROPERTY}) after the last historical match, with
+ * {@code windowToMs} {@code null}.
  *
  * <p>Counts cover the records the function scanned inside the window, so a client can see how much
  * the server read to answer it. They reset if the function restarts mid-window (at-least-once
@@ -56,7 +58,7 @@ public final class WindowStats {
 
     private final String queryId;
     private final long windowFromMs;
-    private final long windowToMs;
+    private final Long windowToMs;
     private final long scanned;
     private final long matched;
     private final long bytesScanned;
@@ -69,7 +71,7 @@ public final class WindowStats {
     @JsonCreator
     public WindowStats(@JsonProperty("queryId") String queryId,
                        @JsonProperty("windowFromMs") long windowFromMs,
-                       @JsonProperty("windowToMs") long windowToMs,
+                       @JsonProperty("windowToMs") Long windowToMs,
                        @JsonProperty("scanned") long scanned,
                        @JsonProperty("matched") long matched,
                        @JsonProperty("bytesScanned") long bytesScanned,
@@ -93,7 +95,8 @@ public final class WindowStats {
 
     public String getQueryId()        { return queryId; }
     public long getWindowFromMs()     { return windowFromMs; }
-    public long getWindowToMs()       { return windowToMs; }
+    /** End of the window, or {@code null} for an open-ended window. */
+    public Long getWindowToMs()       { return windowToMs; }
     public long getScanned()          { return scanned; }
     public long getMatched()          { return matched; }
     public long getBytesScanned()     { return bytesScanned; }
@@ -106,7 +109,7 @@ public final class WindowStats {
     @Override
     public boolean equals(Object o) {
         if (!(o instanceof WindowStats that)) return false;
-        return windowFromMs == that.windowFromMs && windowToMs == that.windowToMs
+        return windowFromMs == that.windowFromMs && Objects.equals(windowToMs, that.windowToMs)
                 && scanned == that.scanned && matched == that.matched
                 && bytesScanned == that.bytesScanned && elapsedMs == that.elapsedMs
                 && Objects.equals(queryId, that.queryId)

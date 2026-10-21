@@ -55,6 +55,7 @@ import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -99,6 +100,7 @@ class SelectorFilterFunctionTests {
     private TypedMessageBuilder<byte[]> mockOutputBuilder(String outputTopic, CompletableFuture<?> sendResult) throws Exception {
         TypedMessageBuilder<byte[]> b = (TypedMessageBuilder<byte[]>) Mockito.mock(TypedMessageBuilder.class);
         when(b.value(any(byte[].class))).thenReturn(b);
+        when(b.value(isNull())).thenReturn(b);   // window markers have a null value
         when(b.properties(any(Map.class))).thenReturn(b);
         when(b.key(anyString())).thenReturn(b);
         when(b.eventTime(anyLong())).thenReturn(b);
@@ -905,11 +907,12 @@ class SelectorFilterFunctionTests {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WINDOW_OUT = "persistent://public/filtered/window-out";
 
-    private byte[] windowedQueryJson(String selector, long from, long to, Long endLedger, Long endEntry) {
+    private byte[] windowedQueryJson(String selector, long from, Long to, Long endLedger, Long endEntry) {
         String end = endLedger == null ? "" : String.format(",\"endLedgerId\":%d,\"endEntryId\":%d", endLedger, endEntry);
+        String toField = to == null ? "" : String.format(",\"toMs\":%d", to);
         String json = String.format(
-                "{\"name\":\"w\",\"selector\":\"%s\",\"outputTopic\":\"%s\",\"window\":{\"fromMs\":%d,\"toMs\":%d%s}}",
-                selector.replace("\"", "\\\""), WINDOW_OUT, from, to, end);
+                "{\"name\":\"w\",\"selector\":\"%s\",\"outputTopic\":\"%s\",\"window\":{\"fromMs\":%d%s%s}}",
+                selector.replace("\"", "\\\""), WINDOW_OUT, from, toField, end);
         return json.getBytes(StandardCharsets.UTF_8);
     }
 
@@ -931,10 +934,12 @@ class SelectorFilterFunctionTests {
         return fn;
     }
 
+    /** The stats of the last marker: JSON in the stats property; the marker's value is null. */
     private static JsonNode completionStats(TypedMessageBuilder<byte[]> builder) throws Exception {
-        ArgumentCaptor<byte[]> values = ArgumentCaptor.forClass(byte[].class);
-        verify(builder, Mockito.atLeastOnce()).value(values.capture());
-        return JSON.readTree(values.getValue());
+        ArgumentCaptor<String> stats = ArgumentCaptor.forClass(String.class);
+        verify(builder, Mockito.atLeastOnce()).property(eq(WindowProtocol.STATS_PROPERTY), stats.capture());
+        verify(builder, Mockito.atLeastOnce()).value(isNull());
+        return JSON.readTree(stats.getValue());
     }
 
     @Test
@@ -1064,5 +1069,51 @@ class SelectorFilterFunctionTests {
 
         verify(builder, never()).property(anyString(), anyString());
         verify(record).ack();
+    }
+
+    // ---------------------- open-ended windowed queries ----------------------
+
+    private SelectorFilterFunction openWindowedFunction(Long endLedger, Long endEntry) throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+        fn.loadQueryForTest("w1", windowedQueryJson("__key__ = 'AAPL'", 1_000L, null, endLedger, endEntry));
+        return fn;
+    }
+
+    @Test
+    void openEndedWindowWritesCaughtUpAtTheEndOfHistoryThenKeepsForwarding() throws Exception {
+        SelectorFilterFunction fn = openWindowedFunction(5L, 1L);
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(WINDOW_OUT, CompletableFuture.completedFuture(null));
+        byte[] history = "h".getBytes(StandardCharsets.UTF_8);
+        byte[] live = "l".getBytes(StandardCharsets.UTF_8);
+
+        givenSource(1_500L, 5, 1);
+        assertThat(fn.process(history, ctx)).isCompleted();
+        givenSource(9_999_999_999_999L, 5, 2);   // far past any toMs: open-ended windows don't end
+        assertThat(fn.process(live, ctx)).isCompleted();
+
+        InOrder order = inOrder(builder);
+        order.verify(builder).value(history);
+        order.verify(builder).property(WindowProtocol.CAUGHT_UP_PROPERTY, "true");
+        order.verify(builder).value(live);
+        verify(builder, never()).property(eq(WindowProtocol.COMPLETE_PROPERTY), anyString());
+        verify(builder, times(1)).property(eq(WindowProtocol.CAUGHT_UP_PROPERTY), anyString());
+        assertThat(fn.queryForTest("w1").window().isDone()).isFalse();
+        verify(ctx).recordMetric(eq(SelectorFilterFunction.METRIC_WINDOWS_CAUGHT_UP), anyDouble());
+    }
+
+    @Test
+    void openEndedWindowMarksTheEndOfHistoryBeforeTheFirstLiveRecord() throws Exception {
+        SelectorFilterFunction fn = openWindowedFunction(5L, 1L);
+        TypedMessageBuilder<byte[]> builder = mockOutputBuilder(WINDOW_OUT, CompletableFuture.completedFuture(null));
+        byte[] live = "l".getBytes(StandardCharsets.UTF_8);
+        givenSource(9_000L, 5, 2);   // the end-of-history record itself was never seen
+
+        assertThat(fn.process(live, ctx)).isCompleted();
+
+        InOrder order = inOrder(builder);
+        order.verify(builder).property(WindowProtocol.CAUGHT_UP_PROPERTY, "true");
+        order.verify(builder).value(live);
     }
 }

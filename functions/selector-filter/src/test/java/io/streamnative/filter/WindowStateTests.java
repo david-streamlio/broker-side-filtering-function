@@ -40,6 +40,10 @@ class WindowStateTests {
         return new WindowState(new WindowSpec(1_000L, 2_000L, endLedger, endEntry, truncated), clock::get);
     }
 
+    private WindowState openWindow(Long endLedger, Long endEntry) {
+        return new WindowState(new WindowSpec(1_000L, null, endLedger, endEntry, false), clock::get);
+    }
+
     private static LogPosition pos(long ledger, long entry) {
         return LogPosition.fromBytes(new MessageIdImpl(ledger, entry, -1).toByteArray());
     }
@@ -172,5 +176,49 @@ class WindowStateTests {
         w.complete("q");
         w.reopen();
         assertThat(w.admit(2_500L, null)).isEqualTo(Admission.PAST_WINDOW);
+    }
+
+    // ---------- open-ended windows ----------
+
+    @Test
+    void openEndedWindowNeverEndsByTime() {
+        WindowState w = openWindow(null, null);
+        assertThat(w.admit(999L, null)).isEqualTo(Admission.BEFORE_WINDOW);
+        assertThat(w.admit(9_999_999_999_999L, null)).isEqualTo(Admission.IN_WINDOW);
+    }
+
+    @Test
+    void openEndedWindowMarksTheEndOfHistoryOnceThenStaysLive() {
+        WindowState w = openWindow(6L, 0L);
+        assertThat(w.admit(1_500L, pos(5, 99))).isEqualTo(Admission.IN_WINDOW);
+        assertThat(w.admit(1_500L, pos(6, 0))).isEqualTo(Admission.LAST_OF_HISTORY);
+        WindowStats stats = w.caughtUp("q");
+        assertThat(stats.getWindowToMs()).isNull();
+        assertThat(stats.getEndedBy()).isEqualTo(WindowStats.EndedBy.LOG_END);
+        assertThat(w.isCaughtUp()).isTrue();
+        assertThat(w.admit(9_000L, pos(6, 1))).isEqualTo(Admission.IN_WINDOW);
+        assertThat(w.admit(9_000L, pos(7, 0))).isEqualTo(Admission.IN_WINDOW);
+        assertThat(w.isDone()).isFalse();
+    }
+
+    @Test
+    void openEndedWindowMarksTheEndOfHistoryBeforeALaterRecordIfNeeded() {
+        WindowState w = openWindow(6L, 0L);
+        assertThat(w.admit(1_500L, pos(6, 1))).isEqualTo(Admission.FIRST_AFTER_HISTORY);
+    }
+
+    @Test
+    void openEndedBatchAtTheEndOfHistoryMarksAfterItsLastMessage() {
+        WindowState w = openWindow(6L, 0L);
+        assertThat(w.admit(1_500L, batchPos(6, 0, 0, 2))).isEqualTo(Admission.IN_WINDOW);
+        assertThat(w.admit(1_500L, batchPos(6, 0, 1, 2))).isEqualTo(Admission.LAST_OF_HISTORY);
+    }
+
+    @Test
+    void failedCaughtUpIsWrittenAgain() {
+        WindowState w = openWindow(6L, 0L);
+        w.caughtUp("q");
+        w.reopenCaughtUp();
+        assertThat(w.admit(1_500L, pos(6, 0))).isEqualTo(Admission.LAST_OF_HISTORY);
     }
 }

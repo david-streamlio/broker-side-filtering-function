@@ -31,13 +31,16 @@ class WindowTests {
 
     @Test
     void windowSpecValidation() {
-        new WindowSpec(0, 1, null, null, false).validate();
-        new WindowSpec(10, 20, 3L, 4L, false).validate();
-        assertThatThrownBy(() -> new WindowSpec(20, 20, null, null, false).validate())
+        new WindowSpec(0, 1L, null, null, false).validate();
+        new WindowSpec(10, 20L, 3L, 4L, false).validate();
+        assertThatThrownBy(() -> new WindowSpec(20, 20L, null, null, false).validate())
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("fromMs < toMs");
-        assertThatThrownBy(() -> new WindowSpec(-1, 20, null, null, false).validate())
+        assertThatThrownBy(() -> new WindowSpec(-1, 20L, null, null, false).validate())
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new WindowSpec(10, 20, 3L, null, false).validate())
+        new WindowSpec(10, null, 3L, 4L, false).validate();   // open-ended
+        assertThat(new WindowSpec(10, null, null, null, false).isOpenEnded()).isTrue();
+        assertThat(new WindowSpec(10, 20L, null, null, false).isOpenEnded()).isFalse();
+        assertThatThrownBy(() -> new WindowSpec(10, 20L, 3L, null, false).validate())
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("both");
     }
 
@@ -49,6 +52,20 @@ class WindowTests {
         String json = MAPPER.writeValueAsString(stats);
         assertThat(json).contains("\"endedBy\":\"LOG_END\"").contains("\"status\":\"COMPLETE\"");
         assertThat(MAPPER.readValue(json, WindowStats.class)).isEqualTo(stats);
+    }
+
+    @Test
+    void openEndedSpecAndStatsOmitTheEnd() throws Exception {
+        WindowSpec spec = new WindowSpec(1_000L, null, 9L, 188L, false);
+        String specJson = MAPPER.writeValueAsString(spec);
+        assertThat(specJson).doesNotContain("toMs").doesNotContain("openEnded");
+        assertThat(MAPPER.readValue(specJson, WindowSpec.class)).isEqualTo(spec);
+
+        WindowStats stats = new WindowStats("q-1", 1_000L, null, 10L, 1L, 100L, 1_001L, 1_002L, 3L,
+                WindowStats.EndedBy.LOG_END, WindowStats.Status.COMPLETE);
+        String statsJson = MAPPER.writeValueAsString(stats);
+        assertThat(statsJson).doesNotContain("windowToMs");
+        assertThat(MAPPER.readValue(statsJson, WindowStats.class)).isEqualTo(stats);
     }
 
     @Test

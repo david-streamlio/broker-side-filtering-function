@@ -19,12 +19,19 @@
 
 package io.streamnative.filter.client;
 
+import io.streamnative.filter.api.FilterControl;
+import io.streamnative.filter.api.TimeWindow;
+import io.streamnative.filter.api.WindowControl;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.ClientType;
 import io.streamnative.filter.common.Command;
 import io.streamnative.filter.common.FilterRequest;
 import io.streamnative.filter.common.ValueSchemaInfo;
+import io.streamnative.filter.common.WindowProtocol;
+import org.apache.pulsar.client.api.Message;
+import org.apache.pulsar.client.api.MessageId;
+import org.apache.pulsar.client.api.Messages;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.Topics;
 import org.apache.pulsar.client.admin.TopicPolicies;
@@ -45,7 +52,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -535,5 +544,176 @@ class SessionTests {
             String hbKey = keys.getAllValues().get(1);
             assertThat(hbKey).startsWith("heartbeat-");
         }
+    }
+
+    // ---------------------------------------------------------------- Windowed consumers
+
+    private static final String SRC = "persistent://public/in/orders";
+
+    @SuppressWarnings("unchecked")
+    private static Message<byte[]> data(String body) {
+        Message<byte[]> m = mock(Message.class);
+        when(m.getData()).thenReturn(body.getBytes());
+        when(m.getMessageId()).thenReturn(mock(MessageId.class));
+        return m;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Message<byte[]> marker(String property, String statsJson) {
+        Message<byte[]> m = mock(Message.class);
+        when(m.getProperty(property)).thenReturn("true");
+        when(m.getProperty(WindowProtocol.STATS_PROPERTY)).thenReturn(statsJson);
+        when(m.getData()).thenReturn(new byte[0]);   // null value on the wire
+        when(m.getMessageId()).thenReturn(mock(MessageId.class));
+        return m;
+    }
+
+    private static final String STATS = "{\"queryId\":\"q\",\"windowFromMs\":1,\"windowToMs\":2,\"scanned\":10,"
+            + "\"matched\":3,\"bytesScanned\":100,\"elapsedMs\":5,\"endedBy\":\"LOG_END\",\"status\":\"COMPLETE\"}";
+
+    @Test
+    void boundedWindowPublishesAWindowedRegisterOnAWindowedTopic() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        long before = System.currentTimeMillis();
+        Consumer<byte[]> c = session.newConsumer().topic(SRC).selector("__key__ = '8675309'")
+                .window(TimeWindow.last(1, TimeUnit.HOURS)).subscribe();
+        long after = System.currentTimeMillis();
+
+        FilterRequest req = capturePublished();
+        assertThat(req.isWindowed()).isTrue();
+        assertThat(req.getInputTopics()).containsExactly(SRC);
+        assertThat(req.getWindowFromMs()).isBetween(before - 3_600_000L, after - 3_600_000L);
+        assertThat(req.getWindowToMs()).isBetween(before, after);
+        verify(topicPolicies).setMessageTTL(anyString(), eq(PrivateTopicPolicy.WINDOWED_DEFAULT.getMessageTtlSeconds()));
+        verify(consumerBuilder).subscriptionInitialPosition(SubscriptionInitialPosition.Earliest);
+        WindowControl window = (WindowControl) c;
+        assertThat(window.isOpenEnded()).isFalse();
+        assertThat(window.isCaughtUp()).isFalse();
+    }
+
+    @Test
+    void openEndedAndFromTheBeginningWindows() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        Consumer<byte[]> since = session.newConsumer().topic(SRC).window(TimeWindow.since(30, TimeUnit.MINUTES)).subscribe();
+        Consumer<byte[]> all = session.newConsumer().topic(SRC).window(TimeWindow.all()).subscribe();
+
+        List<FilterRequest> reqs = captureAllPublished(2);
+        assertThat(reqs.get(0).getWindowToMs()).isNull();
+        assertThat(((WindowControl) since).isOpenEnded()).isTrue();
+        assertThat(reqs.get(1).getWindowFromMs()).isZero();
+        assertThat(reqs.get(1).getWindowToMs()).isNotNull();
+        assertThat(((WindowControl) all).isOpenEnded()).isFalse();
+    }
+
+    @Test
+    void liveOnlyIsALiveQueryCaughtUpFromTheStart() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        Consumer<byte[]> c = session.newConsumer().topic(SRC).selector("region = 'r07'")
+                .window(TimeWindow.liveOnly()).subscribe();
+
+        FilterRequest req = capturePublished();
+        assertThat(req.isWindowed()).isFalse();
+        verify(topicPolicies).setMessageTTL(anyString(), eq(PrivateTopicPolicy.DEFAULT.getMessageTtlSeconds()));
+        WindowControl window = (WindowControl) c;
+        assertThat(window.isCaughtUp()).isTrue();
+        assertThat(window.isComplete()).isFalse();
+        assertThat(window.stats()).isNull();
+        // A live query: its selector can still change.
+        asControl(c).setSelector("region = 'r08'");
+        assertThat(captureAllPublished(2).get(1).getCommand()).isEqualTo(Command.MODIFY);
+    }
+
+    @Test
+    void windowReadingHistoryNeedsExactlyOneTopic() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> session.newConsumer()
+                        .topics(List.of(SRC, "persistent://public/in/other"))
+                        .window(TimeWindow.last(1, TimeUnit.HOURS)).subscribe())
+                .isInstanceOf(IllegalStateException.class);
+        verify(controlMsgBuilder, never()).value(any(byte[].class));
+    }
+
+    @Test
+    void windowedSelectorIsFixed() throws Exception {
+        Consumer<byte[]> c = newSession(PrivateTopicPolicy.DEFAULT).newConsumer().topic(SRC)
+                .window(TimeWindow.last(1, TimeUnit.HOURS)).subscribe();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> asControl(c).setSelector("x = 1"))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void boundedConsumerSwallowsTheCompletionRecord() throws Exception {
+        Consumer<byte[]> c = newSession(PrivateTopicPolicy.DEFAULT).newConsumer().topic(SRC)
+                .window(TimeWindow.last(1, TimeUnit.HOURS)).subscribe();
+        Message<byte[]> result = data("r1");
+        Message<byte[]> done = marker(WindowProtocol.COMPLETE_PROPERTY, STATS);
+        when(consumer.receive(anyInt(), any())).thenReturn(result, done);
+        WindowControl window = (WindowControl) c;
+
+        assertThat(c.receive(1, TimeUnit.SECONDS)).isSameAs(result);
+        assertThat(window.isComplete()).isFalse();
+        assertThat(c.receive(1, TimeUnit.SECONDS)).isNull();   // the completion record, swallowed
+
+        assertThat(window.isComplete()).isTrue();
+        assertThat(window.isCaughtUp()).isTrue();
+        assertThat(window.stats().getMatched()).isEqualTo(3L);
+        assertThat(window.caughtUp()).isCompleted();
+        verify(consumer).acknowledgeAsync(done.getMessageId());
+        org.assertj.core.api.Assertions.assertThatThrownBy(c::receive).isInstanceOf(IllegalStateException.class);
+        assertThat(c.receiveAsync()).isCompletedExceptionally();
+    }
+
+    @Test
+    void openEndedConsumerSkipsTheCaughtUpRecordAndKeepsReceiving() throws Exception {
+        Consumer<byte[]> c = newSession(PrivateTopicPolicy.DEFAULT).newConsumer().topic(SRC)
+                .window(TimeWindow.since(1, TimeUnit.HOURS)).subscribe();
+        Message<byte[]> caughtUp = marker(WindowProtocol.CAUGHT_UP_PROPERTY, STATS);
+        Message<byte[]> live = data("live");
+        when(consumer.receive()).thenReturn(caughtUp, live);
+
+        assertThat(c.receive()).isSameAs(live);
+
+        WindowControl window = (WindowControl) c;
+        assertThat(window.isCaughtUp()).isTrue();
+        assertThat(window.isComplete()).isFalse();
+        assertThat(window.stats().getScanned()).isEqualTo(10L);
+    }
+
+    @Test
+    void batchReceiveDropsMarkers() throws Exception {
+        Consumer<byte[]> c = newSession(PrivateTopicPolicy.DEFAULT).newConsumer().topic(SRC)
+                .window(TimeWindow.last(1, TimeUnit.HOURS)).subscribe();
+        Message<byte[]> r1 = data("r1");
+        Message<byte[]> done = marker(WindowProtocol.COMPLETE_PROPERTY, STATS);
+        @SuppressWarnings("unchecked")
+        Messages<byte[]> batch = mock(Messages.class);
+        when(batch.size()).thenReturn(2);
+        when(batch.iterator()).thenAnswer(inv -> List.of(r1, done).iterator());
+        when(consumer.batchReceive()).thenReturn(batch);
+
+        Messages<byte[]> got = c.batchReceive();
+
+        assertThat(got.size()).isEqualTo(1);
+        Iterator<Message<byte[]>> it = got.iterator();
+        assertThat(it.next()).isSameAs(r1);
+        assertThat(((WindowControl) c).isComplete()).isTrue();
+    }
+
+    @Test
+    void closingAWindowedConsumerAppliesTheWindowedPolicy() throws Exception {
+        Session session = Session.builder()
+                .pulsarClient(client).pulsarAdmin(admin)
+                .controlTopic("persistent://public/orchestrator/filter-requests")
+                .privateTopicTenant("public").privateTopicNamespace("filtered")
+                .privateTopicPolicy(PrivateTopicPolicy.DEFAULT)
+                .windowedPrivateTopicPolicy(PrivateTopicPolicy.WINDOWED_DEFAULT.toBuilder().deleteOnClose(false).build())
+                .disableHeartbeat()
+                .build();
+        Consumer<byte[]> c = session.newConsumer().topic(SRC).window(TimeWindow.last(1, TimeUnit.HOURS)).subscribe();
+
+        c.close();
+
+        assertThat(captureAllPublished(2).get(1).getCommand()).isEqualTo(Command.UNREGISTER);
+        verify(topics, never()).delete(anyString(), anyBoolean());
     }
 }

@@ -421,11 +421,26 @@ class FilterRequestTests {
     }
 
     @Test
-    void windowedRegisterRequiresBothBounds() {
+    void windowedRegisterRequiresAStart() {
         FilterRequest req = new FilterRequest(Command.REGISTER, List.of("persistent://public/default/orders"), null,
-                "persistent://public/filtered/x", null, null, null, null, ClientType.PULSAR, null, 1_000L, null);
+                "persistent://public/filtered/x", null, null, null, null, ClientType.PULSAR, null, null, 2_000L);
         assertThatThrownBy(req::validate).isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("both windowFromMs and windowToMs");
+                .hasMessageContaining("requires windowFromMs");
+    }
+
+    @Test
+    void openEndedWindowedRegisterIsValidAndRoundTrips() throws Exception {
+        FilterRequest req = FilterRequest.registerWindowed("persistent://public/default/orders",
+                "persistent://public/filtered/filtered-w2", "__key__ = '8675309'",
+                null, null, null, ClientType.KAFKA, 1_000L, null);
+        req.validate();
+
+        String json = MAPPER.writeValueAsString(req);
+        assertThat(json).contains("windowFromMs").doesNotContain("windowToMs");
+        FilterRequest parsed = MAPPER.readValue(json, FilterRequest.class);
+        assertThat(parsed).isEqualTo(req);
+        assertThat(parsed.isWindowed()).isTrue();
+        assertThat(parsed.getWindowToMs()).isNull();
     }
 
     @Test

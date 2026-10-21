@@ -52,6 +52,7 @@ public final class SessionBuilder {
     private String privateTopicTenant    = "public";
     private String privateTopicNamespace = "filtered";
     private PrivateTopicPolicy privateTopicPolicy = PrivateTopicPolicy.DEFAULT;
+    private PrivateTopicPolicy windowedPrivateTopicPolicy = PrivateTopicPolicy.WINDOWED_DEFAULT;
     /** Heartbeat publish interval. {@code 0} disables. Default 30s matches the orchestrator default
      *  heartbeat-max-stale-seconds=90 (three missed heartbeats → declared dead). */
     private long heartbeatIntervalSeconds = 30L;
@@ -90,6 +91,16 @@ public final class SessionBuilder {
 
     public SessionBuilder privateTopicNamespace(String ns) {
         this.privateTopicNamespace = ns;
+        return this;
+    }
+
+    /**
+     * Policy for windowed queries' private topics. Defaults to
+     * {@link PrivateTopicPolicy#WINDOWED_DEFAULT}; keep the TTL longer than the slowest expected read
+     * of a window's results, or unread results expire.
+     */
+    public SessionBuilder windowedPrivateTopicPolicy(PrivateTopicPolicy policy) {
+        this.windowedPrivateTopicPolicy = policy == null ? PrivateTopicPolicy.WINDOWED_DEFAULT : policy;
         return this;
     }
 
@@ -147,6 +158,6 @@ public final class SessionBuilder {
 
         return new Session(client, ownsClient, admin, ownsAdmin,
                 controlTopic, privateTopicTenant, privateTopicNamespace, privateTopicPolicy,
-                heartbeatIntervalSeconds);
+                windowedPrivateTopicPolicy, heartbeatIntervalSeconds);
     }
 }

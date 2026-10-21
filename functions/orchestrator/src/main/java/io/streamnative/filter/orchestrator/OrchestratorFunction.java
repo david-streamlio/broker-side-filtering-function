@@ -373,21 +373,30 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         }
         String now = Instant.now(clock).toString();
 
+        WindowSpec spec = plan.spec();
         if (plan.empty()) {
-            writeEmptyWindowCompletion(queryId, req.getOutputTopic(), plan.spec());
-            registry.putQueryEntry(queryId, new QueryEntry(req.getOutputTopic(), List.of(), List.of(), now,
-                    selector, req.getValueSchema()));
+            if (!spec.isOpenEnded()) {
+                writeEmptyWindowMarker(queryId, req.getOutputTopic(), spec, WindowProtocol.COMPLETE_PROPERTY);
+                registry.putQueryEntry(queryId, new QueryEntry(req.getOutputTopic(), List.of(), List.of(), now,
+                        selector, req.getValueSchema()));
+                ctx.recordMetric("orchestrator.windows.empty", 1);
+                ctx.recordMetric("orchestrator.requests.accepted", 1);
+                LOG.info("Windowed REGISTER queryId={} source={} window={}: nothing to read; completed without a filter",
+                        queryId, sourceTopic, spec);
+                return;
+            }
+            // Open-ended with no history: history is trivially caught up. Mark it here, and spawn the
+            // filter without an end position so it doesn't mark it again when live events arrive.
+            writeEmptyWindowMarker(queryId, req.getOutputTopic(), spec, WindowProtocol.CAUGHT_UP_PROPERTY);
+            spec = new WindowSpec(spec.getFromMs(), null, null, null, spec.isTruncatedByRetention());
             ctx.recordMetric("orchestrator.windows.empty", 1);
-            ctx.recordMetric("orchestrator.requests.accepted", 1);
-            LOG.info("Windowed REGISTER queryId={} source={} window={}: nothing to read; completed without a filter",
-                    queryId, sourceTopic, plan.spec());
-            return;
         }
 
         String key = WINDOW_KEY_PREFIX + queryId;
+        WindowSpec spawnSpec = spec;
         RegistryEntry entry = spawner.spawnWindowed(queryId, sourceTopic, subscription, req, config,
                 controlTopic -> publishQuery(controlTopic, queryId, selector, req.getOutputTopic(),
-                        req.getValueSchema(), plan.spec()));
+                        req.getValueSchema(), spawnSpec));
         registry.putInputTopicEntry(key, entry.withQueryId(queryId));
         registry.putQueryEntry(queryId, new QueryEntry(req.getOutputTopic(), List.of(entry.getControlTopic()),
                 List.of(key), now, selector, req.getValueSchema()));
@@ -395,11 +404,15 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         ctx.recordMetric("orchestrator.windows.spawned", 1);
         ctx.recordMetric("orchestrator.requests.accepted", 1);
         LOG.info("Windowed REGISTER queryId={} source={} window={} -> {} via {}",
-                queryId, sourceTopic, plan.spec(), req.getOutputTopic(), entry.getFilterFunctionName());
+                queryId, sourceTopic, spec, req.getOutputTopic(), entry.getFilterFunctionName());
     }
 
-    /** The completion record of a window with nothing in it, written straight to the output topic. */
-    private void writeEmptyWindowCompletion(String queryId, String outputTopic, WindowSpec spec) throws Exception {
+    /**
+     * The completion (bounded) or caught-up (open-ended) record of a window with no history, written
+     * straight to the output topic.
+     */
+    private void writeEmptyWindowMarker(String queryId, String outputTopic, WindowSpec spec, String property)
+            throws Exception {
         WindowStats stats = new WindowStats(queryId, spec.getFromMs(), spec.getToMs(), 0, 0, 0, null, null, 0,
                 WindowStats.EndedBy.LOG_END,
                 spec.isTruncatedByRetention() ? WindowStats.Status.TRUNCATED_BY_RETENTION : WindowStats.Status.COMPLETE);
@@ -408,8 +421,9 @@ public class OrchestratorFunction implements Function<byte[], Void> {
                 .enableBatching(false)
                 .create()) {
             p.newMessage()
-                    .property(WindowProtocol.COMPLETE_PROPERTY, "true")
-                    .value(MAPPER.writeValueAsBytes(stats))
+                    .property(property, "true")
+                    .property(WindowProtocol.STATS_PROPERTY, MAPPER.writeValueAsString(stats))
+                    .value(null)   // like the filter's markers: stats in a property, null value
                     .send();
         }
     }
