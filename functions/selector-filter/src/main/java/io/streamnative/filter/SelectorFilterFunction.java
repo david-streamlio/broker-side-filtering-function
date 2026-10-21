@@ -22,6 +22,7 @@ package io.streamnative.filter;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.streamnative.filter.common.LogPosition;
 import io.streamnative.filter.common.QueryMessage;
 import io.streamnative.filter.common.WindowProtocol;
 import io.streamnative.filter.common.WindowStats;
@@ -477,8 +478,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     }
 
     /** The message's position for window bounds, or {@code null} if unknown. */
-    private static MessagePosition positionOf(Message<?> message) {
-        return message == null ? null : MessagePosition.of(message.getMessageId());
+    private static LogPosition positionOf(Message<?> message) {
+        return message == null || message.getMessageId() == null
+                ? null : LogPosition.fromBytes(message.getMessageId().toByteArray());
     }
 
     private CompletableFuture<Void> ackAsDropped(Context ctx, Record<?> record, int payloadBytes, long startNanos) {

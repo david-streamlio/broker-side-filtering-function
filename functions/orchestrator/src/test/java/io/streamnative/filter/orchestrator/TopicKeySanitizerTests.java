@@ -107,4 +107,14 @@ class TopicKeySanitizerTests {
         assertThatThrownBy(() -> TopicKeySanitizer.forPattern("  "))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void windowedQueryKeyIsShortStableAndUnique() {
+        String a = TopicKeySanitizer.forWindowedQuery("3f2a9c1e-1111-4222-8333-444455556666");
+        assertThat(a).isEqualTo(TopicKeySanitizer.forWindowedQuery("3f2a9c1e-1111-4222-8333-444455556666"));
+        assertThat(a).startsWith("3f2a9c1e-").hasSize(17);
+        assertThat(TopicKeySanitizer.forWindowedQuery("3f2a9c1e-1111-4222-8333-000000000000")).isNotEqualTo(a);
+        assertThat(("selector-filter-win-" + a).length()).isLessThanOrEqualTo(63);
+        assertThatThrownBy(() -> TopicKeySanitizer.forWindowedQuery(" ")).isInstanceOf(IllegalArgumentException.class);
+    }
 }

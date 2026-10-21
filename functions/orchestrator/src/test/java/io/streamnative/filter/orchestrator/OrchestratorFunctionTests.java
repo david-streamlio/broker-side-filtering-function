@@ -24,6 +24,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.ClientType;
 import io.streamnative.filter.common.FilterRequest;
 import io.streamnative.filter.common.QueryMessage;
+import io.streamnative.filter.common.WindowProtocol;
+import io.streamnative.filter.common.WindowSpec;
+import org.apache.pulsar.client.api.ProducerBuilder;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
@@ -52,10 +55,12 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.anyDouble;
 
 /**
  * Unit tests for OrchestratorFunction.process() routing logic. Mocks the TableView (registry
@@ -1040,5 +1045,168 @@ class OrchestratorFunctionTests {
         for (String name : canonical) {
             verify(ctx).recordMetric(name, 1.0);
         }
+    }
+
+    // ---------------------------------------------------------------- windowed REGISTER
+
+    private static final String WIN_SOURCE = "persistent://public/default/orders";
+    private static final String WIN_OUTPUT = "persistent://public/filtered/filtered-win";
+
+    private FilterRequest windowedRequest() {
+        return FilterRequest.registerWindowed(WIN_SOURCE, WIN_OUTPUT, "__key__ = '8675309'",
+                null, null, null, ClientType.PULSAR, 1_000L, 2_000L);
+    }
+
+    private OrchestratorFunction orchestratorWith(WindowPreparer preparer) {
+        return new OrchestratorFunction(config, new RegistryStore(stateView, stateProducer), spawner, preparer,
+                pulsarClient, controlProducers, java.time.Clock.systemUTC());
+    }
+
+    /** Stubs pulsarClient.newProducer(...) for the empty-window completion; returns its message builder. */
+    @SuppressWarnings("unchecked")
+    private TypedMessageBuilder<byte[]> stubOutputProducer() throws Exception {
+        ProducerBuilder<byte[]> pb = (ProducerBuilder<byte[]>) mock(ProducerBuilder.class);
+        Producer<byte[]> p = (Producer<byte[]>) mock(Producer.class);
+        TypedMessageBuilder<byte[]> b = (TypedMessageBuilder<byte[]>) mock(TypedMessageBuilder.class);
+        when(pulsarClient.newProducer(any(Schema.class))).thenReturn((ProducerBuilder) pb);
+        when(pb.topic(anyString())).thenReturn(pb);
+        when(pb.enableBatching(org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(pb);
+        when(pb.create()).thenReturn(p);
+        when(p.newMessage()).thenReturn(b);
+        when(b.property(anyString(), anyString())).thenReturn(b);
+        when(b.value(any(byte[].class))).thenReturn(b);
+        return b;
+    }
+
+    @Test
+    void windowedRegisterPublishesTheWindowedQueryThenSpawnsADedicatedFilter() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        WindowPreparer preparer = mock(WindowPreparer.class);
+        WindowSpec spec = new WindowSpec(1_000L, 2_000L, 9L, 188L, false);
+        when(preparer.prepare(WIN_SOURCE, "win-" + queryId, 1_000L, 2_000L))
+                .thenReturn(new WindowPreparer.WindowPlan(spec, false));
+        String ctrl = "persistent://public/filtered/ctrl-win-x";
+        stubControlProducer(ctrl);
+        List<String> events = new ArrayList<>();
+        doAnswer(inv -> {
+            FilterFunctionSpawner.ControlTopicAction beforeDeploy = inv.getArgument(5);
+            beforeDeploy.accept(ctrl);
+            events.add("published=" + controlPublishes.getOrDefault(ctrl, List.of()).size());
+            events.add("deployed");
+            return RegistryEntry.newEntry(ctrl, "selector-filter-win-x", inv.getArgument(3));
+        }).when(spawner).spawnWindowed(eq(queryId), eq(WIN_SOURCE), eq("win-" + queryId), any(), eq(config), any());
+
+        orchestratorWith(preparer).process(serialize(windowedRequest()), contextFor(queryId));
+
+        // The query was on the control topic before the function was deployed (spike S1).
+        assertThat(events).containsExactly("published=1", "deployed");
+        QueryMessage qm = MAPPER.readValue(controlPublishes.get(ctrl).get(0).value(), QueryMessage.class);
+        assertThat(controlPublishes.get(ctrl).get(0).key()).isEqualTo(queryId);
+        assertThat(qm.getWindow()).isEqualTo(spec);
+        assertThat(qm.getSelector()).isEqualTo("__key__ = '8675309'");
+        assertThat(qm.getOutputTopic()).isEqualTo(WIN_OUTPUT);
+        verify(spawner, never()).spawn(any(), any(), any());
+
+        RegistryEntry t = MAPPER.readValue(tableStorage.get(RegistryStore.TOPIC_KEY_PREFIX + "window:" + queryId),
+                RegistryEntry.class);
+        assertThat(t.getActiveQueryIds()).containsExactly(queryId);
+        assertThat(t.getFilterFunctionName()).isEqualTo("selector-filter-win-x");
+        QueryEntry q = MAPPER.readValue(tableStorage.get(RegistryStore.QUERY_KEY_PREFIX + queryId), QueryEntry.class);
+        assertThat(q.getControlTopics()).containsExactly(ctrl);
+        assertThat(q.getRegistryKeys()).containsExactly("window:" + queryId);
+        // The shared per-topic filter for the source topic is untouched.
+        assertThat(tableStorage).doesNotContainKey(RegistryStore.TOPIC_KEY_PREFIX + WIN_SOURCE);
+    }
+
+    @Test
+    void emptyWindowCompletesWithoutSpawningAFilter() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        WindowPreparer preparer = mock(WindowPreparer.class);
+        when(preparer.prepare(any(), any(), org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(new WindowPreparer.WindowPlan(new WindowSpec(1_000L, 2_000L, null, null, true), true));
+        TypedMessageBuilder<byte[]> completion = stubOutputProducer();
+        Context ctx = contextFor(queryId);
+
+        orchestratorWith(preparer).process(serialize(windowedRequest()), ctx);
+
+        verify(spawner, never()).spawnWindowed(any(), any(), any(), any(), any(), any());
+        verify(pulsarClient).newProducer(any(Schema.class));
+        verify(completion).property(WindowProtocol.COMPLETE_PROPERTY, "true");
+        ArgumentCaptor<byte[]> value = ArgumentCaptor.forClass(byte[].class);
+        verify(completion).value(value.capture());
+        com.fasterxml.jackson.databind.JsonNode stats = MAPPER.readTree(value.getValue());
+        assertThat(stats.get("matched").asLong()).isZero();
+        assertThat(stats.get("status").asText()).isEqualTo("TRUNCATED_BY_RETENTION");
+        assertThat(stats.get("endedBy").asText()).isEqualTo("LOG_END");
+        QueryEntry q = MAPPER.readValue(tableStorage.get(RegistryStore.QUERY_KEY_PREFIX + queryId), QueryEntry.class);
+        assertThat(q.getControlTopics()).isEmpty();
+        verify(ctx).recordMetric(eq("orchestrator.windows.empty"), anyDouble());
+    }
+
+    @Test
+    void windowedRegisterOnAMultiPartitionTopicIsRejected() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        WindowPreparer preparer = mock(WindowPreparer.class);
+        when(preparer.prepare(any(), any(), org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenThrow(new IllegalArgumentException("has 3 partitions"));
+        Context ctx = contextFor(queryId);
+
+        orchestratorWith(preparer).process(serialize(windowedRequest()), ctx);
+
+        verify(spawner, never()).spawnWindowed(any(), any(), any(), any(), any(), any());
+        assertThat(tableStorage).doesNotContainKey(RegistryStore.QUERY_KEY_PREFIX + queryId);
+        verify(ctx).recordMetric(eq("orchestrator.requests.rejected_windowed"), anyDouble());
+    }
+
+    @Test
+    void windowedRegisterWithoutAPreparerIsRejected() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        Context ctx = contextFor(queryId);
+
+        orchestrator.process(serialize(windowedRequest()), ctx);
+
+        verify(spawner, never()).spawnWindowed(any(), any(), any(), any(), any(), any());
+        assertThat(tableStorage).doesNotContainKey(RegistryStore.QUERY_KEY_PREFIX + queryId);
+        verify(ctx).recordMetric(eq("orchestrator.requests.rejected_windowed"), anyDouble());
+    }
+
+    @Test
+    void windowedQueryCannotBeModified() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        String ctrl = "persistent://public/filtered/ctrl-win-x";
+        seedQueryEntry(queryId, new QueryEntry(WIN_OUTPUT, List.of(ctrl), List.of("window:" + queryId)));
+        stubControlProducer(ctrl);
+        Context ctx = contextFor(queryId);
+
+        orchestrator.process(serialize(FilterRequest.modify("region = 'r07'")), ctx);
+
+        assertThat(controlPublishes.get(ctrl)).isNull();
+        verify(ctx).recordMetric(eq("orchestrator.requests.rejected_windowed"), anyDouble());
+    }
+
+    @Test
+    void unregisterMakesAWindowedFilterIdleForGc() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        WindowPreparer preparer = mock(WindowPreparer.class);
+        when(preparer.prepare(any(), any(), org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(new WindowPreparer.WindowPlan(new WindowSpec(1_000L, 2_000L, 9L, 1L, false), false));
+        String ctrl = "persistent://public/filtered/ctrl-win-x";
+        stubControlProducer(ctrl);
+        doAnswer(inv -> {
+            ((FilterFunctionSpawner.ControlTopicAction) inv.getArgument(5)).accept(ctrl);
+            return RegistryEntry.newEntry(ctrl, "selector-filter-win-x", inv.getArgument(3));
+        }).when(spawner).spawnWindowed(any(), any(), any(), any(), any(), any());
+        OrchestratorFunction o = orchestratorWith(preparer);
+        o.process(serialize(windowedRequest()), contextFor(queryId));
+
+        o.process(serialize(FilterRequest.unregister()), contextFor(queryId));
+
+        List<KV> publishes = controlPublishes.get(ctrl);
+        assertThat(publishes.get(publishes.size() - 1).value()).isNull();   // tombstone
+        RegistryEntry t = MAPPER.readValue(tableStorage.get(RegistryStore.TOPIC_KEY_PREFIX + "window:" + queryId),
+                RegistryEntry.class);
+        assertThat(t.getActiveQueryIds()).isEmpty();
+        assertThat(t.getIdleSince()).isNotNull();
+        assertThat(tableStorage).doesNotContainKey(RegistryStore.QUERY_KEY_PREFIX + queryId);
     }
 }

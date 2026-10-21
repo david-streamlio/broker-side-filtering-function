@@ -20,6 +20,7 @@
 package io.streamnative.filter.common;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -53,6 +54,15 @@ public final class FilterRequest {
     private final ValueSchemaInfo valueSchema;
     private final ClientType clientType;
     private final List<String> queryIds;
+    private final Long windowFromMs;
+    private final Long windowToMs;
+
+    public FilterRequest(Command command, List<String> inputTopics, String topicsPattern, String outputTopic,
+                         String selector, String keyDeserializer, String valueDeserializer,
+                         ValueSchemaInfo valueSchema, ClientType clientType, List<String> queryIds) {
+        this(command, inputTopics, topicsPattern, outputTopic, selector, keyDeserializer, valueDeserializer,
+                valueSchema, clientType, queryIds, null, null);
+    }
 
     @JsonCreator
     public FilterRequest(@JsonProperty("command") Command command,
@@ -64,7 +74,9 @@ public final class FilterRequest {
                          @JsonProperty("valueDeserializer") String valueDeserializer,
                          @JsonProperty("valueSchema") ValueSchemaInfo valueSchema,
                          @JsonProperty("clientType") ClientType clientType,
-                         @JsonProperty("queryIds") List<String> queryIds) {
+                         @JsonProperty("queryIds") List<String> queryIds,
+                         @JsonProperty("windowFromMs") Long windowFromMs,
+                         @JsonProperty("windowToMs") Long windowToMs) {
         this.command           = command;
         this.inputTopics       = inputTopics == null ? null : List.copyOf(inputTopics);
         this.topicsPattern     = topicsPattern;
@@ -75,6 +87,8 @@ public final class FilterRequest {
         this.valueSchema       = valueSchema;
         this.clientType        = clientType;
         this.queryIds          = queryIds == null ? null : List.copyOf(queryIds);
+        this.windowFromMs      = windowFromMs;
+        this.windowToMs        = windowToMs;
     }
 
     // ---------- factory helpers (typed per command — simpler call sites in SDK) ----------
@@ -107,6 +121,20 @@ public final class FilterRequest {
         return new FilterRequest(Command.REGISTER,
                 inputTopics, null,
                 outputTopic, selector, keyDeserializer, valueDeserializer, valueSchema, clientType, null);
+    }
+
+    /**
+     * Build a windowed REGISTER: read {@code inputTopic}'s history in {@code [fromMs, toMs]} (epoch ms on
+     * the log's clock) on a dedicated filter instance. The output topic ends with a completion record.
+     */
+    public static FilterRequest registerWindowed(String inputTopic, String outputTopic, String selector,
+                                                 String keyDeserializer, String valueDeserializer,
+                                                 ValueSchemaInfo valueSchema, ClientType clientType,
+                                                 long fromMs, long toMs) {
+        return new FilterRequest(Command.REGISTER,
+                Collections.singletonList(inputTopic), null,
+                outputTopic, selector, keyDeserializer, valueDeserializer, valueSchema, clientType, null,
+                fromMs, toMs);
     }
 
     /** Build a REGISTER request matching a regex pattern. */
@@ -150,6 +178,14 @@ public final class FilterRequest {
     public ValueSchemaInfo getValueSchema() { return valueSchema; }
     public ClientType getClientType()     { return clientType; }
     public List<String> getQueryIds()     { return queryIds; }
+    public Long getWindowFromMs()         { return windowFromMs; }
+    public Long getWindowToMs()           { return windowToMs; }
+
+    /** True for a windowed REGISTER (a time window over the topic's history). */
+    @JsonIgnore
+    public boolean isWindowed() {
+        return windowFromMs != null || windowToMs != null;
+    }
 
     // ---------- validation ----------
 
@@ -194,6 +230,21 @@ public final class FilterRequest {
         if (clientType == null) {
             throw new IllegalArgumentException("REGISTER requires clientType");
         }
+        if (isWindowed()) {
+            validateWindow(hasInputs);
+        }
+    }
+
+    private void validateWindow(boolean hasInputs) {
+        if (windowFromMs == null || windowToMs == null) {
+            throw new IllegalArgumentException("windowed REGISTER requires both windowFromMs and windowToMs");
+        }
+        if (windowFromMs < 0 || windowToMs <= windowFromMs) {
+            throw new IllegalArgumentException("windowed REGISTER requires 0 <= windowFromMs < windowToMs");
+        }
+        if (!hasInputs || inputTopics.size() != 1) {
+            throw new IllegalArgumentException("windowed REGISTER requires exactly one input topic (no topicsPattern)");
+        }
     }
 
     private void validateModify() {
@@ -231,13 +282,15 @@ public final class FilterRequest {
                 && Objects.equals(valueDeserializer, that.valueDeserializer)
                 && Objects.equals(valueSchema, that.valueSchema)
                 && clientType == that.clientType
-                && Objects.equals(queryIds, that.queryIds);
+                && Objects.equals(queryIds, that.queryIds)
+                && Objects.equals(windowFromMs, that.windowFromMs)
+                && Objects.equals(windowToMs, that.windowToMs);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(command, inputTopics, topicsPattern, outputTopic, selector,
-                keyDeserializer, valueDeserializer, valueSchema, clientType, queryIds);
+                keyDeserializer, valueDeserializer, valueSchema, clientType, queryIds, windowFromMs, windowToMs);
     }
 
     @Override
@@ -252,6 +305,7 @@ public final class FilterRequest {
                 + ", valueSchema=" + valueSchema
                 + ", clientType=" + clientType
                 + ", queryIds=" + queryIds
+                + (isWindowed() ? ", window=[" + windowFromMs + ", " + windowToMs + "]" : "")
                 + '}';
     }
 }

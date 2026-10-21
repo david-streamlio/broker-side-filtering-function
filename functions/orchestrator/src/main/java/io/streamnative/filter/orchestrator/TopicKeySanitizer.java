@@ -73,6 +73,20 @@ final class TopicKeySanitizer {
         return sanitize(regex) + "-" + hashSuffix(regex);
     }
 
+    /**
+     * Short, stable key for a windowed query's dedicated filter function and control topic: the first
+     * 8 readable characters of the queryId plus a hash of the whole queryId, so function names stay
+     * well under typical 63-character resource-name limits.
+     */
+    static String forWindowedQuery(String queryId) {
+        if (queryId == null || queryId.isBlank()) {
+            throw new IllegalArgumentException("queryId must not be null or blank");
+        }
+        String readable = sanitize(queryId);
+        String prefix = readable.isEmpty() ? "q" : readable.substring(0, Math.min(8, readable.length()));
+        return prefix + "-" + hashSuffix(queryId);
+    }
+
     private static String sanitize(String raw) {
         // Allow alnum, dash, underscore. Replace runs of anything else with a single dash.
         // Trim leading/trailing dashes. Truncate to MAX_PREFIX_LEN.

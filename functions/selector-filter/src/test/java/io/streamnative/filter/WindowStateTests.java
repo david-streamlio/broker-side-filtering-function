@@ -20,6 +20,7 @@
 package io.streamnative.filter;
 
 import io.streamnative.filter.WindowState.Admission;
+import io.streamnative.filter.common.LogPosition;
 import io.streamnative.filter.common.WindowSpec;
 import io.streamnative.filter.common.WindowStats;
 import java.util.BitSet;
@@ -39,19 +40,19 @@ class WindowStateTests {
         return new WindowState(new WindowSpec(1_000L, 2_000L, endLedger, endEntry, truncated), clock::get);
     }
 
-    private static MessagePosition pos(long ledger, long entry) {
-        return MessagePosition.of(new MessageIdImpl(ledger, entry, -1));
+    private static LogPosition pos(long ledger, long entry) {
+        return LogPosition.fromBytes(new MessageIdImpl(ledger, entry, -1).toByteArray());
     }
 
-    private static MessagePosition batchPos(long ledger, long entry, int index, int size) {
-        return MessagePosition.of(new BatchMessageIdImpl(ledger, entry, -1, index, size, new BitSet()));
+    private static LogPosition batchPos(long ledger, long entry, int index, int size) {
+        return LogPosition.fromBytes(new BatchMessageIdImpl(ledger, entry, -1, index, size, new BitSet()).toByteArray());
     }
 
-    // ---------- MessagePosition: decoded from real MessageId encodings ----------
+    // ---------- LogPosition: decoded from real MessageId encodings ----------
 
     @Test
     void decodesUnbatchedMessageId() {
-        MessagePosition p = pos(17, 42);
+        LogPosition p = pos(17, 42);
         assertThat(p.ledgerId()).isEqualTo(17L);
         assertThat(p.entryId()).isEqualTo(42L);
         assertThat(p.isLastInEntry()).isTrue();
@@ -59,7 +60,7 @@ class WindowStateTests {
 
     @Test
     void decodesBatchedMessageId() {
-        MessagePosition middle = batchPos(17, 42, 3, 10);
+        LogPosition middle = batchPos(17, 42, 3, 10);
         assertThat(middle.ledgerId()).isEqualTo(17L);
         assertThat(middle.entryId()).isEqualTo(42L);
         assertThat(middle.batchIndex()).isEqualTo(3);
@@ -70,15 +71,15 @@ class WindowStateTests {
 
     @Test
     void decodesTopicMessageIdOfAPartitionedTopic() {
-        MessagePosition p = MessagePosition.of(new TopicMessageIdImpl("persistent://t/n/x-partition-0",
-                new MessageIdImpl(5, 6, 0)));
+        LogPosition p = LogPosition.fromBytes(new TopicMessageIdImpl("persistent://t/n/x-partition-0",
+                new MessageIdImpl(5, 6, 0)).toByteArray());
         assertThat(p.ledgerId()).isEqualTo(5L);
         assertThat(p.entryId()).isEqualTo(6L);
     }
 
     @Test
     void largeIdsSurviveVarintDecoding() {
-        MessagePosition p = pos(9_876_543_210L, 123_456_789L);
+        LogPosition p = pos(9_876_543_210L, 123_456_789L);
         assertThat(p.ledgerId()).isEqualTo(9_876_543_210L);
         assertThat(p.entryId()).isEqualTo(123_456_789L);
     }
@@ -88,7 +89,9 @@ class WindowStateTests {
         assertThat(pos(5, 9).compareTo(6, 0)).isNegative();
         assertThat(pos(6, 1).compareTo(6, 0)).isPositive();
         assertThat(batchPos(6, 0, 4, 5).compareTo(6, 0)).isZero();
-        assertThat(MessagePosition.of(null)).isNull();
+        assertThat(LogPosition.fromBytes(null)).isNull();
+        assertThat(LogPosition.fromBytes(new byte[]{(byte) 0xFF})).isNull();
+        assertThat(LogPosition.fromBytes(new MessageIdImpl(3, -1, -1).toByteArray()).isMessage()).isFalse();
     }
 
     // ---------- WindowState ----------

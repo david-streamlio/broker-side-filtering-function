@@ -233,6 +233,19 @@ class FilterReconcilerTests {
     }
 
     @Test
+    void windowedFilterIsNeverRespawned() throws Exception {
+        String key = OrchestratorFunction.WINDOW_KEY_PREFIX + "q-w";
+        seedT(key, baseEntry("win").withQueryId("q-w"));
+        stubFunctionMissing("selector-filter-win");
+
+        FilterReconciler.ReconcileStats stats = reconcilerAt(Instant.parse("2026-05-12T20:00:00Z")).reconcile();
+
+        assertThat(stats.missingRespawned).isZero();
+        verify(spawner, never()).spawn(any(), any(), any());
+        assertThat(published).isEmpty();
+    }
+
+    @Test
     void legacyQueryWithoutPersistedSelectorRepublishesIdentity() throws Exception {
         String key = "persistent://public/in/trades";
         seedT(key, baseEntry("trades").withQueryId("q-old"));

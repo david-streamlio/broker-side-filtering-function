@@ -19,6 +19,7 @@
 
 package io.streamnative.filter;
 
+import io.streamnative.filter.common.LogPosition;
 import io.streamnative.filter.common.WindowSpec;
 import io.streamnative.filter.common.WindowStats;
 import java.util.function.LongSupplier;
@@ -75,7 +76,7 @@ final class WindowState {
      * Classify a record by its log-clock time ({@code 0} when unknown) and position ({@code null}
      * when unknown, e.g. in unit tests without a message).
      */
-    Admission admit(long logTimeMs, MessagePosition position) {
+    Admission admit(long logTimeMs, LogPosition position) {
         if (done) {
             return Admission.DONE;
         }

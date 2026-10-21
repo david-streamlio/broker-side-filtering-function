@@ -46,4 +46,21 @@ interface FilterFunctionSpawner {
      * @param cfg         orchestrator configuration (package URL, tenant/namespace, parallelism…)
      */
     RegistryEntry spawn(String registryKey, FilterRequest req, OrchestratorConfig cfg) throws Exception;
+
+    /**
+     * Spawn a dedicated filter function for one windowed query: input {@code sourceTopic}, on
+     * {@code subscription} (already positioned at the window start), parallelism 1 so the output keeps
+     * log order. {@code beforeDeploy} runs once the control topic exists and before the function is
+     * created: the orchestrator publishes the windowed {@code QueryMessage} there, so the function
+     * preloads it. A function that started without its query would ack and drop the whole backlog
+     * (spike S1).
+     */
+    RegistryEntry spawnWindowed(String queryId, String sourceTopic, String subscription, FilterRequest req,
+                                OrchestratorConfig cfg, ControlTopicAction beforeDeploy) throws Exception;
+
+    /** Work done with a freshly prepared control topic. */
+    @FunctionalInterface
+    interface ControlTopicAction {
+        void accept(String controlTopic) throws Exception;
+    }
 }
