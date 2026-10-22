@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -78,6 +97,12 @@ public final class MessageBindings {
     // Lazily-parsed JSON payload — used when a selector references a field not found in properties.
     private JsonNode payloadJson;
     private boolean payloadResolved;
+
+    // Lazily-decoded structured value (via a ValueDecoder), decoded at most once per bindings.
+    // cachedDecoder lets the rare multi-schema-per-function case re-decode instead of going stale.
+    private ValueDecoder cachedDecoder;
+    private Map<String, Object> decodedFields;
+    private boolean decodedAttempted;
 
     // Lazily-built base64-decode state. The format-parse runs at most once per record; the cache
     // is populated on demand and holds one entry per base64-flagged property that has been looked
@@ -174,6 +199,19 @@ public final class MessageBindings {
     }
 
     public Object lookup(String name) {
+        return lookup(name, null);
+    }
+
+    /**
+     * Resolve a selector binding, using {@code decoder} for value-field references when present.
+     *
+     * <p>Resolution order is unchanged: {@code __key__}, {@code __topic__}, then user properties,
+     * then the message value. When a {@code decoder} is supplied (a query with a structured value
+     * schema) the value is decoded through it; otherwise — or if structured decode fails — value
+     * fields fall back to best-effort JSON parsing. Properties still shadow value fields of the same
+     * name, exactly as before.
+     */
+    public Object lookup(String name, ValueDecoder decoder) {
         if (KEY_BINDING.equals(name)) {
             return getKey();
         }
@@ -193,11 +231,59 @@ public final class MessageBindings {
             }
             return raw;
         }
-        // Properties did not contain the name — fall through to JSON payload fields.
-        // This allows selectors like `side = 'buy'` or `price > 50000` to work against
-        // messages (e.g. KoP-bridged Coinbase tickers) whose payload is JSON but whose
-        // Pulsar properties map is empty.
+        // Properties did not contain the name — fall through to the message value.
+        return getValueField(name, decoder);
+    }
+
+    /**
+     * Resolve a value-field reference. With a structured {@code decoder} (e.g. Avro), decode the
+     * payload once (cached for the lifetime of these bindings) and look the field up there; with no
+     * decoder, or if structured decode yields nothing, fall back to best-effort JSON parsing. This
+     * is what lets selectors like {@code side = 'buy'} / {@code price > 50000} match a structured or
+     * JSON message value whose Pulsar properties map is empty.
+     */
+    private Object getValueField(String name, ValueDecoder decoder) {
+        if (decoder != null) {
+            Map<String, Object> fields = decodedValueFields(decoder);
+            if (fields != null) {
+                // Decoder is authoritative; {@code name} may be a dotted path into nested records.
+                return traverse(fields, name);
+            }
+            // Structured decode failed (corrupt/foreign bytes) — fall back to JSON best-effort.
+        }
         return getJsonField(name);
+    }
+
+    /**
+     * Resolve {@code dottedName} ({@code a} or {@code a.b.c}) against a (possibly nested) field map.
+     * Returns {@code null} if any intermediate segment is missing or is not itself a nested map.
+     */
+    private static Object traverse(Map<String, Object> top, String dottedName) {
+        if (dottedName.indexOf('.') < 0) {
+            return top.get(dottedName);
+        }
+        Object current = top;
+        for (String segment : dottedName.split("\\.")) {
+            if (!(current instanceof Map<?, ?> map)) {
+                return null;
+            }
+            current = map.get(segment);
+        }
+        return current;
+    }
+
+    /**
+     * Decode the payload's top-level fields via {@code decoder}, at most once per bindings instance.
+     * Keyed by decoder identity so the rare case of differently-schema'd queries on one function
+     * re-decodes rather than returning a stale map.
+     */
+    private Map<String, Object> decodedValueFields(ValueDecoder decoder) {
+        if (!decodedAttempted || cachedDecoder != decoder) {
+            cachedDecoder = decoder;
+            decodedAttempted = true;
+            decodedFields = (payload == null || payload.length == 0) ? null : decoder.decode(payload);
+        }
+        return decodedFields;
     }
 
     /**
@@ -210,6 +296,10 @@ public final class MessageBindings {
      * <p>Many financial APIs (including Coinbase) encode prices and volumes as quoted
      * decimals: {@code "price":"77351.21"}. This method coerces such strings to
      * {@link Double} so numeric comparisons work correctly.
+     *
+     * <p>This is the fallback value-resolution path: it serves messages with no value schema and
+     * JSON-schema'd values, and backstops a structured {@link ValueDecoder} (e.g. Avro) when its
+     * decode fails. Structured decode itself runs in {@link #getValueField(String, ValueDecoder)}.
      */
     private Object getJsonField(String name) {
         if (!payloadResolved) {
@@ -227,7 +317,19 @@ public final class MessageBindings {
         if (payloadJson == null) {
             return null;
         }
-        JsonNode node = payloadJson.get(name);
+        JsonNode node;
+        if (name.indexOf('.') < 0) {
+            node = payloadJson.get(name);
+        } else {
+            // Dotted path into nested JSON objects: a.b.c walks object → object → leaf.
+            node = payloadJson;
+            for (String segment : name.split("\\.")) {
+                if (node == null || !node.isObject()) {
+                    return null;
+                }
+                node = node.get(segment);
+            }
+        }
         if (node == null || node.isNull() || node.isMissingNode()) {
             return null;
         }

@@ -28,8 +28,8 @@ ENV_FILE="$DEMO_DIR/.env"
 source "$ENV_FILE"
 
 ADMIN="${PULSAR_ADMIN_URL}"
-ORCH_TOKEN=$(cat "$DEMO_DIR/infra/terraform/orchestrator-function.token" 2>/dev/null || "")
-APP_TOKEN=$(cat  "$DEMO_DIR/infra/terraform/app.token" 2>/dev/null || "")
+ORCH_TOKEN=$(cat "$DEMO_DIR/infra/terraform/orchestrator-function.token" 2>/dev/null || true)
+APP_TOKEN=$(cat  "$DEMO_DIR/infra/terraform/app.token" 2>/dev/null || true)
 
 # Mint a superuser token — needed for topic deletion (app + orch SAs can't delete)
 cd "$DEMO_DIR/infra/terraform"

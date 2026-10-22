@@ -1,6 +1,23 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 name: Python SDK
 
-# Runs lint + unit tests for sdk/python/ on every push/PR that touches Python files. The live
+# Runs lint + unit tests for sdk/python/ on every PR, and on pushes that touch Python files. The live
 # integration test against an orchestrator-fronted Pulsar container is skipped here — it
 # requires the pre-built filter + orchestrator NARs and Docker, which we don't wire into PR CI
 # to keep wall-time fast. Run it locally with `pytest tests/integration/ -v`.
@@ -11,11 +28,9 @@ on:
       - 'sdk/python/**'
       - 'protocol/filter-request.schema.json'
       - '.github/workflows/python-sdk.yml'
+  # No path filter on PRs: these jobs are required checks on main, and a required check that never
+  # runs (e.g. on a demo-only PR) blocks the merge forever.
   pull_request:
-    paths:
-      - 'sdk/python/**'
-      - 'protocol/filter-request.schema.json'
-      - '.github/workflows/python-sdk.yml'
 
 defaults:
   run:

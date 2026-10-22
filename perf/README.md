@@ -98,3 +98,72 @@ filter-output-batch-max-publish-delay-ms   # default 1 (0 = batching disabled)
   the right setting depends on which you're optimizing.
 - **Read percentiles, not means**, and **measure at sub-saturation** — latency at capacity is just
   queueing delay.
+
+---
+
+# Micro-benchmarks (selector eval + value decode) — handoff §6
+
+In-JVM nanobenchmarks, separate from the broker load tests above. They confirm two things behind the
+homegrown-selector-engine + value-schema work: the homegrown engine is no slower than the
+`pulsar-jms` parser it replaced on the eval hot path, and the value-decode path is sub-microsecond.
+
+**Why they don't live in this module.** The value decoders (`AvroValueDecoder`,
+`ProtobufNativeValueDecoder`, `ValueDecoderFactory`) are **package-private** in
+`io.streamnative.filter`, so Bench B can only compile inside the function module's own test tree —
+widening their visibility just for a benchmark isn't worth it. Bench A needs the test-scope
+`pulsar-jms-filters` that already lives in `common`. So each bench sits next to its fixtures:
+
+| Bench | Location | Measures |
+|---|---|---|
+| `SelectorEvalBench` | `common/src/test/.../selector/` | homegrown `Selector.matches` vs `pulsar-jms` `SelectorSupport.matches`, ns/op |
+| `ValueDecodeBench` | `functions/selector-filter/src/test/.../` | Avro + Protobuf-native `decode(byte[])` + lookup, top-level vs nested, ns/op |
+
+The `*Bench` suffix matches **neither** surefire's (`*Test`/`*Tests`) nor failsafe's (`*IT`) default
+include patterns, so they never run in a normal build and don't count toward the module test totals.
+Run them on demand (JDK 21):
+
+```
+export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+mvn -pl common install -DskipTests
+mvn -pl common test -Dtest=SelectorEvalBench -Dsurefire.failIfNoSpecifiedTests=false
+mvn -pl functions/selector-filter test -Dtest=ValueDecodeBench -Dsurefire.failIfNoSpecifiedTests=false
+# tune: -Dbench.iters=1000000 -Dbench.warmup=100000
+```
+
+## Results (JDK 21.0.1, warmup=50k, iters=500k; single dev laptop, indicative)
+
+**Bench A — selector eval, ns/op:**
+
+| selector | homegrown | pulsar-jms | speedup |
+|---|---|---|---|
+| `region = 'US'` | 18.5 | 83.4 | 4.51× |
+| `region = 'US' AND tier = 'GOLD'` | 62.6 | 89.3 | 1.43× |
+| `price > 100 AND price < 500` | 28.7 | 82.1 | 2.86× |
+| `region IN ('US','UK','DE')` | 16.3 | 38.8 | 2.38× |
+| `t LIKE 'persistent://public/trades/%'` | 65.4 | 107.4 | 1.64× |
+| `price BETWEEN 100 AND 200 OR region IS NULL` | 27.8 | 64.1 | 2.31× |
+| `region = 'US' AND price > 100 AND tier IN (...)` | 73.9 | 82.0 | 1.11× |
+| **mean** | **41.9** | **78.1** | **1.87×** |
+
+The homegrown engine evaluates **1.1×–4.5× faster (1.87× mean)** — it has no JMS `Message`
+abstraction and evaluates straight against the `name → Object` resolver.
+
+> The bench also prints a *compile* column. Ignore it for comparison: `pulsar-jms`'s
+> `SelectorSupport.build` memoizes (its cost drops to ~11 ns as selectors get more complex — a
+> cache-hit signature), while the homegrown `Selector.compile` parses on every call (~0.5–1.8 µs).
+> Compile is **one-time per query** and amortized to nil by the parse-once/eval-many design, so eval
+> is the number that matters.
+
+**Bench B — value decode, ns/op:**
+
+| case | decode | decode + lookup |
+|---|---|---|
+| avro top-level (4 scalars) | 246.8 | 217.7 |
+| avro nested (`address.city`) | 301.9 | 314.4 |
+| protobuf top-level (4 scalars) | 499.1 | 481.1 |
+| protobuf nested (`address.city`) | 471.6 | 478.1 |
+
+Decode is **sub-microsecond** — Avro ~250–300 ns, Protobuf-native ~470–500 ns. Field lookup
+(top-level `get` or nested two-hop walk) is within measurement noise. Decode runs **once per message**
+(cached across matching queries; see `ValueDecoder`'s javadoc), independent of registered-selector
+count, so at the demo's ~100 selectors the eval loop (Bench A) still dominates per-message CPU.

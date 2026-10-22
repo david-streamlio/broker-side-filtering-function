@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter.common;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -114,12 +133,48 @@ class FilterRequestTests {
         assertThat(parsed.getCommand()).isEqualTo(Command.UNREGISTER);
     }
 
+    @Test
+    void registerSerdeRoundTripsValueSchema() throws Exception {
+        ValueSchemaInfo schema = new ValueSchemaInfo(
+                "com.acme.Trade", "AVRO",
+                "eyJ0eXBlIjoicmVjb3JkIn0=",  // base64 of a stand-in .avsc
+                java.util.Map.of("__alwaysAllowNull", "true"));
+        FilterRequest req = FilterRequest.register(
+                List.of("persistent://public/in/trades"),
+                "persistent://public/filtered/filtered-9",
+                "price > 50000",
+                null, "com.acme.Trade", schema, ClientType.PULSAR);
+
+        byte[] payload = MAPPER.writeValueAsBytes(req);
+        FilterRequest parsed = MAPPER.readValue(payload, FilterRequest.class);
+
+        assertThat(parsed).isEqualTo(req);
+        assertThat(parsed.getValueSchema()).isEqualTo(schema);
+        assertThat(parsed.getValueSchema().getType()).isEqualTo("AVRO");
+        assertThat(parsed.getValueSchema().getDefinition()).isEqualTo("eyJ0eXBlIjoicmVjb3JkIn0=");
+        assertThat(parsed.getValueDeserializer()).isEqualTo("com.acme.Trade");
+    }
+
+    @Test
+    void registerWithoutValueSchemaOmitsItFromWire() throws Exception {
+        // Back-compat: a register with no value schema must be wire-identical to the pre-schema
+        // format — the valueSchema key must not appear at all.
+        FilterRequest req = FilterRequest.register(
+                "persistent://public/in/x",
+                "persistent://public/filtered/filtered-1",
+                "k = 'v'",
+                null, null, ClientType.PULSAR);
+
+        assertThat(req.getValueSchema()).isNull();
+        assertThat(MAPPER.writeValueAsString(req)).doesNotContain("valueSchema");
+    }
+
     // ---------------------------------------------------------------- validation (REGISTER)
 
     @Test
     void registerWithoutInputsOrPatternThrows() {
         FilterRequest req = new FilterRequest(Command.REGISTER, null, null,
-                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR, null);
+                "persistent://t/n/out", "x = 1", null, null, null, ClientType.PULSAR, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("inputTopics")
@@ -130,7 +185,7 @@ class FilterRequestTests {
     void registerWithBothInputsAndPatternThrows() {
         FilterRequest req = new FilterRequest(Command.REGISTER,
                 List.of("persistent://t/n/a"), "persistent://t/n/.*",
-                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR, null);
+                "persistent://t/n/out", "x = 1", null, null, null, ClientType.PULSAR, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("exactly one");
@@ -139,14 +194,14 @@ class FilterRequestTests {
     @Test
     void registerWithEmptyInputsListThrows() {
         FilterRequest req = new FilterRequest(Command.REGISTER, List.of(), null,
-                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR, null);
+                "persistent://t/n/out", "x = 1", null, null, null, ClientType.PULSAR, null);
         assertThatThrownBy(req::validate).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void registerWithBlankInputTopicThrows() {
         FilterRequest req = new FilterRequest(Command.REGISTER, List.of("   "), null,
-                "persistent://t/n/out", "x = 1", null, null, ClientType.PULSAR, null);
+                "persistent://t/n/out", "x = 1", null, null, null, ClientType.PULSAR, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("blank");
@@ -210,7 +265,7 @@ class FilterRequestTests {
     @Test
     void modifyWithoutSelectorThrows() {
         FilterRequest req = new FilterRequest(Command.MODIFY, null, null, null,
-                null, null, null, null, null);
+                null, null, null, null, null, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("selector");
@@ -238,7 +293,7 @@ class FilterRequestTests {
                 null,
                 "persistent://t/n/out",          // extraneous on MODIFY
                 "x = 1",
-                "K", "V", ClientType.KAFKA, null);
+                "K", "V", null, ClientType.KAFKA, null);
         req.validate(); // no throw
     }
 
@@ -253,7 +308,7 @@ class FilterRequestTests {
     void unregisterIgnoresExtraneousFields() {
         FilterRequest req = new FilterRequest(Command.UNREGISTER,
                 List.of("persistent://t/n/x"), null,
-                "persistent://t/n/out", "x = 1", "K", "V", ClientType.PULSAR, null);
+                "persistent://t/n/out", "x = 1", "K", "V", null, ClientType.PULSAR, null);
         req.validate(); // no throw — UNREGISTER tolerates everything
     }
 
@@ -261,7 +316,7 @@ class FilterRequestTests {
 
     @Test
     void nullCommandThrows() {
-        FilterRequest req = new FilterRequest(null, null, null, null, null, null, null, null, null);
+        FilterRequest req = new FilterRequest(null, null, null, null, null, null, null, null, null, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("command");
@@ -277,7 +332,7 @@ class FilterRequestTests {
     @Test
     void heartbeatWithNullQueryIdsThrows() {
         FilterRequest req = new FilterRequest(Command.HEARTBEAT, null, null, null, null,
-                null, null, null, null);
+                null, null, null, null, null);
         assertThatThrownBy(req::validate)
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("queryIds");

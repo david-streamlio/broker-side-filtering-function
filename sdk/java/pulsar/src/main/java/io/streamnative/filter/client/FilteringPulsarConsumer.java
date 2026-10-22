@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter.client;
 
 import org.apache.pulsar.client.api.Consumer;
@@ -23,18 +42,22 @@ import java.util.function.Function;
  *
  * <p>All {@link Consumer} methods delegate to the underlying consumer. {@link #close()}
  * additionally retracts the registered query (and, per policy, deletes the private output topic).
+ *
+ * @param <V> the value type the underlying consumer decodes, fixed by the {@code Schema<V>} the
+ *            caller passed to {@code Session.newConsumer(schema)} ({@code byte[]} for the no-schema
+ *            path). The message key is always a {@code String}.
  */
-final class FilteringPulsarConsumer implements Consumer<byte[]>, FilterControl {
+final class FilteringPulsarConsumer<V> implements Consumer<V>, FilterControl {
 
     private static final Logger LOG = LoggerFactory.getLogger(FilteringPulsarConsumer.class);
 
     private final Session session;
     private final PrivateQuery query;
-    private final Consumer<byte[]> delegate;
+    private final Consumer<V> delegate;
     private volatile String userSelector;
     private volatile boolean closed;
 
-    FilteringPulsarConsumer(Session session, PrivateQuery query, Consumer<byte[]> delegate,
+    FilteringPulsarConsumer(Session session, PrivateQuery query, Consumer<V> delegate,
                             String initialUserSelector) {
         this.session      = session;
         this.query        = query;
@@ -125,11 +148,11 @@ final class FilteringPulsarConsumer implements Consumer<byte[]>, FilterControl {
 
     // ------------------------------------------------------------------ Consumer — receive
 
-    @Override public Message<byte[]> receive() throws PulsarClientException                       { return delegate.receive(); }
-    @Override public CompletableFuture<Message<byte[]>> receiveAsync()                            { return delegate.receiveAsync(); }
-    @Override public Message<byte[]> receive(int timeout, TimeUnit unit) throws PulsarClientException { return delegate.receive(timeout, unit); }
-    @Override public Messages<byte[]> batchReceive() throws PulsarClientException                 { return delegate.batchReceive(); }
-    @Override public CompletableFuture<Messages<byte[]>> batchReceiveAsync()                      { return delegate.batchReceiveAsync(); }
+    @Override public Message<V> receive() throws PulsarClientException                       { return delegate.receive(); }
+    @Override public CompletableFuture<Message<V>> receiveAsync()                            { return delegate.receiveAsync(); }
+    @Override public Message<V> receive(int timeout, TimeUnit unit) throws PulsarClientException { return delegate.receive(timeout, unit); }
+    @Override public Messages<V> batchReceive() throws PulsarClientException                 { return delegate.batchReceive(); }
+    @Override public CompletableFuture<Messages<V>> batchReceiveAsync()                      { return delegate.batchReceiveAsync(); }
 
     // ------------------------------------------------------------------ Consumer — acknowledge
 

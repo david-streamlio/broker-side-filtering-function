@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter.orchestrator;
 
 import io.streamnative.filter.common.FilterRequest;
@@ -67,7 +86,8 @@ final class FilterReconciler implements AutoCloseable {
     /** Republishes a {@link io.streamnative.filter.common.QueryMessage} to a control topic. */
     @FunctionalInterface
     interface PublishQuery {
-        void publish(String controlTopic, String queryId, String selector, String outputTopic)
+        void publish(String controlTopic, String queryId, String selector, String outputTopic,
+                     io.streamnative.filter.common.ValueSchemaInfo valueSchema)
                 throws Exception;
     }
 
@@ -91,7 +111,7 @@ final class FilterReconciler implements AutoCloseable {
 
     FilterReconciler(RegistryStore registry, PulsarAdmin admin, OrchestratorConfig config,
                      Clock clock, FilterFunctionSpawner spawner) {
-        this(registry, admin, config, clock, spawner, (c, q, s, o) -> {}, (n, v) -> {});
+        this(registry, admin, config, clock, spawner, (c, q, s, o, vs) -> {}, (n, v) -> {});
     }
 
     FilterReconciler(RegistryStore registry, PulsarAdmin admin, OrchestratorConfig config,
@@ -288,7 +308,8 @@ final class FilterReconciler implements AutoCloseable {
                 LOG.warn("Reconcile repopulate: queryId={} has no persisted selector (legacy entry); "
                         + "republishing with identity selector '{}'", queryId, selector);
             }
-            publishQuery.publish(controlTopic, queryId, selector, q.getOutputTopic());
+            publishQuery.publish(controlTopic, queryId, selector, q.getOutputTopic(),
+                    q.getValueSchema());
             count++;
         }
         return count;

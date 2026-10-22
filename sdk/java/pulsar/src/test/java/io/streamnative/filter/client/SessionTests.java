@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter.client;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -5,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.ClientType;
 import io.streamnative.filter.common.Command;
 import io.streamnative.filter.common.FilterRequest;
+import io.streamnative.filter.common.ValueSchemaInfo;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.Topics;
 import org.apache.pulsar.client.admin.TopicPolicies;
@@ -19,6 +39,8 @@ import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.api.TypedMessageBuilder;
 import org.apache.pulsar.common.policies.data.InactiveTopicPolicies;
 import org.apache.pulsar.common.policies.data.RetentionPolicies;
+import org.apache.pulsar.common.schema.SchemaInfo;
+import org.apache.pulsar.common.schema.SchemaType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -173,6 +195,8 @@ class SessionTests {
         assertThat(req.getClientType()).isEqualTo(ClientType.PULSAR);
         assertThat(req.getKeyDeserializer()).isNull();
         assertThat(req.getValueDeserializer()).isNull();
+        // No-schema path forwards no value schema — wire-identical to the pre-schema format.
+        assertThat(req.getValueSchema()).isNull();
     }
 
     @Test
@@ -333,6 +357,82 @@ class SessionTests {
                 .isEqualTo("org.apache.kafka.common.serialization.StringDeserializer");
         assertThat(req.getValueDeserializer())
                 .isEqualTo("org.apache.kafka.common.serialization.ByteArrayDeserializer");
+    }
+
+    // ---------------------------------------------------------------- Typed value schema (Pulsar)
+
+    /** Minimal POJO for building a real {@code Schema.AVRO} / {@code Schema.JSON} in tests. */
+    public static class Trade {
+        public String sym;
+        public double price;
+    }
+
+    @Test
+    void typedValueSchemaForwardsFullSchemaInfo() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+        Schema<Trade> schema = Schema.AVRO(Trade.class);
+
+        session.newConsumer(schema)
+                .topic("persistent://public/in/trades")
+                .selector("price > 100")
+                .subscribe();
+
+        FilterRequest req = capturePublished();
+        assertThat(req.getCommand()).isEqualTo(Command.REGISTER);
+        assertThat(req.getClientType()).isEqualTo(ClientType.PULSAR);
+        // Pulsar has no key schema — key deserializer is always null on this path.
+        assertThat(req.getKeyDeserializer()).isNull();
+        // valueDeserializer mirrors the schema name (parity with Kafka mismatch detection).
+        assertThat(req.getValueDeserializer()).isEqualTo(schema.getSchemaInfo().getName());
+
+        ValueSchemaInfo vs = req.getValueSchema();
+        assertThat(vs).isNotNull();
+        assertThat(vs.getName()).isEqualTo(schema.getSchemaInfo().getName());
+        assertThat(vs.getType()).isEqualTo("AVRO");
+        // The full definition (base64 of the .avsc) travels — a name alone can't decode Avro.
+        assertThat(vs.getDefinition()).isNotBlank();
+    }
+
+    @Test
+    void typedStringSchemaForwardsTypeWithoutDefinition() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+
+        session.newConsumer(Schema.STRING)
+                .topic("persistent://public/in/trades")
+                .subscribe();
+
+        ValueSchemaInfo vs = capturePublished().getValueSchema();
+        assertThat(vs).isNotNull();
+        assertThat(vs.getType()).isEqualTo("STRING");
+        // STRING/BYTES carry no structured definition.
+        assertThat(vs.getDefinition()).isNull();
+    }
+
+    @Test
+    void newConsumerRejectsNonNativeProtobuf() throws Exception {
+        Session session = newSession(PrivateTopicPolicy.DEFAULT);
+
+        // Mockito cannot mock the Schema interface, but it can mock SchemaInfo; wrap a SchemaInfo
+        // reporting the non-native PROTOBUF type in a minimal Schema test-double.
+        SchemaInfo si = mock(SchemaInfo.class);
+        when(si.getType()).thenReturn(SchemaType.PROTOBUF);
+        Schema<Object> schema = new ProtobufStubSchema(si);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> session.newConsumer(schema))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("PROTOBUF_NATIVE");
+
+        // Guard fires before any control-topic publish.
+        verify(controlMsgBuilder, never()).value(any(byte[].class));
+    }
+
+    /** Minimal {@link Schema} test-double exposing a chosen {@link SchemaInfo}; only used above. */
+    private static final class ProtobufStubSchema implements Schema<Object> {
+        private final SchemaInfo info;
+        ProtobufStubSchema(SchemaInfo info) { this.info = info; }
+        @Override public byte[] encode(Object message) { return new byte[0]; }
+        @Override public SchemaInfo getSchemaInfo() { return info; }
+        @Override public Schema<Object> clone() { return new ProtobufStubSchema(info); }
     }
 
     // ---------------------------------------------------------------- Heartbeat (Phase 4)

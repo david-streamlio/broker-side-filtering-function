@@ -1,9 +1,28 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.QueryMessage;
-import javax.jms.JMSException;
+import io.streamnative.filter.common.selector.SelectorParseException;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.TableView;
@@ -224,7 +243,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         boolean forwardPropertiesResolved = false;
 
         for (CompiledQuery cq : compiled.values()) {
-            if (cq.evaluator().matches(bindings)) {
+            if (cq.evaluator().matches(bindings, cq.valueDecoder())) {
                 TypedMessageBuilder<byte[]> builder = ctx.newOutputMessage(cq.outputTopic(), Schema.BYTES)
                         .value(payload);
                 if (!forwardPropertiesResolved) {
@@ -481,12 +500,14 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         SelectorEvaluator evaluator;
         try {
             evaluator = SelectorEvaluator.compile(qm.getSelector());
-        } catch (JMSException e) {
+        } catch (SelectorParseException e) {
             LOG.warn("Query id={} has invalid selector [{}]: {}", queryId, qm.getSelector(), e.getMessage());
             recordMetric(METRIC_QUERIES_BAD, 1.0);
             return;
         }
-        compiled.put(queryId, new CompiledQuery(queryId, qm.getName(), qm.getOutputTopic(), evaluator));
+        ValueDecoder valueDecoder = ValueDecoderFactory.from(qm.getValueSchema());
+        compiled.put(queryId, new CompiledQuery(queryId, qm.getName(), qm.getOutputTopic(), evaluator,
+                qm.getValueSchema(), valueDecoder));
         LOG.info("Loaded query id={} name='{}' selector=[{}] -> {}",
                 queryId, qm.getName(), qm.getSelector(), qm.getOutputTopic());
         recordMetric(METRIC_QUERIES_LOADED, 1.0);
@@ -541,6 +562,11 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     /** Test-only hook: number of currently loaded queries. */
     int activeQueryCountForTest() {
         return compiled.size();
+    }
+
+    /** Test-only hook: the loaded {@link CompiledQuery} for {@code queryId}, or {@code null}. */
+    CompiledQuery queryForTest(String queryId) {
+        return compiled.get(queryId);
     }
 
     @Override

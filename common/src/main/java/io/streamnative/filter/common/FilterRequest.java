@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 package io.streamnative.filter.common;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
@@ -31,6 +50,7 @@ public final class FilterRequest {
     private final String selector;
     private final String keyDeserializer;
     private final String valueDeserializer;
+    private final ValueSchemaInfo valueSchema;
     private final ClientType clientType;
     private final List<String> queryIds;
 
@@ -42,6 +62,7 @@ public final class FilterRequest {
                          @JsonProperty("selector") String selector,
                          @JsonProperty("keyDeserializer") String keyDeserializer,
                          @JsonProperty("valueDeserializer") String valueDeserializer,
+                         @JsonProperty("valueSchema") ValueSchemaInfo valueSchema,
                          @JsonProperty("clientType") ClientType clientType,
                          @JsonProperty("queryIds") List<String> queryIds) {
         this.command           = command;
@@ -51,6 +72,7 @@ public final class FilterRequest {
         this.selector          = selector;
         this.keyDeserializer   = keyDeserializer;
         this.valueDeserializer = valueDeserializer;
+        this.valueSchema       = valueSchema;
         this.clientType        = clientType;
         this.queryIds          = queryIds == null ? null : List.copyOf(queryIds);
     }
@@ -63,16 +85,28 @@ public final class FilterRequest {
                                          ClientType clientType) {
         return new FilterRequest(Command.REGISTER,
                 Collections.singletonList(inputTopic), null,
-                outputTopic, selector, keyDeserializer, valueDeserializer, clientType, null);
+                outputTopic, selector, keyDeserializer, valueDeserializer, null, clientType, null);
     }
 
     /** Build a REGISTER request for multiple input topics. */
     public static FilterRequest register(List<String> inputTopics, String outputTopic, String selector,
                                          String keyDeserializer, String valueDeserializer,
                                          ClientType clientType) {
+        return register(inputTopics, outputTopic, selector,
+                keyDeserializer, valueDeserializer, null, clientType);
+    }
+
+    /**
+     * Build a REGISTER request for multiple input topics, carrying the consumer's full value
+     * {@link ValueSchemaInfo} (used by the Pulsar SDK so the filter function receives the value
+     * schema for schema-aware filtering). {@code valueSchema} may be {@code null}.
+     */
+    public static FilterRequest register(List<String> inputTopics, String outputTopic, String selector,
+                                         String keyDeserializer, String valueDeserializer,
+                                         ValueSchemaInfo valueSchema, ClientType clientType) {
         return new FilterRequest(Command.REGISTER,
                 inputTopics, null,
-                outputTopic, selector, keyDeserializer, valueDeserializer, clientType, null);
+                outputTopic, selector, keyDeserializer, valueDeserializer, valueSchema, clientType, null);
     }
 
     /** Build a REGISTER request matching a regex pattern. */
@@ -81,17 +115,17 @@ public final class FilterRequest {
                                                 ClientType clientType) {
         return new FilterRequest(Command.REGISTER,
                 null, topicsPattern,
-                outputTopic, selector, keyDeserializer, valueDeserializer, clientType, null);
+                outputTopic, selector, keyDeserializer, valueDeserializer, null, clientType, null);
     }
 
     /** Build a MODIFY request replacing the selector on an existing queryId. */
     public static FilterRequest modify(String newSelector) {
-        return new FilterRequest(Command.MODIFY, null, null, null, newSelector, null, null, null, null);
+        return new FilterRequest(Command.MODIFY, null, null, null, newSelector, null, null, null, null, null);
     }
 
     /** Build an UNREGISTER request retracting an existing queryId. */
     public static FilterRequest unregister() {
-        return new FilterRequest(Command.UNREGISTER, null, null, null, null, null, null, null, null);
+        return new FilterRequest(Command.UNREGISTER, null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -100,7 +134,7 @@ public final class FilterRequest {
      * {@code lastSeen} timestamps in a single message.
      */
     public static FilterRequest heartbeat(List<String> queryIds) {
-        return new FilterRequest(Command.HEARTBEAT, null, null, null, null, null, null, null,
+        return new FilterRequest(Command.HEARTBEAT, null, null, null, null, null, null, null, null,
                 queryIds);
     }
 
@@ -113,6 +147,7 @@ public final class FilterRequest {
     public String getSelector()           { return selector; }
     public String getKeyDeserializer()    { return keyDeserializer; }
     public String getValueDeserializer()  { return valueDeserializer; }
+    public ValueSchemaInfo getValueSchema() { return valueSchema; }
     public ClientType getClientType()     { return clientType; }
     public List<String> getQueryIds()     { return queryIds; }
 
@@ -194,6 +229,7 @@ public final class FilterRequest {
                 && Objects.equals(selector, that.selector)
                 && Objects.equals(keyDeserializer, that.keyDeserializer)
                 && Objects.equals(valueDeserializer, that.valueDeserializer)
+                && Objects.equals(valueSchema, that.valueSchema)
                 && clientType == that.clientType
                 && Objects.equals(queryIds, that.queryIds);
     }
@@ -201,7 +237,7 @@ public final class FilterRequest {
     @Override
     public int hashCode() {
         return Objects.hash(command, inputTopics, topicsPattern, outputTopic, selector,
-                keyDeserializer, valueDeserializer, clientType, queryIds);
+                keyDeserializer, valueDeserializer, valueSchema, clientType, queryIds);
     }
 
     @Override
@@ -213,6 +249,7 @@ public final class FilterRequest {
                 + ", selector='" + selector + '\''
                 + ", keyDeserializer='" + keyDeserializer + '\''
                 + ", valueDeserializer='" + valueDeserializer + '\''
+                + ", valueSchema=" + valueSchema
                 + ", clientType=" + clientType
                 + ", queryIds=" + queryIds
                 + '}';
