@@ -36,10 +36,8 @@ on:
     # triggers a run that evaluates the integration-tests job condition (default types are
     # opened/synchronize/reopened, which is why labeling after open was a silent no-op).
     types: [opened, synchronize, reopened, labeled]
-    paths:
-      - '**.java'
-      - '**/pom.xml'
-      - '.github/workflows/java-ci.yml'
+    # No path filter on PRs: "Build + unit tests" is a required check on main, and a required
+    # check that never runs (e.g. on a demo-only PR) blocks the merge forever.
   push:
     branches: [main]
     paths:
