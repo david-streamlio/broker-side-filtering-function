@@ -17,7 +17,7 @@
 
 name: Python SDK
 
-# Runs lint + unit tests for sdk/python/ on every push/PR that touches Python files. The live
+# Runs lint + unit tests for sdk/python/ on every PR, and on pushes that touch Python files. The live
 # integration test against an orchestrator-fronted Pulsar container is skipped here — it
 # requires the pre-built filter + orchestrator NARs and Docker, which we don't wire into PR CI
 # to keep wall-time fast. Run it locally with `pytest tests/integration/ -v`.
@@ -28,11 +28,9 @@ on:
       - 'sdk/python/**'
       - 'protocol/filter-request.schema.json'
       - '.github/workflows/python-sdk.yml'
+  # No path filter on PRs: these jobs are required checks on main, and a required check that never
+  # runs (e.g. on a demo-only PR) blocks the merge forever.
   pull_request:
-    paths:
-      - 'sdk/python/**'
-      - 'protocol/filter-request.schema.json'
-      - '.github/workflows/python-sdk.yml'
 
 defaults:
   run:
