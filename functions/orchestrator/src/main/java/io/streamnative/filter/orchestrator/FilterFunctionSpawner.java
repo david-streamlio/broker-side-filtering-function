@@ -45,7 +45,19 @@ interface FilterFunctionSpawner {
      *                    clientType — orchestrator uses these to populate the registry entry)
      * @param cfg         orchestrator configuration (package URL, tenant/namespace, parallelism…)
      */
-    RegistryEntry spawn(String registryKey, FilterRequest req, OrchestratorConfig cfg) throws Exception;
+    default RegistryEntry spawn(String registryKey, FilterRequest req, OrchestratorConfig cfg) throws Exception {
+        return spawn(registryKey, req, cfg, controlTopic -> { });
+    }
+
+    /**
+     * As {@link #spawn(String, FilterRequest, OrchestratorConfig)}. For a new function,
+     * {@code beforeDeploy} runs once its control topic exists and its subscription is in place, before
+     * the function is created: the orchestrator publishes the query there, so the function preloads it
+     * and doesn't drop the first records after the query's registration. Not called when the function
+     * already exists.
+     */
+    RegistryEntry spawn(String registryKey, FilterRequest req, OrchestratorConfig cfg,
+                        ControlTopicAction beforeDeploy) throws Exception;
 
     /**
      * Spawn a dedicated filter function for one windowed query: input {@code sourceTopic}, on

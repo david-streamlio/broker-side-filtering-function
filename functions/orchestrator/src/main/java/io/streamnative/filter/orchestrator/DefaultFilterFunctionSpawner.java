@@ -62,12 +62,24 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
 
     private final PulsarAdmin admin;
 
+    /**
+     * Creates a new live filter's subscription at the end of its topics, so it starts at registration;
+     * {@code null} leaves it to the function, which then starts at the earliest retained message.
+     */
+    private final SubscriptionPositioner positioner;
+
     DefaultFilterFunctionSpawner(PulsarAdmin admin) {
+        this(admin, null);
+    }
+
+    DefaultFilterFunctionSpawner(PulsarAdmin admin, SubscriptionPositioner positioner) {
+        this.positioner = positioner;
         this.admin = admin;
     }
 
     @Override
-    public RegistryEntry spawn(String registryKey, FilterRequest req, OrchestratorConfig cfg) throws Exception {
+    public RegistryEntry spawn(String registryKey, FilterRequest req, OrchestratorConfig cfg,
+                               ControlTopicAction beforeDeploy) throws Exception {
         boolean isPattern = req.getTopicsPattern() != null && !req.getTopicsPattern().isBlank();
         String sanitizedKey = isPattern
                 ? TopicKeySanitizer.forPattern(registryKey)
@@ -84,6 +96,15 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
         }
 
         prepareControlTopic(controlTopic, cfg);
+        // A live query starts at its registration: the filter's subscription is created at the end of
+        // its topics before the function exists. (At Earliest, the first query on a topic would get the
+        // topic's whole retained history.) Topics that match a pattern later get the subscription at
+        // Earliest from the function, which for a new topic is all of it.
+        if (positioner != null) {
+            positioner.createAtEnd(isPattern ? null : java.util.List.of(registryKey),
+                    isPattern ? req.getTopicsPattern() : null, functionName);
+        }
+        beforeDeploy.accept(controlTopic);
         deployFilterFunction(buildFunctionConfig(registryKey, req, cfg, functionName, controlTopic, isPattern),
                 cfg.functionPackageUrl(), cfg.functionTenant(), cfg.functionNamespace(), functionName);
 
@@ -127,7 +148,9 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
     private FunctionConfig buildFunctionConfig(String registryKey, FilterRequest req,
                                                OrchestratorConfig cfg, String functionName,
                                                String controlTopic, boolean isPattern) {
-        FunctionConfig.FunctionConfigBuilder b = baseFunctionConfig(cfg, functionName, controlTopic);
+        // Named after the function, so the subscription created at registration is the one it attaches to.
+        FunctionConfig.FunctionConfigBuilder b = baseFunctionConfig(cfg, functionName, controlTopic)
+                .subName(functionName);
         if (isPattern) {
             b.topicsPattern(req.getTopicsPattern());
         } else {

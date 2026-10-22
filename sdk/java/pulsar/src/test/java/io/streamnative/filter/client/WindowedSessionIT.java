@@ -36,7 +36,6 @@ import org.apache.pulsar.common.policies.data.FunctionStatus;
 import org.apache.pulsar.packages.management.core.common.PackageMetadata;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.slf4j.Logger;
@@ -255,10 +254,8 @@ class WindowedSessionIT {
         }
     }
 
-    // Fails today: the orchestrator spawns a topic's shared live filter at Earliest, so the first live
-    // query on a topic receives the topic's retained history. Open decision on how live queries should
-    // start; re-enable once it's fixed.
-    @Disabled("First live query on a topic replays its backlog (shared filter spawns at Earliest); fix pending")
+    // The topic has history, and this is the first live query on it: its new filter must start at the
+    // registration, not replay the topic (it did before live filters' subscriptions were created at the end).
     @Test
     void liveOnlySkipsHistoryAndKeepsSetSelector() throws Exception {
         Seeded s = seed("live");
