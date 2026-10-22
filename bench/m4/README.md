@@ -37,3 +37,16 @@ docker compose -f bench/docker-compose.yml -f bench/docker-compose.entryfilter.y
 A subscription gets filtered when it carries the subscription property `selector`, for example
 `pulsar-admin topics create-subscription -s s1 -p "selector=__key__ = '8675309'" <topic>` or
 `subscriptionProperties` on a Java `ConsumerBuilder`. Every other subscription gets every entry.
+
+`run_m4_broker.py` drains a new subscription (bench/clients' `pulsar-drain` mode) for each topic layout
+(unbatched uncompressed, unbatched lz4, batched lz4) and selector (none, key, property). It records the
+records and bytes delivered, the broker's CPU, and the EntryFilter's own counters. The filter logs its
+cumulative counters at most every 10 s, and only while selector entries flow, so after each run the
+runner waits 10 s and pushes one entry through a selector on a one-message "poke" topic. That forces a
+summary line, and consecutive summaries give the run's counts, less a poke's own cost (measured at
+startup).
+
+```bash
+caffeinate -ims python3 bench/m4/run_m4_broker.py --events 1000000 --reps 3
+python3 bench/m4/chart_broker.py bench/out/m4/m4-broker-<timestamp>.json
+```
