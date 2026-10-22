@@ -67,7 +67,7 @@ def main():
                  fontsize=12)
     footer = (f"median of {reps} runs, whiskers min–max; log scales for time and bytes. Windows are the last "
               f"1/1440, 1/24 and all of the load's span on the log's clock (a simulated day). 1 entity: "
-              f"__key__ = '8675309'; ~1%: region = 'r07'; all: region LIKE 'r%'. "
+              f"__key__ = '8675309'; ~1%: __key__ LIKE '%07'; all: __key__ LIKE '%'. "
               f"{'Every' if data['all_correct'] else 'NOT every'} windowed read returned the scan's match count. "
               f"The windowed read's output is LZ4-compressed (the Functions runtime's default) while the source "
               f"topic isn't, so when the selector matches everything its bytes are well below the records' size. "

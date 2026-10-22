@@ -1,0 +1,102 @@
+# Bench stack for M3 (windows on hot vs cold storage): streamnative/sn-platform 4.2.0.6 with tiered
+# storage offloading to MinIO. The Apache image ships no offloaders; sn-platform has tiered-storage-v2
+# (spike S3). Small ledgers, so data rolls into many closed, offloadable ledgers.
+#
+# Same host ports as the other bench brokers, so run one at a time:
+#   docker compose -f bench/docker-compose.yml stop
+#   docker compose -f bench/docker-compose.tiered.yml up -d
+#
+# On an arm64 host the broker runs emulated, and local MinIO has no per-request latency: cold reads cost
+# requests and bytes here, not time.
+
+name: bench-tiered
+
+services:
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: bench-minio
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c", "mc alias set local http://minio:9000 minioadmin minioadmin && mc mb -p local/pulsar-offload"]
+
+  pulsar:
+    image: streamnative/sn-platform:4.2.0.6
+    platform: linux/amd64
+    container_name: bench-tiered-pulsar
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    # ThreadRuntime: the default ProcessRuntime fails to start function instances on this image (see
+    # KafkaConsumerKoPIT). Filters then run inside the broker JVM.
+    command:
+      - /bin/bash
+      - -c
+      - >-
+        bin/apply-config-from-env.py conf/standalone.conf &&
+        sed -i 's|^functionRuntimeFactoryClassName:.*|functionRuntimeFactoryClassName: org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory|'
+        conf/functions_worker.yml &&
+        bin/pulsar standalone -nss
+    environment:
+      PULSAR_PREFIX_brokerEntryMetadataInterceptors: "org.apache.pulsar.common.intercept.AppendBrokerTimestampMetadataInterceptor,org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
+      PULSAR_PREFIX_exposingBrokerEntryMetadataToClientEnabled: "true"
+      PULSAR_PREFIX_functionsWorkerEnabled: "true"
+      PULSAR_PREFIX_enablePackagesManagement: "true"
+      PULSAR_PREFIX_functionsWorkerEnablePackageManagement: "true"
+      PULSAR_PREFIX_allowAutoTopicCreation: "true"
+      PULSAR_PREFIX_allowAutoTopicCreationType: "non-partitioned"
+      PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled: "false"
+      PULSAR_PREFIX_bookkeeperClientExposeStatsToPrometheus: "true"
+      # Ledger rollover at ~2,000 entries.
+      PULSAR_PREFIX_managedLedgerMaxEntriesPerLedger: "2000"
+      PULSAR_PREFIX_managedLedgerMinLedgerRolloverTimeMinutes: "0"
+      # Keep everything by default; M3's retention case sets a topic policy.
+      PULSAR_PREFIX_defaultRetentionTimeInMinutes: "-1"
+      PULSAR_PREFIX_defaultRetentionSizeInMB: "-1"
+      PULSAR_PREFIX_retentionCheckIntervalInSeconds: "10"
+      # Offload to MinIO via tiered-storage-v2; drop the BookKeeper copy right away so reads of
+      # offloaded ledgers must go to MinIO.
+      PULSAR_PREFIX_managedLedgerOffloadDriver: "aws-s3"
+      PULSAR_PREFIX_s3ManagedLedgerOffloadBucket: "pulsar-offload"
+      PULSAR_PREFIX_s3ManagedLedgerOffloadRegion: "us-east-1"
+      PULSAR_PREFIX_s3ManagedLedgerOffloadServiceEndpoint: "http://minio:9000"
+      PULSAR_PREFIX_managedLedgerOffloadDeletionLagMs: "0"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      PULSAR_MEM: "-Xms1500m -Xmx1500m -XX:MaxDirectMemorySize=1g"
+    ports:
+      - "18080:8080"
+      - "16650:6650"
+    volumes:
+      - pulsar-data:/pulsar/data
+      - ../functions/selector-filter/target:/nars/filter:ro
+      - ../functions/orchestrator/target:/nars/orchestrator:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/admin/v2/clusters | grep -q standalone || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+      start_period: 30s
+
+volumes:
+  minio-data:
+  pulsar-data:
