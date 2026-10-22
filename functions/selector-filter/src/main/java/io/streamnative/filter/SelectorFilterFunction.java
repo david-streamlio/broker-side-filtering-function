@@ -49,6 +49,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
@@ -173,6 +174,8 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
             METRIC_MESSAGES_OUT, new LongAdder(),
             METRIC_BYTES_OUT, new LongAdder());
     private final AtomicLong lastCountFlushMs = new AtomicLong();
+    /** Set once every window has completed and the input is parked; see {@link #parkInput()}. */
+    private final AtomicBoolean parked = new AtomicBoolean();
 
     private final AtomicLong latencyPublishMsSum   = new AtomicLong();
     private final AtomicLong latencyPublishMsCount = new AtomicLong();
@@ -281,18 +284,25 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         long logTime = 0L;
         Message<?> srcMessage = null;
         boolean windowFieldsResolved = false;
+        // False only when every query is a bounded window that has already completed.
+        boolean anyActive = false;
 
         for (CompiledQuery cq : compiled.values()) {
             WindowState window = cq.window();
             boolean completeAfterThis = false;
             boolean caughtUpAfterThis = false;
-            if (window != null) {
+            if (window == null) {
+                anyActive = true;
+            } else {
                 if (!windowFieldsResolved) {
                     srcMessage = record.getMessage().orElse(null);
                     logTime = srcMessage == null ? 0L : MessageBindings.logClockTime(srcMessage);
                     windowFieldsResolved = true;
                 }
                 WindowState.Admission admission = window.admit(logTime, positionOf(srcMessage));
+                if (admission != WindowState.Admission.DONE) {
+                    anyActive = true;
+                }
                 if (admission == WindowState.Admission.BEFORE_WINDOW || admission == WindowState.Admission.DONE) {
                     continue;
                 }
@@ -368,7 +378,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
         if (sends.isEmpty()) {
             if (completionSends == null) {
-                return ackAsDropped(ctx, record, payloadBytes, startNanos);
+                return anyActive ? ackAsDropped(ctx, record, payloadBytes, startNanos) : parkInput();
             }
             return ackAfterCompletion(ctx, record, completionSends, startNanos);
         }
@@ -535,6 +545,21 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     private static LogPosition positionOf(Message<?> message) {
         return message == null || message.getMessageId() == null
                 ? null : LogPosition.fromBytes(message.getMessageId().toByteArray());
+    }
+
+    /**
+     * Every query is a bounded window that has completed, so nothing read from here on can matter. A
+     * Pulsar function can't pause its own input, but the runtime stops reading once
+     * {@code maxPendingAsyncRequests} futures (1,000 by default) are pending. So return one that never
+     * completes, without acking: the filter stops a bounded distance past the window's end, instead of
+     * reading the rest of the topic (from cold storage, for an old window) until it's deleted. Deleting
+     * the function interrupts the waits; on a restart the records are redelivered and dropped again.
+     */
+    private CompletableFuture<Void> parkInput() {
+        if (parked.compareAndSet(false, true)) {
+            LOG.info("All windows complete; parking input so the function stops reading");
+        }
+        return new CompletableFuture<>();
     }
 
     private CompletableFuture<Void> ackAsDropped(Context ctx, Record<?> record, int payloadBytes, long startNanos) {

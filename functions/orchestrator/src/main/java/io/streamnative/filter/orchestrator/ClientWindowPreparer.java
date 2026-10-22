@@ -131,7 +131,10 @@ final class ClientWindowPreparer implements WindowPreparer {
 
     /** Log-clock time of the message at {@code start}, or {@code null} if none is readable. */
     private Long logTimeAt(String log, MessageId start, boolean inclusive) throws Exception {
-        ReaderBuilder<byte[]> builder = client.newReader(Schema.BYTES).topic(log).startMessageId(start);
+        // One message is all this needs; the default 1,000-message prefetch makes the broker read (for the
+        // earliest message, from cold storage) far more than that.
+        ReaderBuilder<byte[]> builder = client.newReader(Schema.BYTES).topic(log).startMessageId(start)
+                .receiverQueueSize(1);
         if (inclusive) {
             builder = builder.startMessageIdInclusive();
         }

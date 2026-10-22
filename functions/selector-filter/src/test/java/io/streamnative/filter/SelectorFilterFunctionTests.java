@@ -1053,16 +1053,32 @@ class SelectorFilterFunctionTests {
     }
 
     @Test
-    void recordsAfterCompletionAreDropped() throws Exception {
+    void recordsAfterCompletionAreNotForwardedAndStopTheInput() throws Exception {
         SelectorFilterFunction fn = windowedFunction(null, null);
         TypedMessageBuilder<byte[]> builder = mockOutputBuilder(WINDOW_OUT, CompletableFuture.completedFuture(null));
         givenSource(2_500L, 5, 2);
         fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);
         givenSource(1_500L, 5, 3);   // in-window by time, but the window is done
 
-        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);
+        // Neither acked nor completed: once enough of these are pending, the runtime stops reading
+        // instead of draining the rest of the topic.
+        CompletableFuture<Void> later = fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);
 
+        assertThat(later).isNotDone();
         verify(builder, times(1)).sendAsync();   // only the completion record
+        verify(record, times(1)).ack();          // only the record that completed the window
+    }
+
+    @Test
+    void aLiveQueryNextToACompletedWindowKeepsTheInputFlowing() throws Exception {
+        SelectorFilterFunction fn = windowedFunction(null, null);
+        mockOutputBuilder(WINDOW_OUT, CompletableFuture.completedFuture(null));
+        fn.loadQueryForTest("live", queryJson("region = 'none'", "persistent://public/out/live"));
+        givenSource(2_500L, 5, 2);
+        fn.process("p".getBytes(StandardCharsets.UTF_8), ctx);   // completes the window
+        givenSource(2_600L, 5, 3);
+
+        assertThat(fn.process("p".getBytes(StandardCharsets.UTF_8), ctx)).isCompleted();
         verify(record, times(2)).ack();
     }
 

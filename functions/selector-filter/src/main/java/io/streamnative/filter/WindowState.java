@@ -33,7 +33,8 @@ import java.util.function.LongSupplier;
  * <ul>
  *   <li><b>Bounded</b> ({@code toMs} set): the function evaluates {@link Admission#IN_WINDOW} /
  *       {@link Admission#LAST_IN_WINDOW} records and writes the completion record when the window
- *       ends. After that every record is {@link Admission#DONE} and is dropped.</li>
+ *       ends. After that every record is {@link Admission#DONE}: the filter stops reading (see
+ *       {@code SelectorFilterFunction#parkInput}).</li>
  *   <li><b>Open-ended</b> ({@code toMs} {@code null}): the window never ends. At the end of history
  *       (the captured end-of-log position) the function writes a caught-up record once
  *       ({@link Admission#LAST_OF_HISTORY} / {@link Admission#FIRST_AFTER_HISTORY}), then keeps
