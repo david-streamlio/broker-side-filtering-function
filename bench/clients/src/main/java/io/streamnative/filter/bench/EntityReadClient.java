@@ -46,6 +46,7 @@ import org.apache.pulsar.client.api.Reader;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -65,7 +66,10 @@ import java.util.concurrent.TimeUnit;
  *       offsets captured at the start, discarding non-matches.</li>
  *   <li>{@code kafka-window}: the Kafka SDK's windowed read.</li>
  * </ul>
- * The entity is a message key; the windowed reads use the selector {@code __key__ = '<key>'}.
+ * The entity is a message key; the windowed reads use the selector {@code __key__ = '<key>'} unless
+ * {@code --selector} replaces it, and the window {@code last(--lookback-ms)} unless
+ * {@code --window=between:<fromMs>:<toMs>} gives explicit bounds. In window modes every delivered
+ * record counts as a match, since the server did the matching.
  * Prints one JSON object to stdout; logs go to stderr.
  *
  * <pre>{@code java -jar bench-clients.jar --mode=pulsar-scan --topic=persistent://public/default/orders}</pre>
@@ -80,6 +84,8 @@ public final class EntityReadClient {
         public String mode;
         public String topic;
         public String key;
+        public String selector;
+        public String window;
         public long lookbackMs;
         public long startedAtMs;
         /** Until the reader is positioned (scan) or {@code subscribe()} returns (window). */
@@ -117,6 +123,8 @@ public final class EntityReadClient {
         result.mode = required("mode");
         result.topic = required("topic");
         result.key = key;
+        result.selector = opt("selector", "__key__ = '" + key + "'");
+        result.window = opt("window", "last:" + lookbackMs);
         result.lookbackMs = lookbackMs;
     }
 
@@ -171,8 +179,8 @@ public final class EntityReadClient {
         try (Session session = newSession();
              org.apache.pulsar.client.api.Consumer<byte[]> consumer = session.newConsumer()
                      .topic(result.topic)
-                     .selector(selector())
-                     .window(TimeWindow.last(Duration.ofMillis(lookbackMs)))
+                     .selector(result.selector)
+                     .window(timeWindow())
                      .subscribe()) {
             result.setupMs = sinceStart();
             WindowControl window = (WindowControl) consumer;
@@ -223,8 +231,8 @@ public final class EntityReadClient {
              Consumer<String, byte[]> consumer = FilterableKafkaConsumers
                      .<String, byte[]>newConsumer(session, kafkaProps())
                      .topic(result.topic)
-                     .selector(selector())
-                     .window(TimeWindow.last(Duration.ofMillis(lookbackMs)))
+                     .selector(result.selector)
+                     .window(timeWindow())
                      .subscribe()) {
             result.setupMs = sinceStart();
             WindowControl window = (WindowControl) consumer;
@@ -245,7 +253,7 @@ public final class EntityReadClient {
     private void record(String recordKey, int payloadBytes, String seq) {
         result.recordsReceived++;
         result.payloadBytesReceived += payloadBytes;
-        if (key.equals(recordKey)) {
+        if (result.mode.endsWith("window") || key.equals(recordKey)) {
             if (result.firstMatchMs == null) {
                 result.firstMatchMs = sinceStart();
             }
@@ -305,8 +313,15 @@ public final class EntityReadClient {
         return h == null || h.value() == null ? null : new String(h.value(), StandardCharsets.UTF_8);
     }
 
-    private String selector() {
-        return "__key__ = '" + key + "'";
+    /** {@code last:<ms>} or {@code between:<fromMs>:<toMs>}. */
+    private TimeWindow timeWindow() {
+        String[] parts = result.window.split(":");
+        return switch (parts[0]) {
+            case "last" -> TimeWindow.last(Duration.ofMillis(Long.parseLong(parts[1])));
+            case "between" -> TimeWindow.between(Instant.ofEpochMilli(Long.parseLong(parts[1])),
+                    Instant.ofEpochMilli(Long.parseLong(parts[2])));
+            default -> throw new IllegalArgumentException("--window must be last:<ms> or between:<fromMs>:<toMs>");
+        };
     }
 
     private String serviceUrl() {

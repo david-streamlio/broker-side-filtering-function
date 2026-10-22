@@ -56,8 +56,8 @@ userConfig:
   apply-compaction: true
   pulsar-admin-url: http://localhost:8080
   idle-gc-enabled: true
-  idle-gc-ttl-seconds: 20
-  idle-gc-sweep-interval-seconds: 5
+  idle-gc-ttl-seconds: 5
+  idle-gc-sweep-interval-seconds: 2
   existence-reconcile-enabled: false
 """
 
@@ -138,10 +138,16 @@ class Broker:
 
 
 def cpu_by_role(before, after):
-    """CPU seconds used during the run, per role; a process that started during the run counts in full."""
+    """CPU seconds used during the run, per role; a process that started during the run counts in full.
+
+    A windowed filter that was already running (an earlier run's, not yet deleted by idle GC) is
+    reported as window-filter-old, so window-filter is only this run's filter.
+    """
     used = {}
     for pid, (cpu, role) in after.items():
         start = before[pid][0] if pid in before else 0.0
+        if role == "window-filter" and pid in before:
+            role = "window-filter-old"
         used[role] = round(used.get(role, 0.0) + cpu - start, 2)
     return used
 
@@ -183,8 +189,10 @@ def ensure_data(broker, args):
                                "delete the topic or pass --data-dir")
         log(f"{args.topic} already loaded ({os.path.basename(manifests[-1])})")
     else:
-        log(f"loading {args.topic} with profile {args.profile} (seed {args.seed})")
-        gen = subprocess.run([sys.executable, GEN, "--profile", args.profile, "--topic", args.topic,
+        size = ["--events", str(args.events)] if getattr(args, "events", None) else ["--profile", args.profile]
+        extra = list(getattr(args, "generator_args", []))
+        log(f"loading {args.topic} with {' '.join(size + extra)} (seed {args.seed})")
+        gen = subprocess.run([sys.executable, GEN, *size, *extra, "--topic", args.topic,
                               "--service-url", broker.service_url, "--seed", str(args.seed),
                               "--out-dir", args.data_dir], capture_output=True, text=True)
         for line in gen.stderr.splitlines():  # keep the generator's own lines, not the client's logging
@@ -210,13 +218,13 @@ def wait_for_window_filters_gone(broker, timeout_s=180):
     log(f"warning: windowed filters still present after {timeout_s}s: {left}")
 
 
-def run_client(args, arm):
-    """Run one EntityReadClient read; sample its TCP connections while it runs."""
+def run_client(args, arm, extra=()):
+    """Run one EntityReadClient read (plus any extra --name=value options); sample its TCP connections."""
     java = os.path.join(os.environ["JAVA_HOME"], "bin", "java") if os.environ.get("JAVA_HOME") else "java"
     cmd = [java, "-jar", JAR, f"--mode={arm}", f"--topic={args.topic}", f"--key={args.key}",
            f"--lookback-ms={args.lookback_ms}", f"--service-url={args.service_url}",
            f"--admin-url={args.admin_url}", f"--kafka-bootstrap={args.kafka_bootstrap}",
-           f"--control-topic={REQUESTS_TOPIC}"]
+           f"--control-topic={REQUESTS_TOPIC}", *extra]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     conns = {"max_established": 0, "remote_ports": set()}
     done = threading.Event()

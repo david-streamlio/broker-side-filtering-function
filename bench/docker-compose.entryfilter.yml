@@ -1,0 +1,16 @@
+# Loads the selector EntryFilter (broker-filter/) on the Apache bench broker, for M4's broker arm.
+# An override, so other measurements run without a filter on every dispatch:
+#
+#   mvn -DskipTests package            # builds broker-filter/target/*.nar
+#   docker compose -f bench/docker-compose.yml -f bench/docker-compose.entryfilter.yml up -d
+#
+# The filter acts only on subscriptions with a "selector" subscription property; every other
+# subscription gets every entry. It filters unbatched entries on key and properties, from the entry's
+# metadata alone; batched entries pass through unfiltered.
+services:
+  pulsar:
+    environment:
+      PULSAR_PREFIX_entryFiltersDirectory: "/entry_filters"
+      PULSAR_PREFIX_entryFilterNames: "selector"
+    volumes:
+      - ../broker-filter/target:/entry_filters:ro
