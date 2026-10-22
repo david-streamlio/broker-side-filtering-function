@@ -1,0 +1,48 @@
+# Broker for the time-windowed read stage demo (`make window-demo`): Apache Pulsar 4.2.1 standalone
+# (native arm64 and amd64) with the functions worker on and the repo's built NARs mounted for the
+# orchestrator. Its own project and volume, so starting it clean never touches the bench data.
+#
+#   mvn -DskipTests package
+#   docker compose -p window-demo -f demo/window/docker-compose.yml up -d --wait
+#
+# Same host ports as bench/docker-compose.yml: run one of them at a time.
+services:
+  pulsar:
+    image: apachepulsar/pulsar:4.2.1
+    container_name: window-demo-pulsar
+    command:
+      - /bin/bash
+      - -c
+      # -nss: no stream storage (function state), which nothing here uses; saves startup time.
+      - bin/apply-config-from-env.py conf/standalone.conf && bin/pulsar standalone -nss
+    environment:
+      # Windows use the log's clock: the broker-entry timestamp.
+      PULSAR_PREFIX_brokerEntryMetadataInterceptors: "org.apache.pulsar.common.intercept.AppendBrokerTimestampMetadataInterceptor,org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
+      PULSAR_PREFIX_exposingBrokerEntryMetadataToClientEnabled: "true"
+      PULSAR_PREFIX_functionsWorkerEnabled: "true"
+      PULSAR_PREFIX_allowAutoTopicCreation: "true"
+      PULSAR_PREFIX_allowAutoTopicCreationType: "non-partitioned"
+      PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled: "false"
+      # Keep the order history when no subscription holds it: the windows read it back.
+      PULSAR_PREFIX_defaultRetentionTimeInMinutes: "-1"
+      PULSAR_PREFIX_defaultRetentionSizeInMB: "-1"
+      # The orchestrator spawns filters from a function:// package.
+      PULSAR_PREFIX_enablePackagesManagement: "true"
+      PULSAR_PREFIX_functionsWorkerEnablePackageManagement: "true"
+      PULSAR_MEM: "-Xms1g -Xmx1g -XX:MaxDirectMemorySize=1g"
+    ports:
+      - "18080:8080"
+      - "16650:6650"
+    volumes:
+      - pulsar-data:/pulsar/data
+      - ../../functions/selector-filter/target:/nars/filter:ro
+      - ../../functions/orchestrator/target:/nars/orchestrator:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/admin/v2/clusters | grep -q standalone || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+      start_period: 10s
+
+volumes:
+  pulsar-data:

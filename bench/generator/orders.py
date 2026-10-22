@@ -135,6 +135,7 @@ class StreamConfig:
     regions: int = 100
     hot_order_id: Optional[int] = 8_675_309
     hot_at_s: float = 0.0                    # simulated time the hot order is created
+    hot_steps: Optional[int] = None          # emit only the first N hot lifecycle steps (None = all)
     late_fraction: float = 0.0
     late_delay_s: Tuple[int, int] = (30, 900)
     hot_order_late: bool = False
@@ -232,7 +233,7 @@ class OrderStream:
         """Delay until the order's next event, or None when the lifecycle is over."""
         scale = self.cfg.lifecycle_scale
         if order.hot:
-            if order.next_step >= len(HOT_LIFECYCLE):
+            if order.next_step >= (self.cfg.hot_steps or len(HOT_LIFECYCLE)):
                 return None
             return HOT_LIFECYCLE[order.next_step][1] * scale
         if event_type == CANCEL_AFTER and self._rng.random() < CANCEL_PROBABILITY:

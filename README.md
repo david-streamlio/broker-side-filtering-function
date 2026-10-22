@@ -75,6 +75,17 @@ make demo-local            # laptop-only, no SN Cloud account
 See **[demo/README.md](demo/README.md)** for cloud-mode, the logistics/parcels
 scenario, and all `make demo-*` targets (`make help` lists them).
 
+For [time windows](#time-windows--timewindow--windowcontrol), a shorter scene on Apache Pulsar
+asks for one order's recent events three ways: a client-side scan, a windowed filtered read, and
+history then live. It needs no ShadowTraffic license and runs in under 2 minutes from a clean
+`docker compose up`:
+
+```bash
+make window-demo-build && make window-demo
+```
+
+See **[demo/window/README.md](demo/window/README.md)**.
+
 ## How it works (selector-filter, per-instance)
 
 1. Each spawned `selector-filter` instance subscribes to one **input topic** (or one

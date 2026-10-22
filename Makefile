@@ -111,3 +111,26 @@ demo-down: ## Tear down any running demo stack + UNREGISTER queries (graceful 30
 # delete them, undoing the reset.
 reset-demo-cloud: demo-down ## Wipe spawned filters, old NAR packages, and demo topics on SN Cloud (destructive; auto-runs demo-down first)
 	bash demo/infra/terraform/reset-cloud.sh
+
+# ---------------------------------------------------------------- time-windowed read demo
+# The stage scene for "Stop Scanning the Whole Topic": Apache Pulsar standalone, order traffic, and
+# one order's events read three ways (demo/window/README.md). Build first: make window-demo-build.
+
+WINDOW_DEMO_VENV    := demo/window/.venv
+WINDOW_DEMO_COMPOSE := docker compose -p window-demo -f demo/window/docker-compose.yml
+
+$(WINDOW_DEMO_VENV):
+	python3 -m venv $@
+	$@/bin/pip install -q pulsar-client==3.5.0
+
+.PHONY: window-demo-build
+window-demo-build: ## Build what the time-windowed read demo mounts and runs (NARs + bench clients)
+	mvn -B -pl functions/selector-filter,functions/orchestrator,bench/clients -am package -DskipTests
+
+.PHONY: window-demo
+window-demo: $(WINDOW_DEMO_VENV) ## Time-windowed read stage demo from a clean broker (PAUSE=1 waits before each act)
+	$(WINDOW_DEMO_VENV)/bin/python demo/window/window_demo.py $(if $(PAUSE),--pause)
+
+.PHONY: window-demo-down
+window-demo-down: ## Stop the time-windowed read demo's broker and delete its data
+	$(WINDOW_DEMO_COMPOSE) down -v

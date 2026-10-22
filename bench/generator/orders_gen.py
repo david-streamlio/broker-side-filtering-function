@@ -56,7 +56,8 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from orders import FIRST_ORDER_ID, OrderEvent, OrderStream, PayloadBuilder, StreamConfig  # noqa: E402
+from orders import (FIRST_ORDER_ID, HOT_LIFECYCLE, OrderEvent, OrderStream, PayloadBuilder,  # noqa: E402
+                    StreamConfig)
 
 PROFILES = {"smoke": 100_000, "laptop-lite": 2_000_000, "laptop": 10_000_000}
 PROGRESS_EVERY_S = 5.0
@@ -240,7 +241,7 @@ def build_config(args, now_ms: int) -> StreamConfig:
             sim_start_ms=now_ms - int(span * 1000),
             lifecycle_scale=args.lifecycle_scale if args.lifecycle_scale is not None else 1.0,
             customers=args.customers, zipf_s=args.zipf, regions=args.regions,
-            hot_order_id=args.hot_order, hot_at_s=args.hot_at * span,
+            hot_order_id=args.hot_order, hot_at_s=args.hot_at * span, hot_steps=args.hot_steps,
             late_fraction=args.late_fraction)
     events = args.events
     if events is None and args.duration is not None:
@@ -250,7 +251,7 @@ def build_config(args, now_ms: int) -> StreamConfig:
         sim_start_ms=now_ms - int(args.backfill * 1000),
         lifecycle_scale=args.lifecycle_scale if args.lifecycle_scale is not None else 0.01,
         customers=args.customers, zipf_s=args.zipf, regions=args.regions,
-        hot_order_id=args.hot_order, hot_at_s=args.backfill + args.hot_at_realtime,
+        hot_order_id=args.hot_order, hot_at_s=args.backfill + args.hot_at_realtime, hot_steps=args.hot_steps,
         late_fraction=args.late_fraction)
 
 
@@ -397,6 +398,8 @@ def parse_args(argv=None):
                    help="bulk: when the hot order starts, as a fraction of --sim-span")
     p.add_argument("--hot-at-realtime", type=parse_duration, default=parse_duration("60s"),
                    help="realtime: when the hot order starts, after the backfill")
+    p.add_argument("--hot-steps", type=int, choices=range(1, len(HOT_LIFECYCLE) + 1), metavar="N",
+                   help="emit only the hot order's first N lifecycle steps (the stage demo sends the rest)")
     p.add_argument("--late-fraction", type=float, default=0.0,
                    help="fraction of events emitted late (event_time kept, sent 30s-15m later)")
     p.add_argument("--payload-bytes", type=int, default=1024)
