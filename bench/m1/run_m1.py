@@ -218,10 +218,11 @@ def wait_for_window_filters_gone(broker, timeout_s=180):
     log(f"warning: windowed filters still present after {timeout_s}s: {left}")
 
 
-def run_client(args, arm, extra=()):
-    """Run one EntityReadClient read (plus any extra --name=value options); sample its TCP connections."""
+def run_client(args, arm, extra=(), topic=None):
+    """Run one EntityReadClient read (plus any extra --name=value options) against topic (default
+    args.topic); sample its TCP connections."""
     java = os.path.join(os.environ["JAVA_HOME"], "bin", "java") if os.environ.get("JAVA_HOME") else "java"
-    cmd = [java, "-jar", JAR, f"--mode={arm}", f"--topic={args.topic}", f"--key={args.key}",
+    cmd = [java, "-jar", JAR, f"--mode={arm}", f"--topic={topic or args.topic}", f"--key={args.key}",
            f"--lookback-ms={args.lookback_ms}", f"--service-url={args.service_url}",
            f"--admin-url={args.admin_url}", f"--kafka-bootstrap={args.kafka_bootstrap}",
            f"--control-topic={REQUESTS_TOPIC}", *extra]

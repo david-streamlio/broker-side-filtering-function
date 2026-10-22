@@ -27,6 +27,7 @@ import io.streamnative.filter.api.WindowControl;
 import io.streamnative.filter.client.Session;
 import io.streamnative.filter.client.kafka.FilterableKafkaConsumers;
 import io.streamnative.filter.common.WindowStats;
+import io.streamnative.filter.common.selector.Selector;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -43,6 +44,7 @@ import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Reader;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -54,6 +56,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Reads one entity's events over a time window and reports what reached the client (measurement
@@ -77,6 +80,8 @@ import java.util.concurrent.TimeUnit;
 public final class EntityReadClient {
 
     private static final ObjectMapper JSON = new ObjectMapper();
+    /** Keeps the result small when a selector matches millions of records. */
+    static final int MAX_SEQS = 1_000;
 
     /** What one read delivered to the client. */
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -97,7 +102,7 @@ public final class EntityReadClient {
         /** Sum of the delivered records' values (uncompressed). */
         public long payloadBytesReceived;
         public long matched;
-        /** The matches' {@code seq} property, in arrival order. */
+        /** The matches' {@code seq} property, in arrival order: the first {@link #MAX_SEQS} only. */
         public List<Integer> matchedSeqs = new ArrayList<>();
         /** Kafka modes: the consumer's {@code bytes-consumed-total} metric. */
         public Double kafkaBytesConsumed;
@@ -106,12 +111,17 @@ public final class EntityReadClient {
         public Long privateTopicBytesOut;
         /** Window modes: the server's stats for the window. */
         public WindowStats windowStats;
+        /** Drain mode: what the broker sent the subscription (after any EntryFilter). */
+        public Long subscriptionBytesOut;
+        public Long subscriptionMsgsOut;
     }
 
     private final Map<String, String> opts;
     private final String key;
     private final long lookbackMs;
     private final long timeoutMs;
+    /** A scan's client-side matcher when {@code --selector} is given; else scans match by key. */
+    private final Selector clientSelector;
     private final Result result = new Result();
     private long start;
 
@@ -126,6 +136,8 @@ public final class EntityReadClient {
         result.selector = opt("selector", "__key__ = '" + key + "'");
         result.window = opt("window", "last:" + lookbackMs);
         result.lookbackMs = lookbackMs;
+        this.clientSelector = opts.containsKey("selector") && result.mode.endsWith("scan")
+                ? Selector.compile(opts.get("selector")) : null;
     }
 
     public static void main(String[] args) throws Exception {
@@ -151,17 +163,26 @@ public final class EntityReadClient {
             case "pulsar-window" -> pulsarWindow();
             case "kafka-scan" -> kafkaScan();
             case "kafka-window" -> kafkaWindow();
+            case "pulsar-drain" -> pulsarDrain();
             default -> throw new IllegalArgumentException("unknown --mode " + result.mode);
         }
     }
 
     // ---------------------------------------------------------------- Pulsar
 
+    /**
+     * Seeks to the window start and reads to its end ({@code between}) or to the end of the topic
+     * ({@code last}), matching on the client: with the common selector engine when {@code --selector}
+     * is given, else by key.
+     */
     private void pulsarScan() throws Exception {
+        long[] bounds = scanBounds();
+        // Start at the end, then seek: a reader opened at the earliest message is sent a few MB from the
+        // start of the topic before the seek takes effect, which would count against small windows.
         try (PulsarClient client = PulsarClient.builder().serviceUrl(serviceUrl()).build();
              Reader<byte[]> reader = client.newReader().topic(result.topic)
-                     .startMessageId(MessageId.earliest).create()) {
-            reader.seek(start - lookbackMs);
+                     .startMessageId(MessageId.latest).create()) {
+            reader.seek(bounds[0]);
             result.setupMs = sinceStart();
             while (reader.hasMessageAvailable()) {
                 checkTimeout();
@@ -169,9 +190,62 @@ public final class EntityReadClient {
                 if (m == null) {
                     throw new IllegalStateException("reader stalled with messages still available");
                 }
-                record(m.getKey(), m.getData().length, m.getProperty("seq"));
+                long logTime = m.getBrokerPublishTime().orElse(m.getPublishTime());
+                if (logTime > bounds[1]) {
+                    break;
+                }
+                record(m.getKey(), m.getData().length, m.getProperty("seq"),
+                        name -> resolve(name, m.getKey(), m.getProperties(), logTime));
             }
             result.elapsedMs = sinceStart();
+        }
+    }
+
+    /**
+     * Drains a new subscription from the earliest message: with the subscription property
+     * {@code selector=<--subscription-selector>} when given, so the broker's selector EntryFilter
+     * filters it. Reads until the subscription's backlog is empty; entries the EntryFilter rejects are
+     * acknowledged by the broker. Reports the bytes the broker sent this subscription, then deletes it.
+     */
+    private void pulsarDrain() throws Exception {
+        String subscription = "drain-" + UUID.randomUUID().toString().substring(0, 8);
+        String filter = opts.get("subscription-selector");
+        result.selector = filter;
+        try (PulsarClient client = PulsarClient.builder().serviceUrl(serviceUrl()).build();
+             PulsarAdmin admin = PulsarAdmin.builder().serviceHttpUrl(adminUrl()).build()) {
+            var builder = client.newConsumer().topic(result.topic).subscriptionName(subscription)
+                    .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest);
+            if (filter != null) {
+                builder = builder.subscriptionProperties(Map.of("selector", filter));
+            }
+            try (org.apache.pulsar.client.api.Consumer<byte[]> consumer = builder.subscribe()) {
+                result.setupMs = sinceStart();
+                while (true) {
+                    checkTimeout();
+                    Message<byte[]> m = consumer.receive(2, TimeUnit.SECONDS);
+                    if (m == null) {
+                        if (admin.topics().getStats(result.topic).getSubscriptions().get(subscription)
+                                .getMsgBacklog() == 0) {
+                            break;
+                        }
+                        continue;
+                    }
+                    result.recordsReceived++;
+                    result.payloadBytesReceived += m.getData().length;
+                    if (key.equals(m.getKey())) {
+                        result.matched++;
+                        if (result.matchedSeqs.size() < MAX_SEQS) {
+                            result.matchedSeqs.add(Integer.parseInt(m.getProperty("seq")));
+                        }
+                    }
+                    consumer.acknowledge(m);
+                }
+                result.elapsedMs = sinceStart() - 2_000; // the last receive's idle timeout isn't reading
+            }
+            var stats = admin.topics().getStats(result.topic).getSubscriptions().get(subscription);
+            result.subscriptionBytesOut = stats.getBytesOutCounter();
+            result.subscriptionMsgsOut = stats.getMsgOutCounter();
+            admin.topics().deleteSubscription(result.topic, subscription, true);
         }
     }
 
@@ -251,15 +325,43 @@ public final class EntityReadClient {
     // ---------------------------------------------------------------- Helpers
 
     private void record(String recordKey, int payloadBytes, String seq) {
+        record(recordKey, payloadBytes, seq, null);
+    }
+
+    /** {@code resolver} binds names for a client-side {@code --selector} in a scan; see {@link #resolve}. */
+    private void record(String recordKey, int payloadBytes, String seq, Function<String, Object> resolver) {
         result.recordsReceived++;
         result.payloadBytesReceived += payloadBytes;
-        if (result.mode.endsWith("window") || key.equals(recordKey)) {
+        boolean match = result.mode.endsWith("window")
+                || (clientSelector != null && resolver != null ? clientSelector.matches(resolver) : key.equals(recordKey));
+        if (match) {
             if (result.firstMatchMs == null) {
                 result.firstMatchMs = sinceStart();
             }
             result.matched++;
-            result.matchedSeqs.add(seq == null ? -1 : Integer.parseInt(seq));
+            if (result.matchedSeqs.size() < MAX_SEQS) {
+                result.matchedSeqs.add(seq == null ? -1 : Integer.parseInt(seq));
+            }
         }
+    }
+
+    /** Bindings for a client-side match: the key, the log time and the properties (no value fields). */
+    private static Object resolve(String name, String recordKey, Map<String, String> properties, long logTime) {
+        return switch (name) {
+            case "__key__" -> recordKey;
+            case "__publish_time__" -> logTime;
+            default -> properties.get(name);
+        };
+    }
+
+    /** {@code [from, to]} in epoch ms on the log's clock, from {@code --window}. */
+    private long[] scanBounds() {
+        String[] parts = result.window.split(":");
+        return switch (parts[0]) {
+            case "last" -> new long[] {start - Long.parseLong(parts[1]), Long.MAX_VALUE};
+            case "between" -> new long[] {Long.parseLong(parts[1]), Long.parseLong(parts[2])};
+            default -> throw new IllegalArgumentException("--window must be last:<ms> or between:<fromMs>:<toMs>");
+        };
     }
 
     /** Server stats, and the bytes the broker sent from the private topic, read before it's deleted on close. */
