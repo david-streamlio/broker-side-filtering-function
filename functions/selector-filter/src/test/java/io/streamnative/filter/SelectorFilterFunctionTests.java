@@ -509,6 +509,7 @@ class SelectorFilterFunctionTests {
 
         byte[] payload = "abcdefghij".getBytes(StandardCharsets.UTF_8); // 10 bytes
         fn.process(payload, ctx).join();
+        fn.flushCounts(ctx);
 
         verify(ctx).recordMetric(SelectorFilterFunction.METRIC_MESSAGES_IN, 1.0);
         verify(ctx).recordMetric(SelectorFilterFunction.METRIC_BYTES_IN, 10.0);
@@ -526,11 +527,35 @@ class SelectorFilterFunctionTests {
         // No queries -> drop.
         byte[] payload = "abc".getBytes(StandardCharsets.UTF_8); // 3 bytes
         fn.process(payload, ctx).join();
+        fn.flushCounts(ctx);
 
         verify(ctx).recordMetric(SelectorFilterFunction.METRIC_MESSAGES_IN, 1.0);
         verify(ctx).recordMetric(SelectorFilterFunction.METRIC_BYTES_IN, 3.0);
         verify(ctx).recordMetric(SelectorFilterFunction.METRIC_MESSAGES_DROPPED, 1.0);
         verify(ctx).recordMetric(SelectorFilterFunction.METRIC_BYTES_DROPPED, 3.0);
+    }
+
+    @Test
+    void countersAreRecordedAsOneDeltaPerFlushNotPerMessage() throws Exception {
+        givenControlTopic("persistent://public/control/queries");
+        SelectorFilterFunction fn = new SelectorFilterFunction();
+        fn.initialize(ctx);
+
+        for (int i = 0; i < 3; i++) {
+            fn.process("abc".getBytes(StandardCharsets.UTF_8), ctx).join(); // no queries: dropped
+        }
+        // Inside the flush interval, nothing has been recorded yet.
+        verify(ctx, never()).recordMetric(eq(SelectorFilterFunction.METRIC_MESSAGES_IN), anyDouble());
+
+        fn.flushCounts(ctx);
+        verify(ctx, times(1)).recordMetric(SelectorFilterFunction.METRIC_MESSAGES_IN, 3.0);
+        verify(ctx, times(1)).recordMetric(SelectorFilterFunction.METRIC_BYTES_IN, 9.0);
+        verify(ctx, times(1)).recordMetric(SelectorFilterFunction.METRIC_MESSAGES_DROPPED, 3.0);
+        // Zero deltas aren't recorded.
+        verify(ctx, never()).recordMetric(eq(SelectorFilterFunction.METRIC_MESSAGES_MATCHED), anyDouble());
+
+        fn.flushCounts(ctx); // nothing new since the last flush
+        verify(ctx, times(1)).recordMetric(eq(SelectorFilterFunction.METRIC_MESSAGES_IN), anyDouble());
     }
 
     @Test
@@ -575,6 +600,7 @@ class SelectorFilterFunctionTests {
 
         byte[] payload = "1234567890".getBytes(StandardCharsets.UTF_8); // 10 bytes
         fn.process(payload, ctx).join();
+        fn.flushCounts(ctx);
 
         verify(ctx).recordMetric(SelectorFilterFunction.METRIC_MESSAGES_OUT, 2.0);
         verify(ctx).recordMetric(SelectorFilterFunction.METRIC_BYTES_OUT, 20.0);
@@ -1002,7 +1028,8 @@ class SelectorFilterFunctionTests {
         assertThat(stats.get("endedBy").asText()).isEqualTo("WINDOW_END");
         assertThat(stats.get("status").asText()).isEqualTo("COMPLETE");
         // Matched metric only for the one real match, not for the completion record.
-        verify(ctx, times(1)).recordMetric(eq(SelectorFilterFunction.METRIC_MESSAGES_MATCHED), anyDouble());
+        fn.flushCounts(ctx);
+        verify(ctx).recordMetric(SelectorFilterFunction.METRIC_MESSAGES_MATCHED, 1.0);
         verify(ctx).recordMetric(eq(SelectorFilterFunction.METRIC_WINDOWS_COMPLETED), anyDouble());
         verify(record, times(2)).ack();
     }

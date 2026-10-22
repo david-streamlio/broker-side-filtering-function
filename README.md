@@ -874,9 +874,14 @@ cleanly but no records arrive — verify with
 
 The function emits the following metrics via `Context.recordMetric(...)`. Pulsar exposes them on
 the function-worker Prometheus endpoint; compute rates in your monitoring system with `rate()` or
-`increase()` over your preferred time window (e.g. `rate(filter_messages_in[1m])`).
+`increase()` over your preferred time window (e.g. `rate(filter_messages_in_sum[1m])`).
 
-**Per input message** (exactly one of `matched` or `dropped` fires per `in`):
+**Per input message** (exactly one of `matched` or `dropped` fires per `in`). The function
+accumulates these counters and records each one as a single delta at most once a second (and on
+close), not once per message. Pulsar stores every `recordMetric` call as a Prometheus summary
+observation, and per-message calls with near-constant values made the summary's quantile estimator
+the filter's main cost (~175 µs per message). Read the totals from the summary's `_sum` series; its
+`_count` is the number of flushes, not the number of messages.
 
 | Metric | Unit | Recorded as | Meaning |
 |---|---|---|---|
@@ -907,11 +912,11 @@ the function-worker Prometheus endpoint; compute rates in your monitoring system
 **Derived dashboard expressions** (Prometheus / equivalent):
 
 ```
-match rate              = rate(filter_messages_matched[1m]) / rate(filter_messages_in[1m])
-drop rate               = rate(filter_messages_dropped[1m]) / rate(filter_messages_in[1m])
-average fan-out         = rate(filter_messages_out[1m]) / rate(filter_messages_matched[1m])
-input throughput (B/s)  = rate(filter_bytes_in[1m])
-output throughput (B/s) = rate(filter_bytes_out[1m])
+match rate              = rate(filter_messages_matched_sum[1m]) / rate(filter_messages_in_sum[1m])
+drop rate               = rate(filter_messages_dropped_sum[1m]) / rate(filter_messages_in_sum[1m])
+average fan-out         = rate(filter_messages_out_sum[1m]) / rate(filter_messages_matched_sum[1m])
+input throughput (B/s)  = rate(filter_bytes_in_sum[1m])
+output throughput (B/s) = rate(filter_bytes_out_sum[1m])
 bad-query rate          = rate(filter_queries_bad[1m])
 ```
 

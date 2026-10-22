@@ -51,6 +51,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 
 public class SelectorFilterFunction implements Function<byte[], CompletableFuture<Void>> {
 
@@ -78,9 +79,18 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     static final long SLOW_SEND_ERROR_MS = 30_000L;
     /** Heartbeat log interval — shows function health even when messages aren't flowing. */
     static final long HEARTBEAT_INTERVAL_MS = 30_000L;
+    /**
+     * The per-message counters below are accumulated in the function and recorded as one
+     * {@code recordMetric(delta)} per metric at most this often, not once per message. Pulsar
+     * records every {@code recordMetric} call as an observation in a Prometheus summary, and with
+     * near-constant values (always 1, or the same payload size) its quantile estimator took ~98% of
+     * the filter's CPU, ~175 µs per message (profiled Oct 2026). The summary's {@code _sum} still
+     * totals the counter; its {@code _count} is the number of flushes.
+     */
+    static final long COUNTER_FLUSH_INTERVAL_MS = 1_000L;
 
     // Message-count metrics. Per Prometheus convention these are monotonic counters; rates are
-    // computed at the monitoring layer (e.g. rate(filter_messages_in[1m])).
+    // computed at the monitoring layer (e.g. rate(filter_messages_in_sum[1m])).
     // For every input record: messages_in += 1, and exactly one of (messages_dropped += 1) or
     // (messages_matched += 1) fires. messages_out accumulates total fan-outs (>= matched).
     static final String METRIC_MESSAGES_IN      = "filter.messages.in";
@@ -153,6 +163,17 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     /** Epoch-ms of the last heartbeat log emission. */
     private final AtomicLong lastHeartbeatMs = new AtomicLong(0);
 
+    /** Counter deltas since the last flush; see {@link #COUNTER_FLUSH_INTERVAL_MS}. */
+    private final Map<String, LongAdder> pendingCounts = Map.of(
+            METRIC_MESSAGES_IN, new LongAdder(),
+            METRIC_BYTES_IN, new LongAdder(),
+            METRIC_MESSAGES_MATCHED, new LongAdder(),
+            METRIC_MESSAGES_DROPPED, new LongAdder(),
+            METRIC_BYTES_DROPPED, new LongAdder(),
+            METRIC_MESSAGES_OUT, new LongAdder(),
+            METRIC_BYTES_OUT, new LongAdder());
+    private final AtomicLong lastCountFlushMs = new AtomicLong();
+
     private final AtomicLong latencyPublishMsSum   = new AtomicLong();
     private final AtomicLong latencyPublishMsCount = new AtomicLong();
     private final AtomicLong latencyEventMsSum     = new AtomicLong();
@@ -173,6 +194,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         }
 
         this.boundContext = ctx;
+        this.lastCountFlushMs.set(System.currentTimeMillis());
         this.processingTimeMetricEnabled = resolveBoolean(ctx, CFG_PROCESSING_TIME_METRIC, true);
         this.logTimingEvery = resolveInt(ctx, CFG_LOG_TIMING_EVERY, 0);
         LOG.info("Processing-time metric ({}) is {}", METRIC_PROCESSING_TIME_MS,
@@ -204,8 +226,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
         long inCount = messagesIn.incrementAndGet();
         int payloadBytes = payload == null ? 0 : payload.length;
-        ctx.recordMetric(METRIC_MESSAGES_IN, 1.0);
-        ctx.recordMetric(METRIC_BYTES_IN, payloadBytes);
+        count(METRIC_MESSAGES_IN, 1);
+        count(METRIC_BYTES_IN, payloadBytes);
+        maybeFlushCounts(ctx, startMs);
 
         // Debug: log first 10 messages to confirm format is correct after kafkaEntryFormat fix.
         // "Discarding corrupted message" in ConsumerImpl means KoP batch-format entries (produced
@@ -374,9 +397,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                         record.fail();
                     } else {
                         record.ack();
-                        ctx.recordMetric(METRIC_MESSAGES_MATCHED, 1.0);
-                        ctx.recordMetric(METRIC_MESSAGES_OUT, fanout);
-                        ctx.recordMetric(METRIC_BYTES_OUT, (double) payloadBytes * fanout);
+                        count(METRIC_MESSAGES_MATCHED, 1);
+                        count(METRIC_MESSAGES_OUT, fanout);
+                        count(METRIC_BYTES_OUT, (long) payloadBytes * fanout);
                         recordMatchLatency(ctx, record);
                         // (b) total value-add latency: entry → all output sends acked (matched-only).
                         recordMatchProcessingTime(ctx, startNanos);
@@ -516,8 +539,8 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
     private CompletableFuture<Void> ackAsDropped(Context ctx, Record<?> record, int payloadBytes, long startNanos) {
         droppedCount.incrementAndGet();
-        ctx.recordMetric(METRIC_MESSAGES_DROPPED, 1.0);
-        ctx.recordMetric(METRIC_BYTES_DROPPED, payloadBytes);
+        count(METRIC_MESSAGES_DROPPED, 1);
+        count(METRIC_BYTES_DROPPED, payloadBytes);
         record.ack();
         recordProcessingTime(ctx, startNanos);
         return CompletableFuture.completedFuture(null);
@@ -731,8 +754,41 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         return compiled.get(queryId);
     }
 
+    private void count(String metric, long delta) {
+        pendingCounts.get(metric).add(delta);
+    }
+
+    private void maybeFlushCounts(Context ctx, long nowMs) {
+        long last = lastCountFlushMs.get();
+        if (nowMs - last >= COUNTER_FLUSH_INTERVAL_MS && lastCountFlushMs.compareAndSet(last, nowMs)) {
+            flushCounts(ctx);
+        }
+    }
+
+    /**
+     * Records each counter's delta since the last flush as one observation, skipping zeros. Runs
+     * from {@code process()} at most every {@link #COUNTER_FLUSH_INTERVAL_MS} and on close, so an
+     * idle filter's last partial interval is recorded with the next message.
+     */
+    void flushCounts(Context ctx) {
+        for (Map.Entry<String, LongAdder> e : pendingCounts.entrySet()) {
+            long delta = e.getValue().sumThenReset();
+            if (delta != 0) {
+                ctx.recordMetric(e.getKey(), delta);
+            }
+        }
+    }
+
     @Override
     public void close() throws Exception {
+        Context ctx = boundContext;
+        if (ctx != null) {
+            try {
+                flushCounts(ctx);
+            } catch (RuntimeException e) {
+                LOG.debug("Final counter flush failed: {}", e.getMessage());
+            }
+        }
         if (controlTopicView != null) {
             controlTopicView.close();
         }
