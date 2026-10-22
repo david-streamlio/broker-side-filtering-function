@@ -181,7 +181,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             adminBuilder.authentication(AuthenticationFactory.token(config.pulsarAdminToken()));
         }
         this.ownedAdmin = adminBuilder.build();
-        this.spawner = new DefaultFilterFunctionSpawner(ownedAdmin);
+        this.spawner = new DefaultFilterFunctionSpawner(ownedAdmin, new ClientSubscriptionPositioner(pulsarClient));
         this.windowPreparer = new ClientWindowPreparer(pulsarClient, ownedAdmin);
 
         if (config.idleGcEnabled()) {
@@ -303,8 +303,16 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         for (String key : registryKeys) {
             RegistryEntry existing = registry.getInputTopicEntry(key);
             RegistryEntry entry;
+            boolean[] publishedBeforeDeploy = {false};
             if (existing == null) {
-                entry = spawner.spawn(key, req, config);
+                // A new filter starts at this registration (its subscription is created at the end of
+                // the topic), so publish the query before the function exists: it then preloads the
+                // query instead of dropping the first records.
+                entry = spawner.spawn(key, req, config, controlTopic -> {
+                    publishQuery(controlTopic, queryId, normalizedSelector(req.getSelector()),
+                            req.getOutputTopic(), req.getValueSchema());
+                    publishedBeforeDeploy[0] = true;
+                });
                 ctx.recordMetric("orchestrator.functions.spawned", 1);
                 LOG.info("Spawned filter function for registry key=[{}] name={} controlTopic={}",
                         key, entry.getFilterFunctionName(), entry.getControlTopic());
@@ -322,8 +330,10 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             entry = entry.withQueryId(queryId);
             registry.putInputTopicEntry(key, entry);
 
-            publishQuery(entry.getControlTopic(), queryId, normalizedSelector(req.getSelector()),
-                    req.getOutputTopic(), entry.getValueSchema());
+            if (!publishedBeforeDeploy[0]) {
+                publishQuery(entry.getControlTopic(), queryId, normalizedSelector(req.getSelector()),
+                        req.getOutputTopic(), entry.getValueSchema());
+            }
             publishedControlTopics.add(entry.getControlTopic());
             publishedRegistryKeys.add(key);
         }

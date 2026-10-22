@@ -93,6 +93,54 @@ class DefaultFilterFunctionSpawnerTests {
                 null, null, ClientType.PULSAR);
     }
 
+    // ---------------------------------------------------------------- start at registration
+
+    @Test
+    void newLiveFilterGetsItsSubscriptionAtTheEndBeforeTheQueryAndTheFunction() throws Exception {
+        when(functions.getFunctionStatus(anyString(), anyString(), anyString())).thenThrow(notFound());
+        SubscriptionPositioner positioner = mock(SubscriptionPositioner.class);
+        FilterFunctionSpawner.ControlTopicAction beforeDeploy = mock(FilterFunctionSpawner.ControlTopicAction.class);
+        DefaultFilterFunctionSpawner withPositioner = new DefaultFilterFunctionSpawner(admin, positioner);
+
+        RegistryEntry entry = withPositioner.spawn("persistent://public/in/trades",
+                registerReq("persistent://public/in/trades"), cfg, beforeDeploy);
+
+        String name = entry.getFilterFunctionName();
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(positioner, beforeDeploy, functions);
+        order.verify(positioner).createAtEnd(java.util.List.of("persistent://public/in/trades"), null, name);
+        order.verify(beforeDeploy).accept(entry.getControlTopic());
+        ArgumentCaptor<FunctionConfig> fcCap = ArgumentCaptor.forClass(FunctionConfig.class);
+        order.verify(functions).createFunctionWithUrl(fcCap.capture(), anyString());
+        assertThat(fcCap.getValue().getSubName()).as("the function attaches to that subscription").isEqualTo(name);
+    }
+
+    @Test
+    void patternFilterGetsItsSubscriptionAtTheEndOfMatchingTopics() throws Exception {
+        when(functions.getFunctionStatus(anyString(), anyString(), anyString())).thenThrow(notFound());
+        SubscriptionPositioner positioner = mock(SubscriptionPositioner.class);
+        DefaultFilterFunctionSpawner withPositioner = new DefaultFilterFunctionSpawner(admin, positioner);
+
+        RegistryEntry entry = withPositioner.spawn("persistent://public/trades/.*",
+                registerPatternReq("persistent://public/trades/.*"), cfg);
+
+        verify(positioner).createAtEnd(null, "persistent://public/trades/.*", entry.getFilterFunctionName());
+    }
+
+    @Test
+    void existingLiveFilterIsReusedWithoutMovingAnything() throws Exception {
+        when(functions.getFunctionStatus(anyString(), anyString(), anyString()))
+                .thenReturn(new org.apache.pulsar.common.policies.data.FunctionStatus());
+        SubscriptionPositioner positioner = mock(SubscriptionPositioner.class);
+        FilterFunctionSpawner.ControlTopicAction beforeDeploy = mock(FilterFunctionSpawner.ControlTopicAction.class);
+
+        new DefaultFilterFunctionSpawner(admin, positioner).spawn("persistent://public/in/trades",
+                registerReq("persistent://public/in/trades"), cfg, beforeDeploy);
+
+        verify(positioner, never()).createAtEnd(any(), any(), any());
+        verify(beforeDeploy, never()).accept(any());
+        verify(functions, never()).createFunctionWithUrl(any(), anyString());
+    }
+
     // ---------------------------------------------------------------- spawn happy path
 
     @Test

@@ -203,13 +203,13 @@ class OrchestratorFunctionTests {
                 "selector-filter-trades-abcd1234",
                 req.getKeyDeserializer(), req.getValueDeserializer(), ClientType.KAFKA,
                 Instant.now().toString());
-        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        when(spawner.spawn(any(), any(), any(), any())).thenReturn(spawned);
         stubControlProducer(spawned.getControlTopic());
 
         orchestrator.process(serialize(req), contextFor(queryId));
 
         // Spawner was called once for the input topic.
-        verify(spawner).spawn("persistent://public/in/trades", req, config);
+        verify(spawner).spawn(eq("persistent://public/in/trades"), eq(req), eq(config), any());
 
         // The orchestrator wrote a t: entry AND a q: entry to state.
         assertThat(tableStorage).containsKey(RegistryStore.TOPIC_KEY_PREFIX + "persistent://public/in/trades");
@@ -222,6 +222,32 @@ class OrchestratorFunctionTests {
         QueryMessage qm = MAPPER.readValue(publishes.get(0).value(), QueryMessage.class);
         assertThat(qm.getSelector()).isEqualTo("region = 'US'");
         assertThat(qm.getOutputTopic()).isEqualTo("persistent://public/filtered/filtered-abc");
+    }
+
+    @Test
+    void newFilterGetsItsQueryBeforeItIsDeployedAndOnlyOnce() throws Exception {
+        String queryId = UUID.randomUUID().toString();
+        FilterRequest req = FilterRequest.register(
+                "persistent://public/in/trades", "persistent://public/filtered/filtered-abc", "__key__ = 'AAPL'",
+                null, null, ClientType.PULSAR);
+        RegistryEntry spawned = new RegistryEntry(
+                "persistent://public/filtered/ctrl-trades-abcd1234", "selector-filter-trades-abcd1234",
+                null, null, ClientType.PULSAR, Instant.now().toString());
+        stubControlProducer(spawned.getControlTopic());
+        // A spawner that, like the real one, runs the hook before creating the function: the query must
+        // already be on the control topic at that point.
+        List<Integer> publishesAtDeploy = new ArrayList<>();
+        when(spawner.spawn(any(), any(), any(), any())).thenAnswer(inv -> {
+            inv.<FilterFunctionSpawner.ControlTopicAction>getArgument(3).accept(spawned.getControlTopic());
+            publishesAtDeploy.add(controlPublishes.getOrDefault(spawned.getControlTopic(), List.of()).size());
+            return spawned;
+        });
+
+        orchestrator.process(serialize(req), contextFor(queryId));
+
+        assertThat(publishesAtDeploy).containsExactly(1);
+        assertThat(controlPublishes.get(spawned.getControlTopic())).as("not published again after the spawn")
+                .hasSize(1);
     }
 
     @Test
@@ -240,7 +266,7 @@ class OrchestratorFunctionTests {
         // entry carries the value schema the orchestrator forwards.
         RegistryEntry spawned = RegistryEntry.newEntry(
                 "persistent://public/filtered/ctrl-vs", "selector-filter-vs", req);
-        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        when(spawner.spawn(any(), any(), any(), any())).thenReturn(spawned);
         stubControlProducer(spawned.getControlTopic());
 
         orchestrator.process(serialize(req), contextFor(queryId));
@@ -278,7 +304,7 @@ class OrchestratorFunctionTests {
 
         orchestrator.process(serialize(req), contextFor(queryId));
 
-        verify(spawner, never()).spawn(any(), any(), any());
+        verify(spawner, never()).spawn(any(), any(), any(), any());
 
         // QueryMessage routed to the existing function's control topic.
         List<KV> publishes = controlPublishes.get(existing.getControlTopic());
@@ -306,7 +332,7 @@ class OrchestratorFunctionTests {
 
         orchestrator.process(serialize(req), contextFor(queryId));
 
-        verify(spawner, never()).spawn(any(), any(), any());
+        verify(spawner, never()).spawn(any(), any(), any(), any());
         assertThat(controlPublishes).isEmpty();
         // No q: entry was written for the rejected queryId.
         assertThat(tableStorage).doesNotContainKey(RegistryStore.QUERY_KEY_PREFIX + queryId);
@@ -333,7 +359,7 @@ class OrchestratorFunctionTests {
 
         orchestrator.process(serialize(req), contextFor(queryId));
 
-        verify(spawner, never()).spawn(any(), any(), any());
+        verify(spawner, never()).spawn(any(), any(), any(), any());
         assertThat(controlPublishes).isEmpty(); // no new publish
     }
 
@@ -352,7 +378,7 @@ class OrchestratorFunctionTests {
 
         orchestrator.process(serialize(req), contextFor(queryId));
 
-        verify(spawner, never()).spawn(any(), any(), any());
+        verify(spawner, never()).spawn(any(), any(), any(), any());
         assertThat(controlPublishes).isEmpty();
     }
 
@@ -371,15 +397,15 @@ class OrchestratorFunctionTests {
         RegistryEntry entryB = new RegistryEntry(
                 "persistent://public/filtered/ctrl-b", "selector-filter-b",
                 null, null, ClientType.PULSAR, Instant.now().toString());
-        when(spawner.spawn("persistent://public/in/a", req, config)).thenReturn(entryA);
-        when(spawner.spawn("persistent://public/in/b", req, config)).thenReturn(entryB);
+        when(spawner.spawn(eq("persistent://public/in/a"), eq(req), eq(config), any())).thenReturn(entryA);
+        when(spawner.spawn(eq("persistent://public/in/b"), eq(req), eq(config), any())).thenReturn(entryB);
         stubControlProducer(entryA.getControlTopic());
         stubControlProducer(entryB.getControlTopic());
 
         orchestrator.process(serialize(req), contextFor(queryId));
 
-        verify(spawner).spawn("persistent://public/in/a", req, config);
-        verify(spawner).spawn("persistent://public/in/b", req, config);
+        verify(spawner).spawn(eq("persistent://public/in/a"), eq(req), eq(config), any());
+        verify(spawner).spawn(eq("persistent://public/in/b"), eq(req), eq(config), any());
         assertThat(controlPublishes.get(entryA.getControlTopic())).hasSize(1);
         assertThat(controlPublishes.get(entryB.getControlTopic())).hasSize(1);
 
@@ -402,7 +428,7 @@ class OrchestratorFunctionTests {
         RegistryEntry spawned = new RegistryEntry(
                 "persistent://public/filtered/ctrl-x", "selector-filter-x",
                 null, null, ClientType.PULSAR, Instant.now().toString());
-        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        when(spawner.spawn(any(), any(), any(), any())).thenReturn(spawned);
         stubControlProducer(spawned.getControlTopic());
 
         orchestrator.process(serialize(req), contextFor(queryId));
@@ -419,7 +445,7 @@ class OrchestratorFunctionTests {
         // Defensive — stray null body. Should ack silently with a metric.
         orchestrator.process(null, contextFor(UUID.randomUUID().toString()));
         orchestrator.process(new byte[0], contextFor(UUID.randomUUID().toString()));
-        verify(spawner, never()).spawn(any(), any(), any());
+        verify(spawner, never()).spawn(any(), any(), any(), any());
         assertThat(controlPublishes).isEmpty();
     }
 
@@ -528,7 +554,7 @@ class OrchestratorFunctionTests {
     @Test
     void malformedJsonPayloadIsRejected() throws Exception {
         orchestrator.process("not json {".getBytes(), contextFor(UUID.randomUUID().toString()));
-        verify(spawner, never()).spawn(any(), any(), any());
+        verify(spawner, never()).spawn(any(), any(), any(), any());
         assertThat(controlPublishes).isEmpty();
     }
 
@@ -545,7 +571,7 @@ class OrchestratorFunctionTests {
         when(ctx.getCurrentRecord()).thenAnswer(inv -> rec);
 
         orchestrator.process(serialize(req), ctx);
-        verify(spawner, never()).spawn(any(), any(), any());
+        verify(spawner, never()).spawn(any(), any(), any(), any());
         assertThat(controlPublishes).isEmpty();
     }
 
@@ -572,7 +598,7 @@ class OrchestratorFunctionTests {
         RegistryEntry spawned = new RegistryEntry(
                 "persistent://public/filtered/ctrl-x", "selector-filter-x",
                 null, null, ClientType.PULSAR, Instant.now().toString());
-        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        when(spawner.spawn(any(), any(), any(), any())).thenReturn(spawned);
         stubControlProducer(spawned.getControlTopic());
 
         orchestrator.process(serialize(req), contextFor(queryId));
@@ -596,8 +622,8 @@ class OrchestratorFunctionTests {
         RegistryEntry entryB = new RegistryEntry(
                 "persistent://public/filtered/ctrl-b", "selector-filter-b",
                 null, null, ClientType.PULSAR, Instant.now().toString());
-        when(spawner.spawn("persistent://public/in/a", req, config)).thenReturn(entryA);
-        when(spawner.spawn("persistent://public/in/b", req, config)).thenReturn(entryB);
+        when(spawner.spawn(eq("persistent://public/in/a"), eq(req), eq(config), any())).thenReturn(entryA);
+        when(spawner.spawn(eq("persistent://public/in/b"), eq(req), eq(config), any())).thenReturn(entryB);
         stubControlProducer(entryA.getControlTopic());
         stubControlProducer(entryB.getControlTopic());
 
@@ -734,7 +760,7 @@ class OrchestratorFunctionTests {
         RegistryEntry spawned = new RegistryEntry(
                 "persistent://public/filtered/ctrl-x", "selector-filter-x",
                 null, null, ClientType.PULSAR, Instant.now().toString());
-        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        when(spawner.spawn(any(), any(), any(), any())).thenReturn(spawned);
         stubControlProducer(spawned.getControlTopic());
 
         orchestrator.process(serialize(req), contextFor(queryId));
@@ -780,7 +806,7 @@ class OrchestratorFunctionTests {
         RegistryEntry spawned = new RegistryEntry(
                 "persistent://public/filtered/ctrl-x", "selector-filter-x",
                 null, null, ClientType.PULSAR, Instant.now().toString());
-        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        when(spawner.spawn(any(), any(), any(), any())).thenReturn(spawned);
         stubControlProducer(spawned.getControlTopic());
 
         orchestrator.process(serialize(req), contextFor(queryId));
@@ -798,7 +824,7 @@ class OrchestratorFunctionTests {
         RegistryEntry spawned = new RegistryEntry(
                 "persistent://public/filtered/ctrl-x", "selector-filter-x",
                 null, null, ClientType.PULSAR, Instant.now().toString());
-        when(spawner.spawn(any(), any(), any())).thenReturn(spawned);
+        when(spawner.spawn(any(), any(), any(), any())).thenReturn(spawned);
         stubControlProducer(spawned.getControlTopic());
 
         orchestrator.process(serialize(req), contextFor(queryId));
@@ -1106,7 +1132,7 @@ class OrchestratorFunctionTests {
         assertThat(qm.getWindow()).isEqualTo(spec);
         assertThat(qm.getSelector()).isEqualTo("__key__ = '8675309'");
         assertThat(qm.getOutputTopic()).isEqualTo(WIN_OUTPUT);
-        verify(spawner, never()).spawn(any(), any(), any());
+        verify(spawner, never()).spawn(any(), any(), any(), any());
 
         RegistryEntry t = MAPPER.readValue(tableStorage.get(RegistryStore.TOPIC_KEY_PREFIX + "window:" + queryId),
                 RegistryEntry.class);

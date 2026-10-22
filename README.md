@@ -100,6 +100,12 @@ scenario, and all `make demo-*` targets (`make help` lists them).
    `selector-filter` function via `admin.functions().createFunctionWithUrl(...)` referencing a
    pre-uploaded Pulsar package (operator-configured `function-package-url`). If present + serializer
    match, reuses. If present + serializer mismatch, rejects.
+
+   A new filter starts at the registration, not at the start of the topic's retained history: the
+   orchestrator first creates the filter's subscription at the end of its topics, then publishes the
+   query to the new control topic, and only then creates the function, which attaches to that
+   subscription and preloads the query. A query that joins an existing filter starts when the filter
+   loads it. (Topics that match a pattern filter later are read from their beginning.)
 4. On `MODIFY`: republishes the QueryMessage on the same queryId across every per-function control
    topic the original REGISTER fanned out to — filter functions hot-reload via TableView.
 5. On `UNREGISTER`: publishes tombstones (null body) on every per-function control topic the
