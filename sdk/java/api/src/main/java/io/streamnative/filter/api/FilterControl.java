@@ -17,18 +17,15 @@
  * under the License.
  */
 
-package io.streamnative.filter.client;
-
-import org.apache.pulsar.client.api.PulsarClientException;
+package io.streamnative.filter.api;
 
 import java.util.List;
 
 /**
- * Dynamic-selector operations exposed by consumers returned from
- * {@link FilterableConsumerBuilder#subscribe()}.
+ * Dynamic-selector operations exposed by the consumers both SDKs return from {@code subscribe()}.
  *
- * <p>The returned {@link org.apache.pulsar.client.api.Consumer} also implements this interface;
- * callers cast when they want to inspect or mutate the active selector:
+ * <p>The returned consumer (Pulsar {@code Consumer} or Kafka {@code Consumer}) also implements this
+ * interface; callers cast when they want to inspect or mutate the active selector:
  *
  * <pre>{@code
  * Consumer<byte[]> c = session.newConsumer().topic(...).selector("a = 'x'").subscribe();
@@ -44,15 +41,16 @@ public interface FilterControl {
 
     /**
      * Replace the active user-side selector. The session re-composes the effective selector as
-     * {@code <topic-constraint> AND (<selector>)} and republishes a {@link
-     * io.streamnative.filter.common.QueryMessage} on the same {@link #queryId()} key, prompting
-     * the function to swap in the new compiled expression.
+     * {@code <topic-constraint> AND (<selector>)} and republishes the query on the same
+     * {@link #queryId()} key, prompting the server-side filter to swap in the new compiled expression.
      *
-     * @param selector a JMS selector expression, or {@code null}/blank to drop the user-side
-     *                 filter (leaves only the topic constraint active).
-     * @throws PulsarClientException if the publish to the control topic fails.
+     * @param selector a JMS selector expression; must be non-blank
+     * @throws IllegalArgumentException if {@code selector} is null, blank or malformed; the previous
+     *                                  selector stays active
+     * @throws FilterException          if the change couldn't be delivered to the server
+     * @throws UnsupportedOperationException for a windowed query, whose selector is fixed
      */
-    void setSelector(String selector) throws PulsarClientException;
+    void setSelector(String selector);
 
     /**
      * The current user-side selector (the portion AFTER the topic constraint). May be
@@ -69,6 +67,6 @@ public interface FilterControl {
     /** Source topics this consumer is filtering, in builder-supplied order. */
     List<String> sourceTopics();
 
-    /** Private output topic the underlying Pulsar consumer is subscribed to. */
+    /** Private output topic the consumer reads (for Kafka clients, the topic name under KoP's namespace). */
     String privateTopic();
 }

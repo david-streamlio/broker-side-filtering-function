@@ -43,6 +43,10 @@
     <dependencies>
         <dependency>
             <groupId>io.streamnative</groupId>
+            <artifactId>selector-filter-client-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.streamnative</groupId>
             <artifactId>selector-filter-client</artifactId>
         </dependency>
 

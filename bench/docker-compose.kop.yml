@@ -1,0 +1,68 @@
+# Bench broker for the Kafka measurements: streamnative/sn-platform 4.2.0.6 with KoP. Open-source KoP
+# is archived at Pulsar 3.1, and the 4.2 KoP NAR needs StreamNative's broker build (spike S2).
+#
+# Uses the same host ports as docker-compose.yml, so run one bench broker at a time:
+#   docker compose -f bench/docker-compose.yml stop
+#   docker compose -f bench/docker-compose.kop.yml up -d
+#   python3 bench/m1/run_m1.py --container bench-kop --arms kafka-scan,kafka-window
+#
+# On an arm64 host this amd64 image runs under emulation: its CPU numbers aren't comparable with the
+# native Apache broker's, only between the Kafka arms.
+
+# Its own project, so it doesn't replace docker-compose.yml's `pulsar` service or share its volume.
+name: bench-kop
+
+services:
+  pulsar:
+    image: streamnative/sn-platform:4.2.0.6
+    platform: linux/amd64
+    container_name: bench-kop
+    # ThreadRuntime: the default ProcessRuntime fails to start function instances on this image (see
+    # KafkaConsumerKoPIT). Filters then run inside the broker JVM.
+    command:
+      - /bin/bash
+      - -c
+      - >-
+        bin/apply-config-from-env.py conf/standalone.conf &&
+        sed -i 's|^functionRuntimeFactoryClassName:.*|functionRuntimeFactoryClassName: org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory|'
+        conf/functions_worker.yml &&
+        bin/pulsar standalone -nss
+    environment:
+      PULSAR_PREFIX_messagingProtocols: "kafka"
+      PULSAR_PREFIX_protocolHandlerDirectory: "./protocols"
+      PULSAR_PREFIX_kafkaListeners: "PLAINTEXT://0.0.0.0:19092"
+      PULSAR_PREFIX_kafkaAdvertisedListeners: "PLAINTEXT://localhost:19092"
+      PULSAR_PREFIX_kafkaNamespace: "public/default"
+      PULSAR_PREFIX_kafkaTransactionCoordinatorEnabled: "false"
+      # The only format in which a Pulsar producer's messages (the generator's, the filter's) are
+      # readable by Kafka consumers.
+      PULSAR_PREFIX_kafkaEntryFormat: "pulsar_non_batched"
+      PULSAR_PREFIX_brokerEntryMetadataInterceptors: "org.apache.pulsar.common.intercept.AppendBrokerTimestampMetadataInterceptor,org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
+      PULSAR_PREFIX_exposingBrokerEntryMetadataToClientEnabled: "true"
+      PULSAR_PREFIX_functionsWorkerEnabled: "true"
+      PULSAR_PREFIX_allowAutoTopicCreation: "true"
+      PULSAR_PREFIX_allowAutoTopicCreationType: "non-partitioned"
+      PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled: "false"
+      PULSAR_PREFIX_defaultRetentionTimeInMinutes: "-1"
+      PULSAR_PREFIX_defaultRetentionSizeInMB: "-1"
+      PULSAR_PREFIX_enablePackagesManagement: "true"
+      PULSAR_PREFIX_functionsWorkerEnablePackageManagement: "true"
+      PULSAR_PREFIX_bookkeeperClientExposeStatsToPrometheus: "true"
+      PULSAR_MEM: "-Xms1500m -Xmx1500m -XX:MaxDirectMemorySize=1g"
+    ports:
+      - "18080:8080"
+      - "16650:6650"
+      - "19092:19092"
+    volumes:
+      - pulsar-data:/pulsar/data
+      - ../functions/selector-filter/target:/nars/filter:ro
+      - ../functions/orchestrator/target:/nars/orchestrator:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/admin/v2/clusters | grep -q standalone || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+      start_period: 30s
+
+volumes:
+  pulsar-data:

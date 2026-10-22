@@ -25,6 +25,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.common.Command;
 import io.streamnative.filter.common.FilterRequest;
 import io.streamnative.filter.common.QueryMessage;
+import io.streamnative.filter.common.ValueSchemaInfo;
+import io.streamnative.filter.common.WindowProtocol;
+import io.streamnative.filter.common.WindowSpec;
+import io.streamnative.filter.common.WindowStats;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminBuilder;
 import org.apache.pulsar.client.api.AuthenticationFactory;
@@ -71,10 +75,23 @@ public class OrchestratorFunction implements Function<byte[], Void> {
     /** JMS-selector identity used downstream when the SDK omits a user selector. */
     static final String IDENTITY_SELECTOR = "1=1";
 
+    /** Registry key prefix of a windowed query's dedicated filter ({@code window:<queryId>}). */
+    static final String WINDOW_KEY_PREFIX = "window:";
+
+    /** Subscription a windowed query's filter reads the source topic on ({@code win-<queryId>}). */
+    static final String WINDOW_SUBSCRIPTION_PREFIX = "win-";
+
+    /** True for the registry key of a windowed query's filter (not a source topic or pattern). */
+    static boolean isWindowedKey(String registryKey) {
+        return registryKey != null && registryKey.startsWith(WINDOW_KEY_PREFIX);
+    }
+
     // ---- runtime state (assigned in initialize) ----
     private OrchestratorConfig config;
     private RegistryStore registry;
     private FilterFunctionSpawner spawner;
+    /** Admin-side setup of windowed queries. {@code null} in tests that don't exercise them. */
+    private WindowPreparer windowPreparer;
     private PulsarClient pulsarClient;
     private PulsarAdmin ownedAdmin;
     /** Per-per-function-control-topic producer cache. Lazy. */
@@ -117,6 +134,16 @@ public class OrchestratorFunction implements Function<byte[], Void> {
                          FilterFunctionSpawner spawner, PulsarClient pulsarClient,
                          ConcurrentMap<String, Producer<byte[]>> controlProducers,
                          Clock clock) {
+        this(config, registry, spawner, null, pulsarClient, controlProducers, clock);
+    }
+
+    /** Test seam including the windowed-query preparer. */
+    OrchestratorFunction(OrchestratorConfig config, RegistryStore registry,
+                         FilterFunctionSpawner spawner, WindowPreparer windowPreparer,
+                         PulsarClient pulsarClient,
+                         ConcurrentMap<String, Producer<byte[]>> controlProducers,
+                         Clock clock) {
+        this.windowPreparer   = windowPreparer;
         this.config           = config;
         this.registry         = registry;
         this.spawner          = spawner;
@@ -155,6 +182,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         }
         this.ownedAdmin = adminBuilder.build();
         this.spawner = new DefaultFilterFunctionSpawner(ownedAdmin);
+        this.windowPreparer = new ClientWindowPreparer(pulsarClient, ownedAdmin);
 
         if (config.idleGcEnabled()) {
             this.idleFilterSweeper = new IdleFilterSweeper(registry, ownedAdmin, config, clock,
@@ -243,6 +271,11 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             return;
         }
 
+        if (req.isWindowed()) {
+            handleWindowedRegister(queryId, req, ctx);
+            return;
+        }
+
         // Derive registry keys: one per input topic, or the pattern itself.
         List<String> registryKeys = registryKeysFor(req);
 
@@ -304,6 +337,102 @@ public class OrchestratorFunction implements Function<byte[], Void> {
                 queryId, req.getOutputTopic(), publishedControlTopics);
     }
 
+    /**
+     * Windowed REGISTER: a dedicated filter function reads the source topic's history from the window
+     * start, on a subscription positioned there, and ends the output with a completion record.
+     *
+     * <ol>
+     *   <li>Position subscription {@code win-<queryId>} at {@code windowFromMs}; capture the end-of-log
+     *       position and retention truncation ({@link WindowPreparer}).</li>
+     *   <li>Nothing to read: write the completion record now; no function.</li>
+     *   <li>Otherwise publish the windowed {@code QueryMessage} to a fresh control topic, <em>then</em>
+     *       create the function, so it preloads the query before reading the backlog.</li>
+     * </ol>
+     *
+     * <p>Registry: a {@code t:} entry under {@code window:<queryId>} (GC'd by the idle sweeper after
+     * UNREGISTER, like any filter) and a {@code q:} entry. A redelivered REGISTER is caught by the
+     * duplicate check once the {@code q:} entry exists; before that, every step is idempotent.
+     */
+    private void handleWindowedRegister(String queryId, FilterRequest req, Context ctx) throws Exception {
+        if (windowPreparer == null) {
+            LOG.warn("Windowed REGISTER queryId={} rejected: windowed queries are not available", queryId);
+            ctx.recordMetric("orchestrator.requests.rejected_windowed", 1);
+            return;
+        }
+        String sourceTopic = req.getInputTopics().get(0);
+        String subscription = WINDOW_SUBSCRIPTION_PREFIX + queryId;
+        String selector = normalizedSelector(req.getSelector());
+
+        WindowPreparer.WindowPlan plan;
+        try {
+            plan = windowPreparer.prepare(sourceTopic, subscription, req.getWindowFromMs(), req.getWindowToMs());
+        } catch (IllegalArgumentException e) {
+            LOG.warn("Windowed REGISTER queryId={} rejected: {}", queryId, e.getMessage());
+            ctx.recordMetric("orchestrator.requests.rejected_windowed", 1);
+            return;
+        }
+        String now = Instant.now(clock).toString();
+
+        WindowSpec spec = plan.spec();
+        if (plan.empty()) {
+            if (!spec.isOpenEnded()) {
+                writeEmptyWindowMarker(queryId, req.getOutputTopic(), spec, WindowProtocol.COMPLETE_PROPERTY);
+                registry.putQueryEntry(queryId, new QueryEntry(req.getOutputTopic(), List.of(), List.of(), now,
+                        selector, req.getValueSchema()));
+                ctx.recordMetric("orchestrator.windows.empty", 1);
+                ctx.recordMetric("orchestrator.requests.accepted", 1);
+                LOG.info("Windowed REGISTER queryId={} source={} window={}: nothing to read; completed without a filter",
+                        queryId, sourceTopic, spec);
+                return;
+            }
+            // Open-ended with no history: history is trivially caught up. Mark it here, and spawn the
+            // filter without an end position so it doesn't mark it again when live events arrive.
+            writeEmptyWindowMarker(queryId, req.getOutputTopic(), spec, WindowProtocol.CAUGHT_UP_PROPERTY);
+            spec = new WindowSpec(spec.getFromMs(), null, null, null, spec.isTruncatedByRetention());
+            ctx.recordMetric("orchestrator.windows.empty", 1);
+        }
+
+        String key = WINDOW_KEY_PREFIX + queryId;
+        WindowSpec spawnSpec = spec;
+        RegistryEntry entry = spawner.spawnWindowed(queryId, sourceTopic, subscription, req, config,
+                controlTopic -> publishQuery(controlTopic, queryId, selector, req.getOutputTopic(),
+                        req.getValueSchema(), spawnSpec));
+        registry.putInputTopicEntry(key, entry.withQueryId(queryId));
+        registry.putQueryEntry(queryId, new QueryEntry(req.getOutputTopic(), List.of(entry.getControlTopic()),
+                List.of(key), now, selector, req.getValueSchema()));
+        ctx.recordMetric("orchestrator.functions.spawned", 1);
+        ctx.recordMetric("orchestrator.windows.spawned", 1);
+        ctx.recordMetric("orchestrator.requests.accepted", 1);
+        LOG.info("Windowed REGISTER queryId={} source={} window={} -> {} via {}",
+                queryId, sourceTopic, spec, req.getOutputTopic(), entry.getFilterFunctionName());
+    }
+
+    /**
+     * The completion (bounded) or caught-up (open-ended) record of a window with no history, written
+     * straight to the output topic.
+     */
+    private void writeEmptyWindowMarker(String queryId, String outputTopic, WindowSpec spec, String property)
+            throws Exception {
+        WindowStats stats = new WindowStats(queryId, spec.getFromMs(), spec.getToMs(), 0, 0, 0, null, null, 0,
+                WindowStats.EndedBy.LOG_END,
+                spec.isTruncatedByRetention() ? WindowStats.Status.TRUNCATED_BY_RETENTION : WindowStats.Status.COMPLETE);
+        try (Producer<byte[]> p = pulsarClient.newProducer(Schema.BYTES)
+                .topic(outputTopic)
+                .enableBatching(false)
+                .create()) {
+            p.newMessage()
+                    .property(property, "true")
+                    .property(WindowProtocol.STATS_PROPERTY, MAPPER.writeValueAsString(stats))
+                    .value(null)   // like the filter's markers: stats in a property, null value
+                    .send();
+        }
+    }
+
+    /** True when the query runs on a dedicated windowed filter. */
+    private static boolean isWindowed(QueryEntry q) {
+        return q.getRegistryKeys() != null && q.getRegistryKeys().stream().anyMatch(OrchestratorFunction::isWindowedKey);
+    }
+
     // ---------------------------------------------------------------- MODIFY
 
     private void handleModify(String queryId, FilterRequest req, Context ctx) throws Exception {
@@ -312,6 +441,12 @@ public class OrchestratorFunction implements Function<byte[], Void> {
             LOG.warn("MODIFY queryId={} not found in registry; ignoring (orchestrator state may "
                     + "be in flux or the SDK is misbehaving)", queryId);
             ctx.recordMetric("orchestrator.requests.rejected_unknown", 1);
+            return;
+        }
+        if (isWindowed(q)) {
+            // Republishing the query would drop its window; a window's selector is fixed at REGISTER.
+            LOG.warn("MODIFY queryId={} rejected: windowed queries can't change their selector", queryId);
+            ctx.recordMetric("orchestrator.requests.rejected_windowed", 1);
             return;
         }
         String selector = normalizedSelector(req.getSelector());
@@ -421,9 +556,16 @@ public class OrchestratorFunction implements Function<byte[], Void> {
      * this topic via TableView and adds/updates the compiled selector for the queryId key.
      */
     private void publishQuery(String controlTopic, String queryId, String selector, String outputTopic,
-                              io.streamnative.filter.common.ValueSchemaInfo valueSchema)
+                              ValueSchemaInfo valueSchema)
             throws PulsarClientException {
-        QueryMessage qm = new QueryMessage("session-" + queryId, selector, outputTopic, valueSchema);
+        publishQuery(controlTopic, queryId, selector, outputTopic, valueSchema, null);
+    }
+
+    /** As above, for a windowed query when {@code window} is non-null. */
+    private void publishQuery(String controlTopic, String queryId, String selector, String outputTopic,
+                              ValueSchemaInfo valueSchema, WindowSpec window)
+            throws PulsarClientException {
+        QueryMessage qm = new QueryMessage("session-" + queryId, selector, outputTopic, valueSchema, window);
         byte[] payload;
         try {
             payload = MAPPER.writeValueAsBytes(qm);

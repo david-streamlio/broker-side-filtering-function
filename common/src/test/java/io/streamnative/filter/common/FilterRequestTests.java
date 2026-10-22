@@ -381,4 +381,78 @@ class FilterRequestTests {
                         .doesNotContain("valueDeserializer")
                         .doesNotContain("clientType");
     }
+
+    // ---------------------------------------------------------------- windowed REGISTER
+
+    private static FilterRequest windowed(long from, long to) {
+        return FilterRequest.registerWindowed("persistent://public/default/orders",
+                "persistent://public/filtered/filtered-w1", "__key__ = '8675309'",
+                null, null, null, ClientType.PULSAR, from, to);
+    }
+
+    @Test
+    void windowedRegisterRoundTrips() throws Exception {
+        FilterRequest req = windowed(1_000L, 2_000L);
+        req.validate();
+
+        FilterRequest parsed = MAPPER.readValue(MAPPER.writeValueAsBytes(req), FilterRequest.class);
+
+        assertThat(parsed).isEqualTo(req);
+        assertThat(parsed.isWindowed()).isTrue();
+        assertThat(parsed.getWindowFromMs()).isEqualTo(1_000L);
+        assertThat(parsed.getWindowToMs()).isEqualTo(2_000L);
+    }
+
+    @Test
+    void liveRegisterHasNoWindowOnTheWire() throws Exception {
+        FilterRequest req = FilterRequest.register("persistent://public/in/trades",
+                "persistent://public/filtered/x", "region = 'US'", null, null, ClientType.PULSAR);
+        String json = MAPPER.writeValueAsString(req);
+        assertThat(json).doesNotContain("window");
+        assertThat(MAPPER.readValue(json, FilterRequest.class).isWindowed()).isFalse();
+    }
+
+    @Test
+    void windowedRegisterRejectsAnEmptyOrInvertedWindow() {
+        assertThatThrownBy(() -> windowed(2_000L, 2_000L).validate())
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("windowFromMs < windowToMs");
+        assertThatThrownBy(() -> windowed(-1L, 2_000L).validate())
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void windowedRegisterRequiresAStart() {
+        FilterRequest req = new FilterRequest(Command.REGISTER, List.of("persistent://public/default/orders"), null,
+                "persistent://public/filtered/x", null, null, null, null, ClientType.PULSAR, null, null, 2_000L);
+        assertThatThrownBy(req::validate).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("requires windowFromMs");
+    }
+
+    @Test
+    void openEndedWindowedRegisterIsValidAndRoundTrips() throws Exception {
+        FilterRequest req = FilterRequest.registerWindowed("persistent://public/default/orders",
+                "persistent://public/filtered/filtered-w2", "__key__ = '8675309'",
+                null, null, null, ClientType.KAFKA, 1_000L, null);
+        req.validate();
+
+        String json = MAPPER.writeValueAsString(req);
+        assertThat(json).contains("windowFromMs").doesNotContain("windowToMs");
+        FilterRequest parsed = MAPPER.readValue(json, FilterRequest.class);
+        assertThat(parsed).isEqualTo(req);
+        assertThat(parsed.isWindowed()).isTrue();
+        assertThat(parsed.getWindowToMs()).isNull();
+    }
+
+    @Test
+    void windowedRegisterRequiresExactlyOneInputTopic() {
+        FilterRequest twoTopics = new FilterRequest(Command.REGISTER,
+                List.of("persistent://public/default/a", "persistent://public/default/b"), null,
+                "persistent://public/filtered/x", null, null, null, null, ClientType.PULSAR, null, 1L, 2L);
+        assertThatThrownBy(twoTopics::validate).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly one input topic");
+        FilterRequest pattern = new FilterRequest(Command.REGISTER, null, "persistent://public/default/.*",
+                "persistent://public/filtered/x", null, null, null, null, ClientType.PULSAR, null, 1L, 2L);
+        assertThatThrownBy(pattern::validate).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly one input topic");
+    }
 }

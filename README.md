@@ -217,6 +217,7 @@ Fields:
 | `name` | optional | Human-readable label used in logs. |
 | `selector` | **required** | JMS selector expression. |
 | `outputTopic` | **required** | Fully-qualified Pulsar topic to fan out matches to. |
+| `window` | optional | Windowed query only, set by the orchestrator: `fromMs`, optional `toMs` (absent = open-ended), the end-of-log position `endLedgerId`/`endEntryId`, and `truncatedByRetention`. See [Time windows](#time-windows--timewindow--windowcontrol). |
 
 ### Adding a query
 
@@ -407,6 +408,11 @@ standard `org.apache.pulsar.client.api.Consumer<byte[]>` subscribed to its own p
 topic. The returned consumer also implements `FilterControl`, so callers can swap the active
 selector at runtime without recreating the subscription.
 
+The interfaces both SDKs share — `FilterControl`, `TimeWindow`, `WindowControl` and
+`FilterException` — live in `io.streamnative.filter.api` (module `selector-filter-client-api`,
+pulled in by either SDK), so Kafka code never imports a Pulsar package and Pulsar code never
+imports a Kafka one.
+
 ```xml
 <dependency>
     <groupId>io.streamnative</groupId>
@@ -505,6 +511,8 @@ runtime. The same `queryId` is reused — the function hot-reloads the compiled 
 place; the consumer keeps reading from the same private output topic.
 
 ```java
+import io.streamnative.filter.api.FilterControl;
+
 Consumer<byte[]> consumer = session.newConsumer()
         .topic("persistent://public/quotes/trades")
         .selector("region = 'US'")
@@ -512,10 +520,9 @@ Consumer<byte[]> consumer = session.newConsumer()
 
 FilterControl fc = (FilterControl) consumer;
 fc.setSelector("region IN ('US','UK')");      // hot reload — same queryId
-fc.setSelector(null);                          // drop user filter — topic-match only
 
 System.out.println(fc.queryId());              // stable for the lifetime of the consumer
-System.out.println(fc.currentSelector());      // current user-side selector (may be null)
+System.out.println(fc.currentSelector());      // current user-side selector (null if built without one)
 System.out.println(fc.sourceTopics());         // immutable list passed at build time
 System.out.println(fc.privateTopic());         // private output topic
 ```
@@ -523,8 +530,14 @@ System.out.println(fc.privateTopic());         // private output topic
 Each consumer holds **exactly one** active selector. To register additional independent filters,
 build additional consumers from the same `Session`.
 
-`setSelector(...)` validates the new expression with the same parser as `subscribe()`; if it is
-malformed, it throws `IllegalArgumentException` and the previous selector remains active.
+`setSelector(...)` validates the new expression with the same parser as `subscribe()`. It throws:
+
+- `IllegalArgumentException` if the selector is null, blank or malformed; the previous selector
+  remains active.
+- `FilterException` (unchecked, in `io.streamnative.filter.api`) if the change can't be published to
+  the server. The cause is the underlying client exception.
+- `UnsupportedOperationException` on a consumer built with a history-reading
+  [time window](#time-windows--timewindow--windowcontrol), whose selector is fixed.
 
 ### Multi-source consumers
 
@@ -541,12 +554,81 @@ session.newConsumer()
 //   AND (region IN ('US','UK'))
 ```
 
+### Time windows — `TimeWindow` + `WindowControl`
+
+By default a filtered consumer sees only events published after it subscribes. `.window(TimeWindow)`
+makes it read history from the source topic first, filtered on the server, so the client receives
+only the matches instead of scanning the whole topic itself:
+
+```java
+import io.streamnative.filter.api.TimeWindow;
+import io.streamnative.filter.api.WindowControl;
+
+try (Consumer<byte[]> consumer = session.newConsumer()
+        .topic("persistent://public/default/orders")
+        .selector("region = 'r07' AND status = 'FAILED'")
+        .window(TimeWindow.last(1, TimeUnit.HOURS))
+        .subscribe()) {
+
+    WindowControl window = (WindowControl) consumer;
+    while (!window.isComplete()) {
+        Message<byte[]> m = consumer.receive(1, TimeUnit.SECONDS);   // null: nothing yet, or the end marker
+        if (m != null) { handle(m); consumer.acknowledge(m); }
+    }
+    WindowStats stats = window.stats();   // scanned, matched, bytesScanned, endedBy, status
+}
+```
+
+| Factory | Reads | Then |
+|---|---|---|
+| `all()` | everything retained | completes |
+| `last(amount, TimeUnit)` / `last(Duration)` | from that long ago up to now | completes |
+| `between(Instant, Instant)` | between two instants (inclusive; `to` may be in the future) | completes |
+| `allThenLive()` | everything retained | keeps streaming new events |
+| `since(amount, TimeUnit)` / `since(Duration)` / `since(Instant)` | from that point | keeps streaming new events |
+| `liveOnly()` | nothing | streams new events (same as no window) |
+
+- **Clock.** Window bounds are on the log's clock: the broker-entry timestamp when the broker
+  appends one (`AppendBrokerTimestampMetadataInterceptor`), else the producer publish time. Not
+  event time. Relative windows (`last`, `since(amount, unit)`) resolve on the client's clock at
+  `subscribe()`.
+- **End of history.** The server ends a window's history with a marker record that the consumer
+  never returns as data. For a bounded window it's a completion record: `isComplete()` becomes
+  true, nothing follows, and a blocking `receive()` then throws `IllegalStateException`. For an
+  open-ended window it's a caught-up record: `isCaughtUp()` becomes true and `caughtUp()` completes,
+  then live matches follow. A non-blocking `receive(timeout)` or `poll` that hits a marker returns
+  `null` / no record.
+- **Stats.** `stats()` returns the server's `WindowStats`: messages scanned and matched, bytes
+  scanned, the first and last timestamps scanned, elapsed time, what ended the window
+  (`WINDOW_END` = a record past `toMs`; `LOG_END` = the last record present at registration), and
+  `status`. A `status` of `TRUNCATED_BY_RETENTION` means the window starts before the oldest
+  retained message. `all()` and `allThenLive()` are never reported as truncated.
+- **Restrictions.** A window that reads history needs exactly one source topic
+  (`IllegalStateException` otherwise). It runs on its own server-side filter, and its selector is
+  fixed (`setSelector` throws `UnsupportedOperationException`). `liveOnly()` runs on the shared
+  live filter and keeps `setSelector`.
+- **Delivery.** At-least-once: if the server-side filter restarts mid-window, results can contain
+  duplicates. Every match carries the source message id and publish time in the `__src_msgid__` and
+  `__src_publish_time__` properties (Kafka headers), so dedupe on `__src_msgid__`.
+- **Private topic.** A windowed query's private topic uses `PrivateTopicPolicy.WINDOWED_DEFAULT`
+  (TTL 1 h, retention 60 min, no size cap), so a large window isn't trimmed by size before it's
+  read. Override with `SessionBuilder.windowedPrivateTopicPolicy(...)`.
+
+How it works: the orchestrator creates a subscription on the source topic, seeks it to `fromMs`,
+and records the end-of-log position. It then publishes the query with a `window` field to a
+dedicated filter function's control topic and spawns that function. The function filters from the
+seek point and emits the marker with its stats. When the consumer closes (UNREGISTER), the
+[idle filter GC](#idle-filter-gc) deletes the function and its source subscription. If the window
+holds no messages, the orchestrator writes the marker itself. A bounded window then needs no
+function; an open-ended one still spawns a function for the live events.
+
 ### Builder reference
 
 | Method | Default | Meaning |
 |---|---|---|
 | `topic(String)` / `topics(Collection<String>)` | — | At least one is required. Calling both keeps only the latest. |
 | `selector(String)` | `null` | User-side JMS selector. `null` or blank means topic-match only. |
+| `window(TimeWindow)` | none (live only) | Read history first; see [Time windows](#time-windows--timewindow--windowcontrol). |
 | `subscriptionName(String)` | `session-<uuid>` | Subscription name on the private topic. |
 | `subscriptionType(SubscriptionType)` | `Exclusive` | Subscription type for the underlying consumer. |
 | `subscriptionInitialPosition(SubscriptionInitialPosition)` | `Earliest` | Initial position. |
@@ -646,11 +728,41 @@ try (Session session = Session.builder()
         }
         consumer.commitSync();
 
-        // Dynamic ops via FilterControl cast — same as Pulsar SDK
+        // Dynamic ops via FilterControl cast — same as Pulsar SDK (io.streamnative.filter.api)
         ((FilterControl) consumer).setSelector("region IN ('US','UK')");
     }
 }
 ```
+
+`subscribe()` throws `FilterException` (unchecked) if the query can't be registered with the
+server; no Pulsar exception types leak into Kafka code.
+
+### Time windows (Kafka)
+
+`.window(TimeWindow)` works as in the [Pulsar SDK](#time-windows--timewindow--windowcontrol), and the
+consumer also implements `WindowControl`:
+
+```java
+try (Consumer<String, byte[]> consumer = FilterableKafkaConsumers
+        .<String, byte[]>newConsumer(session, kafkaProps)
+        .topic("persistent://public/default/orders")
+        .selector("region = 'r07'")
+        .window(TimeWindow.since(1, TimeUnit.HOURS))   // last hour, then live
+        .subscribe()) {
+
+    WindowControl window = (WindowControl) consumer;
+    window.caughtUp().thenAccept(stats -> log.info("history done: {} of {} matched",
+            stats.getMatched(), stats.getScanned()));
+    while (running) {
+        for (ConsumerRecord<String, byte[]> r : consumer.poll(Duration.ofSeconds(1))) { handle(r); }
+    }
+}
+```
+
+`poll()` drops the marker records, so they never reach application code. A window that reads
+history always reads its private topic from the start: the builder overrides
+`auto.offset.reset=earliest` on a copy of your properties. `liveOnly()` keeps your properties as
+given.
 
 ### Frozen subscription
 
@@ -663,7 +775,7 @@ fixed at build time. The following throw `UnsupportedOperationException`:
 - `unsubscribe()`
 
 To change what's being consumed, either call `setSelector(...)` (hot-reload — same queryId, new
-filter rule) or close this consumer and build a new one. Everything else on the `Consumer`
+filter rule; not available on a history-reading window) or close this consumer and build a new one. Everything else on the `Consumer`
 interface — `poll`, `commitSync`/`Async`, `seek`, `pause`/`resume`, `position`, `committed`,
 `partitionsFor`, etc. — delegates straight through to the underlying real KafkaConsumer.
 
@@ -690,7 +802,8 @@ repo so downstream projects can adopt them without `mvn install`:
 
 - **Maven SNAPSHOTs → GitHub Packages.** Every push to `main` runs
   `.github/workflows/publish-snapshots.yml`, which deploys
-  `selector-filter-common`, `selector-filter-client`, and `selector-filter-client-kafka` to
+  `selector-filter-common`, `selector-filter-client-api`, `selector-filter-client`, and
+  `selector-filter-client-kafka` to
   `https://maven.pkg.github.com/david-streamlio/broker-side-filtering-function`.
 - **Function NARs → GitHub Releases.** Every `v*` tag triggers
   `.github/workflows/release-nars.yml`, which attaches
@@ -761,9 +874,14 @@ cleanly but no records arrive — verify with
 
 The function emits the following metrics via `Context.recordMetric(...)`. Pulsar exposes them on
 the function-worker Prometheus endpoint; compute rates in your monitoring system with `rate()` or
-`increase()` over your preferred time window (e.g. `rate(filter_messages_in[1m])`).
+`increase()` over your preferred time window (e.g. `rate(filter_messages_in_sum[1m])`).
 
-**Per input message** (exactly one of `matched` or `dropped` fires per `in`):
+**Per input message** (exactly one of `matched` or `dropped` fires per `in`). The function
+accumulates these counters and records each one as a single delta at most once a second (and on
+close), not once per message. Pulsar stores every `recordMetric` call as a Prometheus summary
+observation, and per-message calls with near-constant values made the summary's quantile estimator
+the filter's main cost (~175 µs per message). Read the totals from the summary's `_sum` series; its
+`_count` is the number of flushes, not the number of messages.
 
 | Metric | Unit | Recorded as | Meaning |
 |---|---|---|---|
@@ -794,11 +912,11 @@ the function-worker Prometheus endpoint; compute rates in your monitoring system
 **Derived dashboard expressions** (Prometheus / equivalent):
 
 ```
-match rate              = rate(filter_messages_matched[1m]) / rate(filter_messages_in[1m])
-drop rate               = rate(filter_messages_dropped[1m]) / rate(filter_messages_in[1m])
-average fan-out         = rate(filter_messages_out[1m]) / rate(filter_messages_matched[1m])
-input throughput (B/s)  = rate(filter_bytes_in[1m])
-output throughput (B/s) = rate(filter_bytes_out[1m])
+match rate              = rate(filter_messages_matched_sum[1m]) / rate(filter_messages_in_sum[1m])
+drop rate               = rate(filter_messages_dropped_sum[1m]) / rate(filter_messages_in_sum[1m])
+average fan-out         = rate(filter_messages_out_sum[1m]) / rate(filter_messages_matched_sum[1m])
+input throughput (B/s)  = rate(filter_bytes_in_sum[1m])
+output throughput (B/s) = rate(filter_bytes_out_sum[1m])
 bad-query rate          = rate(filter_queries_bad[1m])
 ```
 
@@ -1004,6 +1122,13 @@ functions/                                    -- Pulsar function deployment arti
     deployment/orchestrator-function-config.yaml
 sdk/                                          -- client SDKs across all languages
   java/
+    api/                                      -- client-neutral interfaces both Java SDKs implement (JAR)
+      src/main/java/io/streamnative/filter/api/
+        FilterControl.java                    -- dynamic-selector cast interface
+        TimeWindow.java                       -- which part of the log to read (history / live)
+        WindowControl.java                    -- windowed consumer progress + stats
+        FilterException.java                  -- unchecked; wraps client-specific failures
+        internal/WindowProgress.java          -- marker state machine shared by the SDKs (internal)
     pulsar/                                   -- Pulsar-native SDK (JAR)
       pom.xml
       src/main/java/io/streamnative/filter/client/
@@ -1012,7 +1137,7 @@ sdk/                                          -- client SDKs across all language
         PrivateQuery.java                     -- value object passed between Session and SDKs
         FilterableConsumerBuilder.java        -- Pulsar-native consumer builder
         FilteringPulsarConsumer.java          -- Consumer<V> + FilterControl wrapper
-        FilterControl.java                    -- dynamic-selector cast interface
+        WindowedPulsarConsumer.java           -- + WindowControl; hides window markers
         PrivateTopicPolicy.java
         Selectors.java                        -- compose + validate selector syntax
     kafka/                                    -- Kafka-flavoured SDK over KoP (JAR)
@@ -1021,6 +1146,7 @@ sdk/                                          -- client SDKs across all language
         FilterableKafkaConsumers.java         -- static factory entry point
         FilterableKafkaConsumerBuilder.java   -- fluent Kafka consumer builder
         FilteringKafkaConsumer.java           -- Consumer<K,V> + FilterControl wrapper
+        WindowedKafkaConsumer.java            -- + WindowControl; drops window markers from poll()
   # FUTURE: sdk/python/, sdk/cpp/, ...
 ```
 

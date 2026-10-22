@@ -46,6 +46,28 @@
                     "description": "Pulsar SchemaInfo.getProperties(). Optional."
                 }
             }
+        },
+        "window": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["fromMs"],
+            "description": "Set for a windowed query, null/absent for a live query. The function's subscription was positioned at fromMs; the function skips earlier records. Bounded (toMs set): it writes a completion record (property __window_complete__=true; null value; WindowStats JSON in property __window_stats__) when a record passes toMs or the record at the end position is processed. Open-ended (toMs absent): it never completes; at the end position it writes a caught-up record (__window_caught_up__=true; null value; WindowStats JSON for the history in __window_stats__) and keeps forwarding live matches. Times are epoch ms on the log's clock (broker-entry time when present, else publish time).",
+            "properties": {
+                "fromMs": { "type": "integer", "minimum": 0 },
+                "toMs": { "type": ["integer", "null"], "minimum": 0 },
+                "endLedgerId": {
+                    "type": ["integer", "null"],
+                    "description": "Ledger of the topic's last message when the query was registered (the end of history). Set together with endEntryId."
+                },
+                "endEntryId": {
+                    "type": ["integer", "null"],
+                    "description": "Entry of the topic's last message when the query was registered."
+                },
+                "truncatedByRetention": {
+                    "type": "boolean",
+                    "description": "True when fromMs is earlier than the earliest message still in the topic."
+                }
+            }
         }
     },
     "examples": [

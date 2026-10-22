@@ -35,10 +35,13 @@
         <module>common</module>
         <module>functions/selector-filter</module>
         <module>functions/orchestrator</module>
+        <module>broker-filter</module>
+        <module>sdk/java/api</module>
         <module>sdk/java/pulsar</module>
         <module>sdk/java/kafka</module>
         <module>perf</module>
         <module>demo/multi-query-app</module>
+        <module>bench/clients</module>
     </modules>
 
     <properties>
@@ -76,6 +79,11 @@
             <dependency>
                 <groupId>io.streamnative</groupId>
                 <artifactId>selector-filter-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.streamnative</groupId>
+                <artifactId>selector-filter-client-api</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

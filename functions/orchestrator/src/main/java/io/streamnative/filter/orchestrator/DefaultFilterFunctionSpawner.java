@@ -127,7 +127,22 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
     private FunctionConfig buildFunctionConfig(String registryKey, FilterRequest req,
                                                OrchestratorConfig cfg, String functionName,
                                                String controlTopic, boolean isPattern) {
-        FunctionConfig.FunctionConfigBuilder b = FunctionConfig.builder()
+        FunctionConfig.FunctionConfigBuilder b = baseFunctionConfig(cfg, functionName, controlTopic);
+        if (isPattern) {
+            b.topicsPattern(req.getTopicsPattern());
+        } else {
+            // Single registry key on this spawn path — the orchestrator iterates per-input-topic and
+            // spawns separately for multi-input requests. The function's input list is just the one
+            // registry key.
+            b.inputs(java.util.List.of(registryKey));
+        }
+        return b.build();
+    }
+
+    /** Settings shared by the per-topic filters and the per-query windowed filters. */
+    private FunctionConfig.FunctionConfigBuilder baseFunctionConfig(OrchestratorConfig cfg, String functionName,
+                                                                    String controlTopic) {
+        return FunctionConfig.builder()
                 .tenant(cfg.functionTenant())
                 .namespace(cfg.functionNamespace())
                 .name(functionName)
@@ -151,15 +166,30 @@ final class DefaultFilterFunctionSpawner implements FilterFunctionSpawner {
                         .build())
                 .producerConfig(buildProducerConfig(cfg))
                 .userConfig(buildUserConfig(controlTopic, cfg));
-        if (isPattern) {
-            b.topicsPattern(req.getTopicsPattern());
-        } else {
-            // Single registry key on this spawn path — the orchestrator iterates per-input-topic and
-            // spawns separately for multi-input requests. The function's input list is just the one
-            // registry key.
-            b.inputs(java.util.List.of(registryKey));
-        }
-        return b.build();
+    }
+
+    @Override
+    public RegistryEntry spawnWindowed(String queryId, String sourceTopic, String subscription, FilterRequest req,
+                                       OrchestratorConfig cfg, ControlTopicAction beforeDeploy) throws Exception {
+        String key = TopicKeySanitizer.forWindowedQuery(queryId);
+        String functionName = "selector-filter-win-" + key;
+        String controlTopic = String.format("persistent://%s/%s/ctrl-win-%s",
+                cfg.controlTopicTenant(), cfg.controlTopicNamespace(), key);
+
+        prepareControlTopic(controlTopic, cfg);
+        beforeDeploy.accept(controlTopic);
+        // The subscription already exists, positioned at the window start, so subscriptionPosition
+        // doesn't apply. cleanupSubscription (from the base config) deletes it with the function.
+        FunctionConfig fc = baseFunctionConfig(cfg, functionName, controlTopic)
+                .inputs(java.util.List.of(sourceTopic))
+                .subName(subscription)
+                .parallelism(1)
+                .build();
+        deployFilterFunction(fc, cfg.functionPackageUrl(), cfg.functionTenant(), cfg.functionNamespace(),
+                functionName);
+        LOG.info("Spawned windowed filter {} for queryId={} source={} subscription={} controlTopic={}",
+                functionName, queryId, sourceTopic, subscription, controlTopic);
+        return RegistryEntry.newEntry(controlTopic, functionName, req);
     }
 
     private static Map<String, Object> buildUserConfig(String controlTopic, OrchestratorConfig cfg) {

@@ -187,7 +187,10 @@ final class FilterReconciler implements AutoCloseable {
         registry.forEachInputTopicEntry((key, entry) -> {
             stats.evaluated++;
             metrics.accept(M_EVALUATED, 1.0);
-            if (isInUse(entry)) {
+            // A windowed query's filter is not re-spawned: re-running it would restart the window
+            // from wherever its subscription stopped. A lost one surfaces to the client as a missing
+            // completion record instead.
+            if (isInUse(entry) && !OrchestratorFunction.isWindowedKey(key)) {
                 candidateKeys.add(key);
             }
         });

@@ -19,11 +19,17 @@
 
 package io.streamnative.filter;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.streamnative.filter.common.LogPosition;
 import io.streamnative.filter.common.QueryMessage;
+import io.streamnative.filter.common.WindowProtocol;
+import io.streamnative.filter.common.WindowStats;
 import io.streamnative.filter.common.selector.SelectorParseException;
+import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.PulsarClient;
+import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.TableView;
 import org.apache.pulsar.client.api.TypedMessageBuilder;
@@ -33,6 +39,7 @@ import org.apache.pulsar.functions.api.Record;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -44,6 +51,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 
 public class SelectorFilterFunction implements Function<byte[], CompletableFuture<Void>> {
 
@@ -71,9 +79,18 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     static final long SLOW_SEND_ERROR_MS = 30_000L;
     /** Heartbeat log interval — shows function health even when messages aren't flowing. */
     static final long HEARTBEAT_INTERVAL_MS = 30_000L;
+    /**
+     * The per-message counters below are accumulated in the function and recorded as one
+     * {@code recordMetric(delta)} per metric at most this often, not once per message. Pulsar
+     * records every {@code recordMetric} call as an observation in a Prometheus summary, and with
+     * near-constant values (always 1, or the same payload size) its quantile estimator took ~98% of
+     * the filter's CPU, ~175 µs per message (profiled Oct 2026). The summary's {@code _sum} still
+     * totals the counter; its {@code _count} is the number of flushes.
+     */
+    static final long COUNTER_FLUSH_INTERVAL_MS = 1_000L;
 
     // Message-count metrics. Per Prometheus convention these are monotonic counters; rates are
-    // computed at the monitoring layer (e.g. rate(filter_messages_in[1m])).
+    // computed at the monitoring layer (e.g. rate(filter_messages_in_sum[1m])).
     // For every input record: messages_in += 1, and exactly one of (messages_dropped += 1) or
     // (messages_matched += 1) fires. messages_out accumulates total fan-outs (>= matched).
     static final String METRIC_MESSAGES_IN      = "filter.messages.in";
@@ -94,6 +111,10 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     static final String METRIC_QUERIES_BAD      = "filter.queries.bad";
 
     static final String METRIC_SEND_FAILURES = "filter.send.failures";
+    /** Windowed queries whose completion record was sent. */
+    static final String METRIC_WINDOWS_COMPLETED = "filter.windows.completed";
+    /** Open-ended windows whose caught-up record was sent. */
+    static final String METRIC_WINDOWS_CAUGHT_UP = "filter.windows.caught_up";
 
     /**
      * Per-message wall-clock processing time in milliseconds. Recorded as a sample (double) so
@@ -142,6 +163,17 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
     /** Epoch-ms of the last heartbeat log emission. */
     private final AtomicLong lastHeartbeatMs = new AtomicLong(0);
 
+    /** Counter deltas since the last flush; see {@link #COUNTER_FLUSH_INTERVAL_MS}. */
+    private final Map<String, LongAdder> pendingCounts = Map.of(
+            METRIC_MESSAGES_IN, new LongAdder(),
+            METRIC_BYTES_IN, new LongAdder(),
+            METRIC_MESSAGES_MATCHED, new LongAdder(),
+            METRIC_MESSAGES_DROPPED, new LongAdder(),
+            METRIC_BYTES_DROPPED, new LongAdder(),
+            METRIC_MESSAGES_OUT, new LongAdder(),
+            METRIC_BYTES_OUT, new LongAdder());
+    private final AtomicLong lastCountFlushMs = new AtomicLong();
+
     private final AtomicLong latencyPublishMsSum   = new AtomicLong();
     private final AtomicLong latencyPublishMsCount = new AtomicLong();
     private final AtomicLong latencyEventMsSum     = new AtomicLong();
@@ -162,6 +194,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         }
 
         this.boundContext = ctx;
+        this.lastCountFlushMs.set(System.currentTimeMillis());
         this.processingTimeMetricEnabled = resolveBoolean(ctx, CFG_PROCESSING_TIME_METRIC, true);
         this.logTimingEvery = resolveInt(ctx, CFG_LOG_TIMING_EVERY, 0);
         LOG.info("Processing-time metric ({}) is {}", METRIC_PROCESSING_TIME_MS,
@@ -193,8 +226,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
 
         long inCount = messagesIn.incrementAndGet();
         int payloadBytes = payload == null ? 0 : payload.length;
-        ctx.recordMetric(METRIC_MESSAGES_IN, 1.0);
-        ctx.recordMetric(METRIC_BYTES_IN, payloadBytes);
+        count(METRIC_MESSAGES_IN, 1);
+        count(METRIC_BYTES_IN, payloadBytes);
+        maybeFlushCounts(ctx, startMs);
 
         // Debug: log first 10 messages to confirm format is correct after kafkaEntryFormat fix.
         // "Discarding corrupted message" in ConsumerImpl means KoP batch-format entries (produced
@@ -239,10 +273,41 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         final long srcEventTime = record.getMessage().map(m -> m.getEventTime()).orElse(0L);
 
         List<CompletableFuture<?>> sends = new ArrayList<>();
+        // Completion records of windowed queries: awaited before the ack, but not counted as matches.
+        List<CompletableFuture<?>> completionSends = null;
         Map<String, String> forwardProperties = null;
         boolean forwardPropertiesResolved = false;
+        // Resolved on the first windowed query only, so live-only functions pay nothing extra.
+        long logTime = 0L;
+        Message<?> srcMessage = null;
+        boolean windowFieldsResolved = false;
 
         for (CompiledQuery cq : compiled.values()) {
+            WindowState window = cq.window();
+            boolean completeAfterThis = false;
+            boolean caughtUpAfterThis = false;
+            if (window != null) {
+                if (!windowFieldsResolved) {
+                    srcMessage = record.getMessage().orElse(null);
+                    logTime = srcMessage == null ? 0L : MessageBindings.logClockTime(srcMessage);
+                    windowFieldsResolved = true;
+                }
+                WindowState.Admission admission = window.admit(logTime, positionOf(srcMessage));
+                if (admission == WindowState.Admission.BEFORE_WINDOW || admission == WindowState.Admission.DONE) {
+                    continue;
+                }
+                if (admission == WindowState.Admission.PAST_WINDOW) {
+                    completionSends = append(completionSends, sendCompletion(ctx, cq));
+                    continue;
+                }
+                if (admission == WindowState.Admission.FIRST_AFTER_HISTORY) {
+                    // Marks the end of history before this (live) record's match.
+                    completionSends = append(completionSends, sendCaughtUp(ctx, cq));
+                }
+                completeAfterThis = admission == WindowState.Admission.LAST_IN_WINDOW;
+                caughtUpAfterThis = admission == WindowState.Admission.LAST_OF_HISTORY;
+                window.recordScanned(logTime, payloadBytes);
+            }
             if (cq.evaluator().matches(bindings, cq.valueDecoder())) {
                 TypedMessageBuilder<byte[]> builder = ctx.newOutputMessage(cq.outputTopic(), Schema.BYTES)
                         .value(payload);
@@ -259,6 +324,18 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                 }
                 if (srcEventTime > 0) {
                     builder = builder.eventTime(srcEventTime);
+                }
+                if (window != null) {
+                    // Windowed results carry their source position and log time, so clients can
+                    // dedupe at-least-once redeliveries and see where each event sat in the log.
+                    if (srcMessage != null) {
+                        builder = builder.property(WindowProtocol.SRC_MSGID_PROPERTY,
+                                String.valueOf(srcMessage.getMessageId()));
+                    }
+                    if (logTime > 0) {
+                        builder = builder.property(WindowProtocol.SRC_PUBLISH_TIME_PROPERTY, Long.toString(logTime));
+                    }
+                    window.recordMatched();
                 }
                 final String outputTopic = cq.outputTopic();
                 pendingSends.incrementAndGet();
@@ -280,10 +357,28 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                         });
                 sends.add(send);
             }
+            if (completeAfterThis) {
+                // Sent after this record's match on the same producer, so it follows it in the output.
+                completionSends = append(completionSends, sendCompletion(ctx, cq));
+            }
+            if (caughtUpAfterThis) {
+                completionSends = append(completionSends, sendCaughtUp(ctx, cq));
+            }
         }
 
         if (sends.isEmpty()) {
-            return ackAsDropped(ctx, record, payloadBytes, startNanos);
+            if (completionSends == null) {
+                return ackAsDropped(ctx, record, payloadBytes, startNanos);
+            }
+            return ackAfterCompletion(ctx, record, completionSends, startNanos);
+        }
+        final List<CompletableFuture<?>> awaited;
+        if (completionSends == null) {
+            awaited = sends;
+        } else {
+            // Ack only once both the matches and the completion records are written.
+            awaited = new ArrayList<>(sends);
+            awaited.addAll(completionSends);
         }
 
         // (b1) value-add latency: entry → all sends dispatched (deserialize + eval + build +
@@ -293,7 +388,7 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         final long evalDoneMs = System.currentTimeMillis();
 
         final int fanout = sends.size();
-        return CompletableFuture.allOf(sends.toArray(new CompletableFuture[0]))
+        return CompletableFuture.allOf(awaited.toArray(new CompletableFuture[0]))
                 .whenComplete((v, err) -> {
                     if (err != null) {
                         ctx.recordMetric(METRIC_SEND_FAILURES, 1.0);
@@ -302,9 +397,9 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
                         record.fail();
                     } else {
                         record.ack();
-                        ctx.recordMetric(METRIC_MESSAGES_MATCHED, 1.0);
-                        ctx.recordMetric(METRIC_MESSAGES_OUT, fanout);
-                        ctx.recordMetric(METRIC_BYTES_OUT, (double) payloadBytes * fanout);
+                        count(METRIC_MESSAGES_MATCHED, 1);
+                        count(METRIC_MESSAGES_OUT, fanout);
+                        count(METRIC_BYTES_OUT, (long) payloadBytes * fanout);
                         recordMatchLatency(ctx, record);
                         // (b) total value-add latency: entry → all output sends acked (matched-only).
                         recordMatchProcessingTime(ctx, startNanos);
@@ -364,10 +459,88 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         }
     }
 
+    /**
+     * Write a windowed query's completion record ({@link WindowProtocol#COMPLETE_PROPERTY}; null value,
+     * JSON {@link WindowStats} in {@link WindowProtocol#STATS_PROPERTY}) to its output topic. It goes through the same output producer as the
+     * query's matches, so it follows every match already sent. If the send fails the window is
+     * reopened, so the redelivered record completes it again.
+     */
+    private CompletableFuture<?> sendCompletion(Context ctx, CompiledQuery cq) throws PulsarClientException {
+        WindowStats stats = cq.window().complete(cq.queryId());
+        LOG.info("Window complete: {}", stats);
+        return sendMarker(ctx, cq, WindowProtocol.COMPLETE_PROPERTY, stats, cq.window()::reopen, METRIC_WINDOWS_COMPLETED);
+    }
+
+    /**
+     * Write an open-ended window's caught-up record ({@link WindowProtocol#CAUGHT_UP_PROPERTY}; stats for
+     * the historical part in {@link WindowProtocol#STATS_PROPERTY}): everything up to the end of history has been
+     * sent; live matches follow. Reopened on a failed send, like the completion record.
+     */
+    private CompletableFuture<?> sendCaughtUp(Context ctx, CompiledQuery cq) throws PulsarClientException {
+        WindowStats stats = cq.window().caughtUp(cq.queryId());
+        LOG.info("Window caught up: {}", stats);
+        return sendMarker(ctx, cq, WindowProtocol.CAUGHT_UP_PROPERTY, stats, cq.window()::reopenCaughtUp,
+                METRIC_WINDOWS_CAUGHT_UP);
+    }
+
+    private CompletableFuture<?> sendMarker(Context ctx, CompiledQuery cq, String property, WindowStats stats,
+                                            Runnable onFailure, String metric) throws PulsarClientException {
+        String statsJson;
+        try {
+            statsJson = MAPPER.writeValueAsString(stats);
+        } catch (JsonProcessingException e) {
+            throw new UncheckedIOException(e);
+        }
+        // Null value: a Kafka consumer's value deserializer (Avro, JSON schema, ...) accepts null, but
+        // would fail on a payload it doesn't expect. The stats travel as a property / header.
+        return ctx.newOutputMessage(cq.outputTopic(), Schema.BYTES)
+                .value(null)
+                .property(property, "true")
+                .property(WindowProtocol.STATS_PROPERTY, statsJson)
+                .sendAsync()
+                .whenComplete((r, e) -> {
+                    if (e != null) {
+                        LOG.warn("{} record for query id={} failed; will write it again on redelivery: {}",
+                                property, cq.queryId(), e.getMessage());
+                        onFailure.run();
+                    } else {
+                        ctx.recordMetric(metric, 1.0);
+                    }
+                });
+    }
+
+    /** Ack a record that matched nothing but ended one or more windows, once the completions are written. */
+    private CompletableFuture<Void> ackAfterCompletion(Context ctx, Record<?> record,
+                                                       List<CompletableFuture<?>> completionSends, long startNanos) {
+        return CompletableFuture.allOf(completionSends.toArray(new CompletableFuture[0]))
+                .whenComplete((v, err) -> {
+                    if (err != null) {
+                        ctx.recordMetric(METRIC_SEND_FAILURES, 1.0);
+                        record.fail();
+                    } else {
+                        record.ack();
+                    }
+                    recordProcessingTime(ctx, startNanos);
+                })
+                .thenApply(v -> null);
+    }
+
+    private static List<CompletableFuture<?>> append(List<CompletableFuture<?>> list, CompletableFuture<?> f) {
+        List<CompletableFuture<?>> out = list == null ? new ArrayList<>(2) : list;
+        out.add(f);
+        return out;
+    }
+
+    /** The message's position for window bounds, or {@code null} if unknown. */
+    private static LogPosition positionOf(Message<?> message) {
+        return message == null || message.getMessageId() == null
+                ? null : LogPosition.fromBytes(message.getMessageId().toByteArray());
+    }
+
     private CompletableFuture<Void> ackAsDropped(Context ctx, Record<?> record, int payloadBytes, long startNanos) {
         droppedCount.incrementAndGet();
-        ctx.recordMetric(METRIC_MESSAGES_DROPPED, 1.0);
-        ctx.recordMetric(METRIC_BYTES_DROPPED, payloadBytes);
+        count(METRIC_MESSAGES_DROPPED, 1);
+        count(METRIC_BYTES_DROPPED, payloadBytes);
         record.ack();
         recordProcessingTime(ctx, startNanos);
         return CompletableFuture.completedFuture(null);
@@ -505,11 +678,23 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
             recordMetric(METRIC_QUERIES_BAD, 1.0);
             return;
         }
+        WindowState window = null;
+        if (qm.getWindow() != null) {
+            try {
+                qm.getWindow().validate();
+            } catch (IllegalArgumentException e) {
+                LOG.warn("Query id={} has an invalid window {}: {}", queryId, qm.getWindow(), e.getMessage());
+                recordMetric(METRIC_QUERIES_BAD, 1.0);
+                return;
+            }
+            window = new WindowState(qm.getWindow(), System::currentTimeMillis);
+        }
         ValueDecoder valueDecoder = ValueDecoderFactory.from(qm.getValueSchema());
         compiled.put(queryId, new CompiledQuery(queryId, qm.getName(), qm.getOutputTopic(), evaluator,
-                qm.getValueSchema(), valueDecoder));
-        LOG.info("Loaded query id={} name='{}' selector=[{}] -> {}",
-                queryId, qm.getName(), qm.getSelector(), qm.getOutputTopic());
+                qm.getValueSchema(), valueDecoder, window));
+        LOG.info("Loaded query id={} name='{}' selector=[{}] -> {}{}",
+                queryId, qm.getName(), qm.getSelector(), qm.getOutputTopic(),
+                window != null ? " window=" + qm.getWindow() : "");
         recordMetric(METRIC_QUERIES_LOADED, 1.0);
         recordMetric(METRIC_QUERIES_ACTIVE, compiled.size());
     }
@@ -569,8 +754,41 @@ public class SelectorFilterFunction implements Function<byte[], CompletableFutur
         return compiled.get(queryId);
     }
 
+    private void count(String metric, long delta) {
+        pendingCounts.get(metric).add(delta);
+    }
+
+    private void maybeFlushCounts(Context ctx, long nowMs) {
+        long last = lastCountFlushMs.get();
+        if (nowMs - last >= COUNTER_FLUSH_INTERVAL_MS && lastCountFlushMs.compareAndSet(last, nowMs)) {
+            flushCounts(ctx);
+        }
+    }
+
+    /**
+     * Records each counter's delta since the last flush as one observation, skipping zeros. Runs
+     * from {@code process()} at most every {@link #COUNTER_FLUSH_INTERVAL_MS} and on close, so an
+     * idle filter's last partial interval is recorded with the next message.
+     */
+    void flushCounts(Context ctx) {
+        for (Map.Entry<String, LongAdder> e : pendingCounts.entrySet()) {
+            long delta = e.getValue().sumThenReset();
+            if (delta != 0) {
+                ctx.recordMetric(e.getKey(), delta);
+            }
+        }
+    }
+
     @Override
     public void close() throws Exception {
+        Context ctx = boundContext;
+        if (ctx != null) {
+            try {
+                flushCounts(ctx);
+            } catch (RuntimeException e) {
+                LOG.debug("Final counter flush failed: {}", e.getMessage());
+            }
+        }
         if (controlTopicView != null) {
             controlTopicView.close();
         }

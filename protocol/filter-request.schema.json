@@ -78,6 +78,16 @@
             "items": { "type": "string", "minLength": 1 },
             "minItems": 1,
             "description": "Required on HEARTBEAT — the list of queryIds the publishing Session still considers live. The orchestrator stamps lastSeen on each named QueryEntry; unknown queryIds are silently ignored (probably already-tombstoned by a prior UNREGISTER). Null/absent on REGISTER/MODIFY/UNREGISTER."
+        },
+        "windowFromMs": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "Optional on REGISTER: start of a time window (epoch ms, on the log's clock: broker-entry time when the broker appends it, else publish time; 0 means from the beginning, never reported as truncated). Requires exactly one input topic. A windowed REGISTER reads the topic's history from windowFromMs on a dedicated filter instance. With windowToMs the output ends with a completion record (property __window_complete__=true); without it the window is open-ended: the historical matches end with a caught-up record (__window_caught_up__=true) and live matches follow. Null/absent for a live query."
+        },
+        "windowToMs": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "Optional on a windowed REGISTER: end of the time window (epoch ms, inclusive), greater than windowFromMs. May be in the future: the window then ends at the last message present when the query was registered. Null/absent with windowFromMs set: an open-ended window."
         }
     },
     "examples": [

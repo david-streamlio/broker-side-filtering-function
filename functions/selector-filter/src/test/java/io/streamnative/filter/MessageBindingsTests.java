@@ -577,4 +577,61 @@ class MessageBindingsTests {
         assertThat(priceFilter.matches(b, decoder)).isTrue();
         assertThat(SelectorEvaluator.compile("price > 500").matches(b, decoder)).isFalse();
     }
+
+    // ===== __publish_time__ / __event_time__ =====
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Record<byte[]> recordWithTimes(long publishTime, Optional<Long> brokerTime, long eventTime) {
+        Message<byte[]> msg = Mockito.mock(Message.class);
+        Mockito.when(msg.getPublishTime()).thenReturn(publishTime);
+        Mockito.when(msg.getBrokerPublishTime()).thenReturn(brokerTime);
+        Mockito.when(msg.getEventTime()).thenReturn(eventTime);
+        Record<byte[]> record = Mockito.mock(Record.class);
+        Mockito.when(record.getMessage()).thenReturn((Optional) Optional.of(msg));
+        return record;
+    }
+
+    @Test
+    void publishTimePrefersBrokerTime() {
+        MessageBindings b = MessageBindings.from(recordWithTimes(1_000L, Optional.of(1_080L), 0L));
+        assertThat(b.lookup(MessageBindings.PUBLISH_TIME_BINDING)).isEqualTo(1_080L);
+    }
+
+    @Test
+    void publishTimeFallsBackToProducerTime() {
+        MessageBindings b = MessageBindings.from(recordWithTimes(1_000L, Optional.empty(), 0L));
+        assertThat(b.lookup(MessageBindings.PUBLISH_TIME_BINDING)).isEqualTo(1_000L);
+    }
+
+    @Test
+    void eventTimeIsNullWhenUnset() {
+        MessageBindings unset = MessageBindings.from(recordWithTimes(1_000L, Optional.empty(), 0L));
+        assertThat(unset.lookup(MessageBindings.EVENT_TIME_BINDING)).isNull();
+        MessageBindings set = MessageBindings.from(recordWithTimes(1_000L, Optional.empty(), 900L));
+        assertThat(set.lookup(MessageBindings.EVENT_TIME_BINDING)).isEqualTo(900L);
+    }
+
+    @Test
+    void timeBindingsShadowSameNamedProperties() {
+        MessageBindings b = new MessageBindings("k", null, Map.of("__publish_time__", "nope"), null, 5L, 7L);
+        assertThat(b.lookup(MessageBindings.PUBLISH_TIME_BINDING)).isEqualTo(5L);
+        assertThat(b.lookup(MessageBindings.EVENT_TIME_BINDING)).isEqualTo(7L);
+    }
+
+    @Test
+    void timeSelectorsCompareNumerically() {
+        MessageBindings b = new MessageBindings("k", null, Map.of(), null, 1_500L, null);
+        assertThat(SelectorEvaluator.compile("__publish_time__ BETWEEN 1000 AND 2000").matches(b)).isTrue();
+        assertThat(SelectorEvaluator.compile("__publish_time__ > 2000").matches(b)).isFalse();
+        // UNKNOWN (no event time) is never a match, in either direction.
+        assertThat(SelectorEvaluator.compile("__event_time__ > 0").matches(b)).isFalse();
+        assertThat(SelectorEvaluator.compile("NOT (__event_time__ > 0)").matches(b)).isFalse();
+    }
+
+    @Test
+    void timeBindingsAreNotUserProperties() {
+        assertThat(SelectorEvaluator.compile("__publish_time__ > 0").referencesUserProperties()).isFalse();
+        assertThat(SelectorEvaluator.compile("__event_time__ > 0 AND region = 'r07'").referencesUserProperties())
+                .isTrue();
+    }
 }

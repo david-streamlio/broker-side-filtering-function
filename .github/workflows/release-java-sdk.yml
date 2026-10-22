@@ -21,7 +21,7 @@ name: Release Java SDK
 # so downstream consumers (e.g. Trade-Wise-app) can depend on a pinned release version
 # instead of the SNAPSHOTs that ride main pushes (publish-snapshots.yml).
 #
-# Only the distributable SDK modules are deployed here — common + the two Java SDKs. The
+# Only the distributable SDK modules are deployed here — common, the client API + the two Java SDKs. The
 # function NARs are NOT pushed to Packages; their canonical distribution is the GitHub
 # Release (release-nars.yml), which runs in parallel on the same tag.
 
@@ -56,6 +56,6 @@ jobs:
           mvn -B versions:set -DnewVersion="${VERSION}" -DgenerateBackupPoms=false
 
       - name: Deploy SDK release JARs
-        run: mvn -B -DskipTests -pl common,sdk/java/pulsar,sdk/java/kafka -am deploy
+        run: mvn -B -DskipTests -pl common,sdk/java/api,sdk/java/pulsar,sdk/java/kafka -am deploy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

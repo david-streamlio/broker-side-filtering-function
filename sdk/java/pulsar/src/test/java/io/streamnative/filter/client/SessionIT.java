@@ -19,6 +19,7 @@
 
 package io.streamnative.filter.client;
 
+import io.streamnative.filter.api.FilterControl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.DescriptorProtos.DescriptorProto;
 import com.google.protobuf.DescriptorProtos.FieldDescriptorProto;
@@ -129,6 +130,7 @@ class SessionIT {
     void setup() throws Exception {
         client = PulsarClient.builder().serviceUrl(pulsar.getPulsarBrokerUrl()).build();
         admin  = PulsarAdmin.builder().serviceHttpUrl(pulsar.getHttpServiceUrl()).build();
+        waitForDefaultNamespace(admin);
 
         admin.topics().createNonPartitionedTopic(SDK_INPUT_TOPIC);
         admin.topics().createNonPartitionedTopic(ORCH_STATE_TOPIC);
@@ -589,6 +591,28 @@ class SessionIT {
         assertThat(admin.topics().getList("public/default"))
                 .as("private topic %s should be cleaned up on close", privateTopic)
                 .doesNotContain(privateTopic);
+    }
+
+    /**
+     * The container can report ready before Pulsar standalone has created {@code public/default};
+     * creating a topic then fails with "Namespace not found". Seen in CI (twice, Oct 2026) when this
+     * IT ran right after WindowedSessionIT.
+     */
+    private static void waitForDefaultNamespace(PulsarAdmin admin) throws Exception {
+        long deadline = System.currentTimeMillis() + 60_000L;
+        while (true) {
+            try {
+                if (admin.namespaces().getNamespaces("public").contains("public/default")) {
+                    return;
+                }
+            } catch (PulsarAdminException.NotFoundException tenantNotCreatedYet) {
+                // keep waiting
+            }
+            if (System.currentTimeMillis() > deadline) {
+                throw new IllegalStateException("Namespace public/default did not appear within 60s");
+            }
+            Thread.sleep(500);
+        }
     }
 
     private static void deployWithLeaderRetry(PulsarAdmin admin, FunctionConfig config, String pkg,

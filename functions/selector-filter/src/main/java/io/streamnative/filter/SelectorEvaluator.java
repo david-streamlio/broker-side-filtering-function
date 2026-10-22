@@ -102,10 +102,12 @@ public final class SelectorEvaluator {
         return referencedNames.contains(MessageBindings.TOPIC_BINDING);
     }
 
-    /** True iff the selector references at least one user property (not __key__ or __topic__). */
+    /** True iff the selector references at least one user property (not a built-in {@code __x__} binding). */
     public boolean referencesUserProperties() {
         for (String n : referencedNames) {
-            if (!MessageBindings.KEY_BINDING.equals(n) && !MessageBindings.TOPIC_BINDING.equals(n)) {
+            if (!MessageBindings.KEY_BINDING.equals(n) && !MessageBindings.TOPIC_BINDING.equals(n)
+                    && !MessageBindings.PUBLISH_TIME_BINDING.equals(n)
+                    && !MessageBindings.EVENT_TIME_BINDING.equals(n)) {
                 return true;
             }
         }

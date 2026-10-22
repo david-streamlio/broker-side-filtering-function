@@ -19,6 +19,10 @@
 
 package io.streamnative.filter.client;
 
+import io.streamnative.filter.api.FilterControl;
+import io.streamnative.filter.api.TimeWindow;
+import io.streamnative.filter.api.WindowControl;
+import io.streamnative.filter.api.internal.WindowProgress;
 import io.streamnative.filter.common.ValueSchemaInfo;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.PulsarClientException;
@@ -56,6 +60,7 @@ public final class FilterableConsumerBuilder<V> {
     private String subscriptionName;
     private SubscriptionType subscriptionType = SubscriptionType.Exclusive;
     private SubscriptionInitialPosition initialPosition = SubscriptionInitialPosition.Earliest;
+    private TimeWindow window;
 
     /**
      * @param valueSchema     the Pulsar schema the underlying consumer decodes with
@@ -125,8 +130,23 @@ public final class FilterableConsumerBuilder<V> {
     }
 
     /**
+     * Read part of the source topic's log: history, live events, or both (see {@link TimeWindow}). The
+     * consumer returned by {@link #subscribe()} also implements {@link WindowControl}, which reports
+     * when the window's history has been delivered and, for a bounded window, when it is complete.
+     *
+     * <p>Windows that read history need exactly one source topic, run on a dedicated server-side filter,
+     * and always start at the beginning of their results ({@link #subscriptionInitialPosition} doesn't
+     * apply); their selector is fixed. {@link TimeWindow#liveOnly()} runs as an ordinary live query.
+     */
+    public FilterableConsumerBuilder<V> window(TimeWindow window) {
+        this.window = Objects.requireNonNull(window, "window");
+        return this;
+    }
+
+    /**
      * Subscribe a real Pulsar consumer on the private output topic. The returned object is a
-     * {@link Consumer Consumer&lt;V&gt;} that also implements {@link FilterControl}.
+     * {@link Consumer Consumer&lt;V&gt;} that also implements {@link FilterControl} (and
+     * {@link WindowControl} for a windowed query).
      *
      * @throws IllegalArgumentException if {@code selector} is non-blank but fails to parse
      *                                  against the JMS-selector grammar; the cause is the
@@ -137,6 +157,18 @@ public final class FilterableConsumerBuilder<V> {
     public Consumer<V> subscribe() throws PulsarClientException {
         if (sourceTopics.isEmpty()) {
             throw new IllegalStateException("At least one source topic is required");
+        }
+        if (window != null && window.isLiveOnly()) {
+            return session.subscribeFiltered(List.copyOf(sourceTopics), selector, subscriptionName, subscriptionType,
+                    initialPosition, valueSchema, valueSchemaInfo, WindowProgress.liveOnly());
+        }
+        if (window != null) {
+            if (sourceTopics.size() != 1) {
+                throw new IllegalStateException("A window that reads history needs exactly one source topic");
+            }
+            TimeWindow.Bounds bounds = window.resolve(System.currentTimeMillis());
+            return session.subscribeWindowed(sourceTopics.get(0), selector, subscriptionName, subscriptionType,
+                    valueSchema, valueSchemaInfo, bounds.fromMs(), bounds.toMs());
         }
         return session.subscribeFiltered(
                 List.copyOf(sourceTopics),

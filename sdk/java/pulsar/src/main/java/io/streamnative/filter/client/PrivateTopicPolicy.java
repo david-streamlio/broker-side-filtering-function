@@ -42,6 +42,17 @@ public final class PrivateTopicPolicy {
 
     public static final PrivateTopicPolicy DEFAULT = new Builder().build();
 
+    /**
+     * Default for windowed queries' private topics. A window's results can be large and are read
+     * once from the start, so the live defaults (5-minute TTL, 64 MB retention) could expire results
+     * a slow consumer hasn't read yet: a silent gap. One hour TTL and retention, no size cap.
+     */
+    public static final PrivateTopicPolicy WINDOWED_DEFAULT = new Builder()
+            .messageTtlSeconds(3_600)
+            .retentionTimeMinutes(60)
+            .retentionSizeMB(-1)
+            .build();
+
     private final int messageTtlSeconds;
     private final int retentionTimeMinutes;
     private final int retentionSizeMB;

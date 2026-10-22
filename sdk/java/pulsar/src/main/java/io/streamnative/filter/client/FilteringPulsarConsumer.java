@@ -19,6 +19,8 @@
 
 package io.streamnative.filter.client;
 
+import io.streamnative.filter.api.FilterException;
+import io.streamnative.filter.api.FilterControl;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.ConsumerStats;
 import org.apache.pulsar.client.api.Message;
@@ -42,18 +44,19 @@ import java.util.function.Function;
  *
  * <p>All {@link Consumer} methods delegate to the underlying consumer. {@link #close()}
  * additionally retracts the registered query (and, per policy, deletes the private output topic).
+ * {@link WindowedPulsarConsumer} extends it for windowed queries.
  *
  * @param <V> the value type the underlying consumer decodes, fixed by the {@code Schema<V>} the
  *            caller passed to {@code Session.newConsumer(schema)} ({@code byte[]} for the no-schema
  *            path). The message key is always a {@code String}.
  */
-final class FilteringPulsarConsumer<V> implements Consumer<V>, FilterControl {
+class FilteringPulsarConsumer<V> implements Consumer<V>, FilterControl {
 
     private static final Logger LOG = LoggerFactory.getLogger(FilteringPulsarConsumer.class);
 
     private final Session session;
     private final PrivateQuery query;
-    private final Consumer<V> delegate;
+    final Consumer<V> delegate;
     private volatile String userSelector;
     private volatile boolean closed;
 
@@ -68,11 +71,15 @@ final class FilteringPulsarConsumer<V> implements Consumer<V>, FilterControl {
     // ------------------------------------------------------------------ FilterControl
 
     @Override
-    public synchronized void setSelector(String selector) throws PulsarClientException {
+    public synchronized void setSelector(String selector) {
         if (closed) {
             throw new IllegalStateException("Consumer is closed");
         }
-        session.updatePrivateQuery(query, selector);
+        try {
+            session.updatePrivateQuery(query, selector);
+        } catch (PulsarClientException e) {
+            throw new FilterException("Failed to change the selector of queryId=" + query.queryId(), e);
+        }
         this.userSelector = (selector == null || selector.isBlank()) ? null : selector;
     }
 

@@ -74,6 +74,16 @@ public final class MessageBindings {
     public static final String TOPIC_BINDING = "__topic__";
 
     /**
+     * The message's time on the log's clock, epoch ms ({@code Long}): the broker-entry timestamp
+     * when the broker appends one, else the producer publish time. This is the clock
+     * {@code resetCursor(timestamp)} positions by, so selectors and windowed reads agree.
+     */
+    public static final String PUBLISH_TIME_BINDING = "__publish_time__";
+
+    /** The producer-set event time, epoch ms ({@code Long}), or {@code null} (UNKNOWN) when unset. */
+    public static final String EVENT_TIME_BINDING = "__event_time__";
+
+    /**
      * KoP-injected disambiguation property whose JSON value names user properties whose raw value
      * is base64-encoded (vs raw UTF-8). Hidden from selectors, but consulted by
      * {@link #lookup(String)} to drive transparent decoding of the named properties.
@@ -93,6 +103,9 @@ public final class MessageBindings {
     private boolean topicResolved;
     private Map<String, String> properties;
     private boolean propertiesResolved;
+    // Test-constructor values for the time bindings; production resolves them from the record.
+    private final Long testPublishTime;
+    private final Long testEventTime;
 
     // Lazily-parsed JSON payload — used when a selector references a field not found in properties.
     private JsonNode payloadJson;
@@ -118,17 +131,27 @@ public final class MessageBindings {
 
     /** Test constructor — includes raw payload bytes for JSON-field selectors. */
     public MessageBindings(String key, String topic, Map<String, String> properties, byte[] payload) {
-        this.record     = null;
-        this.payload    = payload;
-        this.key        = key;
-        this.topic      = topic;
-        this.properties = properties;
+        this(key, topic, properties, payload, null, null);
+    }
+
+    /** Test constructor — also binds {@code __publish_time__} / {@code __event_time__}. */
+    public MessageBindings(String key, String topic, Map<String, String> properties, byte[] payload,
+                           Long publishTime, Long eventTime) {
+        this.record          = null;
+        this.payload         = payload;
+        this.key             = key;
+        this.topic           = topic;
+        this.properties      = properties;
+        this.testPublishTime = publishTime;
+        this.testEventTime   = eventTime;
     }
 
     /** Production constructor — binds a live record; key/topic/properties resolve lazily from it. */
     private MessageBindings(Record<?> record, byte[] payload) {
-        this.record  = record;
-        this.payload = payload;
+        this.record          = record;
+        this.payload         = payload;
+        this.testPublishTime = null;
+        this.testEventTime   = null;
     }
 
     /**
@@ -198,6 +221,27 @@ public final class MessageBindings {
         return properties;
     }
 
+    /** {@code __publish_time__}: broker-entry time when present, else publish time; {@code null} if unknown. */
+    public Long getPublishTime() {
+        if (record == null) {
+            return testPublishTime;
+        }
+        return record.getMessage().map(MessageBindings::logClockTime).filter(t -> t > 0).orElse(null);
+    }
+
+    /** {@code __event_time__}: the producer-set event time, or {@code null} when unset. */
+    public Long getEventTime() {
+        if (record == null) {
+            return testEventTime;
+        }
+        return record.getMessage().map(m -> m.getEventTime()).filter(t -> t > 0).orElse(null);
+    }
+
+    /** A message's time on the log's clock: broker-entry timestamp when present, else publish time. */
+    static long logClockTime(Message<?> message) {
+        return message.getBrokerPublishTime().orElse(message.getPublishTime());
+    }
+
     public Object lookup(String name) {
         return lookup(name, null);
     }
@@ -205,8 +249,8 @@ public final class MessageBindings {
     /**
      * Resolve a selector binding, using {@code decoder} for value-field references when present.
      *
-     * <p>Resolution order is unchanged: {@code __key__}, {@code __topic__}, then user properties,
-     * then the message value. When a {@code decoder} is supplied (a query with a structured value
+     * <p>Resolution order: {@code __key__}, {@code __topic__}, {@code __publish_time__},
+     * {@code __event_time__}, then user properties, then the message value. When a {@code decoder} is supplied (a query with a structured value
      * schema) the value is decoded through it; otherwise — or if structured decode fails — value
      * fields fall back to best-effort JSON parsing. Properties still shadow value fields of the same
      * name, exactly as before.
@@ -217,6 +261,12 @@ public final class MessageBindings {
         }
         if (TOPIC_BINDING.equals(name)) {
             return getTopic();
+        }
+        if (PUBLISH_TIME_BINDING.equals(name)) {
+            return getPublishTime();
+        }
+        if (EVENT_TIME_BINDING.equals(name)) {
+            return getEventTime();
         }
         if (KOP_INTERNAL_HEADER_FORMAT.equals(name)) {
             // Hide KoP's internal disambiguation property from selectors; it must not be a

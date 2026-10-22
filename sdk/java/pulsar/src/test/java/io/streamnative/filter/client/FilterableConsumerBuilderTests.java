@@ -19,6 +19,7 @@
 
 package io.streamnative.filter.client;
 
+import io.streamnative.filter.api.FilterControl;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.Topics;
 import org.apache.pulsar.client.admin.TopicPolicies;
