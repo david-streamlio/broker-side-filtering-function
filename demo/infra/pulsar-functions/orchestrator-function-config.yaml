@@ -75,7 +75,7 @@ userConfig:
   # Heartbeat-based dead-consumer detection — synthesizes UNREGISTER for queryIds whose
   # SDK Session has gone silent. Combined with idle-gc above, total time from consumer
   # death to filter reclaim ≈ 90 + 600 + sweep slack ≈ 12 minutes.
-  heartbeat-max-stale-seconds: 90
+  heartbeat-max-stale-seconds: 600
 
   # Continuous existence reconcile — re-spawns filters deleted out-of-band while a query is
   # still live (the "ensure desired filters exist" controller half). Disabled by default until

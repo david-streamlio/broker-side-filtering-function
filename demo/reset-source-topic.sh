@@ -102,17 +102,15 @@ sleep 3
 # ── Step 3: Delete all subscriptions ──────────────────────────────────────────
 echo ""
 echo -e "${BOLD}[3/6] Deleting subscriptions on all partitions...${NC}"
-for p in $(seq 0 "$((CURRENT_PARTS - 1))"); do
-  for sub in "$SUB_FILTER" "multiTopicsReader"; do
-    # Get actual subscription names for multiTopicsReader (name varies)
-    SUBS=$(curl -sf --max-time 10 \
+if [[ "$CURRENT_PARTS" =~ ^[0-9]+$ ]] && [[ "$CURRENT_PARTS" -gt 0 ]]; then
+  for p in $(seq 0 "$((CURRENT_PARTS - 1))"); do
+    SUBS=$(curl -s --max-time 10 \
       "${ADMIN}/admin/v2/persistent/public/default/stock-quotes-partition-${p}/subscriptions" \
       -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null || echo "[]")
     MATCHING=$(echo "$SUBS" | python3 -c "
 import sys,json,urllib.parse
-raw=sys.stdin.read()
 try:
-    subs=json.loads(raw)
+    subs=json.loads(sys.stdin.read())
     for s in subs:
         if 'selector' in s or 'multiTopics' in s:
             print(urllib.parse.quote(s, safe=''))
@@ -120,58 +118,103 @@ except: pass
 " 2>/dev/null || true)
     while IFS= read -r encoded_sub; do
       [[ -z "$encoded_sub" ]] && continue
-      CODE=$(curl -sf --max-time 10 -o /dev/null -w "%{http_code}" \
+      CODE=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" \
         -X DELETE "${ADMIN}/admin/v2/persistent/public/default/stock-quotes-partition-${p}/subscription/${encoded_sub}?force=true" \
-        -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null || echo "000")
+        -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null)
       [[ "$CODE" == "204" ]] && ok "Deleted sub on partition-${p}" || true
     done <<< "$MATCHING"
   done
-done
+else
+  warn "No partitions to clear subscriptions from (partitions=${CURRENT_PARTS})"
+fi
 
 # ── Step 4: Delete partitions and parent ───────────────────────────────────────
 echo ""
 echo -e "${BOLD}[4/6] Deleting topic...${NC}"
-# Delete each partition individually first
-for p in $(seq 0 "$((CURRENT_PARTS - 1))"); do
-  CODE=$(curl -sf --max-time 10 -o /dev/null -w "%{http_code}" \
-    -X DELETE "${ADMIN}/admin/v2/persistent/public/default/stock-quotes-partition-${p}?force=true" \
-    -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null || echo "000")
-  [[ "$CODE" == "204" ]] && ok "Deleted partition-${p}" || warn "partition-${p}: HTTP ${CODE}"
-done
+# Delete individual partitions (only if they exist)
+if [[ "$CURRENT_PARTS" =~ ^[0-9]+$ ]] && [[ "$CURRENT_PARTS" -gt 0 ]]; then
+  for p in $(seq 0 "$((CURRENT_PARTS - 1))"); do
+    CODE=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" \
+      -X DELETE "${ADMIN}/admin/v2/persistent/public/default/stock-quotes-partition-${p}?force=true" \
+      -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null)
+    [[ "$CODE" == "204" ]] && ok "Deleted partition-${p}" || warn "partition-${p}: HTTP ${CODE}"
+  done
+fi
 sleep 2
 # Delete partitioned topic metadata
-CODE=$(curl -sf --max-time 10 -o /dev/null -w "%{http_code}" \
+CODE=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" \
   -X DELETE "${ADMIN}/admin/v2/persistent/public/default/stock-quotes/partitions?force=true" \
-  -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null || echo "000")
+  -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null)
 [[ "$CODE" == "204" ]] && ok "Deleted parent topic metadata" || warn "Parent delete: HTTP ${CODE} (may already be gone)"
+# Also try non-partitioned form in case topic exists without partition metadata
+CODE=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" \
+  -X DELETE "${ADMIN}/admin/v2/persistent/public/default/stock-quotes?force=true" \
+  -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null)
+[[ "$CODE" == "204" ]] && ok "Deleted non-partitioned topic remnant" || true
+# Sweep orphaned partitions 0-9 — broker may retain partition data even when
+# metadata shows 0 partitions (e.g. after a previous multi-partition setup)
+for p in $(seq 0 9); do
+  CODE=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" \
+    -X DELETE "${ADMIN}/admin/v2/persistent/public/default/stock-quotes-partition-${p}?force=true" \
+    -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null)
+  [[ "$CODE" == "204" ]] && ok "Cleaned up orphaned partition-${p}" || true
+done
 
 # ── Step 5: Recreate with 1 partition ─────────────────────────────────────────
 echo ""
 echo -e "${BOLD}[5/6] Recreating stock-quotes with 1 partition...${NC}"
-sleep 2
-CODE=$(curl -sf --max-time 10 -o /tmp/_create.txt -w "%{http_code}" \
+# Wait until the broker reports the topic as fully gone (max 60s)
+echo -e "  Waiting for broker to confirm deletion..."
+GONE=false
+for i in $(seq 1 20); do
+  STATUS=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" \
+    "${ADMIN}/admin/v2/persistent/public/default/stock-quotes/partitions" \
+    -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null)
+  if [[ "$STATUS" == "404" || "$STATUS" == "000" ]]; then
+    ok "Topic confirmed gone (after ~$((i * 3))s)"
+    GONE=true
+    break
+  fi
+  sleep 3
+done
+[[ "$GONE" == "false" ]] && warn "Topic may still linger — attempting create anyway"
+
+CODE=$(curl -s --max-time 10 -o /tmp/_create.txt -w "%{http_code}" \
   -X PUT "${ADMIN}/admin/v2/persistent/public/default/stock-quotes/partitions" \
   -H "Authorization: Bearer $SUPER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '1' 2>/dev/null || echo "000")
+  -d '1' 2>/dev/null)
 if [[ "$CODE" == "204" ]]; then
   ok "Created stock-quotes with 1 partition"
 else
   fail "Failed to create topic (HTTP ${CODE}): $(cat /tmp/_create.txt 2>/dev/null)"
 fi
 
-# ── Step 6: Set kafkaEntryFormat on both parent and partition-0 ────────────────
+# ── Step 6: Set kafkaEntryFormat on parent (merge with existing properties) ────
 echo ""
 echo -e "${BOLD}[6/6] Setting kafkaEntryFormat=pulsar_non_batched...${NC}"
 sleep 1
-for target in "stock-quotes" "stock-quotes-partition-0"; do
-  CODE=$(curl -sf --max-time 10 -o /dev/null -w "%{http_code}" \
-    -X PUT "${ADMIN}/admin/v2/persistent/public/default/${target}/properties" \
-    -H "Authorization: Bearer $SUPER_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"kafkaEntryFormat":"pulsar_non_batched"}' 2>/dev/null || echo "000")
-  [[ "$CODE" == "204" ]] && ok "${target}: kafkaEntryFormat=pulsar_non_batched" || warn "${target}: HTTP ${CODE}"
-done
+# Read existing properties first, then merge — avoids overwriting kafkaTopicUUID
+# which KoP sets automatically and needs to keep for its internal bookkeeping
+CURRENT_PROPS=$(curl -s --max-time 10 \
+  "${ADMIN}/admin/v2/persistent/public/default/stock-quotes/properties" \
+  -H "Authorization: Bearer $SUPER_TOKEN" 2>/dev/null || echo "{}")
+MERGED=$(python3 - <<PYEOF
+import json, sys
+try:
+    props = json.loads("""${CURRENT_PROPS}""")
+except Exception:
+    props = {}
+props['kafkaEntryFormat'] = 'pulsar_non_batched'
+print(json.dumps(props))
+PYEOF
+)
+CODE=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" \
+  -X PUT "${ADMIN}/admin/v2/persistent/public/default/stock-quotes/properties" \
+  -H "Authorization: Bearer $SUPER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$MERGED" 2>/dev/null)
+[[ "$CODE" == "204" ]] && ok "stock-quotes: kafkaEntryFormat=pulsar_non_batched (merged)" || warn "stock-quotes: HTTP ${CODE}"
 
 # ── Verify ────────────────────────────────────────────────────────────────────
 echo ""
