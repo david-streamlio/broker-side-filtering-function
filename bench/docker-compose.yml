@@ -24,6 +24,9 @@ services:
       # Standalone deletes a topic with no subscriptions after ~60 s of inactivity, even with
       # retention set, so a loaded source topic would vanish between runs.
       PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled: "false"
+      # Enforce message TTLs every minute, not every 5: M5's demo pauses a consumer past a short
+      # private-topic TTL. Only topics with a TTL are affected (the SDKs' private topics).
+      PULSAR_PREFIX_messageExpiryCheckIntervalInMinutes: "1"
       # Keep loaded data: no size or time limit on the namespace's retention.
       PULSAR_PREFIX_defaultRetentionTimeInMinutes: "-1"
       PULSAR_PREFIX_defaultRetentionSizeInMB: "-1"

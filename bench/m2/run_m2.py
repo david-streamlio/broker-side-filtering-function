@@ -2,7 +2,8 @@
 """M2: where the windowed read wins and where it loses, by selectivity and window size.
 
 On one loaded topic, for each window (the last 1 min, 1 h or 24 h of the simulated day) and each
-selectivity (one entity, ~1% of events, everything), the same selector is read two ways:
+selectivity (one entity, ~1% of orders, every order; key selectors only), the same selector is read two
+ways:
 
   pulsar-scan     a Reader seeks to the window start and reads to its end; the client evaluates the
                   selector with the same engine the filter uses
@@ -31,7 +32,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "m1"))
 import run_m1 as m1  # noqa: E402
 
 WINDOWS = {"1min": 1, "1h": 60, "24h": 1440}  # minutes of the simulated day
-SELECTIVITY = {"entity": "__key__ = '8675309'", "1pct": "region = 'r07'", "all": "region LIKE 'r%'"}
+# Key selectors only: the talk's scope is a key filter over a time window. ~1%: orders whose id ends in 07.
+SELECTIVITY = {"entity": "__key__ = '8675309'", "1pct": "__key__ LIKE '%07'", "all": "__key__ LIKE '%'"}
 PAD_MS = 60_000  # generator clock vs broker clock; only used at the ends of the topic
 
 

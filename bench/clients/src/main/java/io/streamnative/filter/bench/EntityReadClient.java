@@ -24,8 +24,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.streamnative.filter.api.FilterControl;
 import io.streamnative.filter.api.TimeWindow;
 import io.streamnative.filter.api.WindowControl;
+import io.streamnative.filter.client.PrivateTopicPolicy;
 import io.streamnative.filter.client.Session;
 import io.streamnative.filter.client.kafka.FilterableKafkaConsumers;
+import io.streamnative.filter.common.WindowProtocol;
 import io.streamnative.filter.common.WindowStats;
 import io.streamnative.filter.common.selector.Selector;
 import org.apache.kafka.clients.consumer.Consumer;
@@ -51,9 +53,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -114,6 +118,16 @@ public final class EntityReadClient {
         /** Drain mode: what the broker sent the subscription (after any EntryFilter). */
         public Long subscriptionBytesOut;
         public Long subscriptionMsgsOut;
+        /** Window modes: distinct {@code __src_msgid__} values; fewer than records means duplicates. */
+        public Long distinctSourceIds;
+        /** Records whose {@code seq} went backwards for their key (duplicates by source id excluded). */
+        public long orderViolations;
+        /** {@code --pause-ms}: how long the client waited after subscribing before it started reading. */
+        public Long pauseMs;
+        /** pulsar-window: receives that returned nothing while the window wasn't complete yet. */
+        public long emptyReceivesBeforeComplete;
+        /** pulsar-window with {@code --give-up-ms}: the completion record never arrived in time. */
+        public boolean gaveUp;
     }
 
     private final Map<String, String> opts;
@@ -123,6 +137,8 @@ public final class EntityReadClient {
     /** A scan's client-side matcher when {@code --selector} is given; else scans match by key. */
     private final Selector clientSelector;
     private final Result result = new Result();
+    private final Map<String, Integer> lastSeqByKey = new HashMap<>();
+    private final Set<String> sourceIds = new HashSet<>();
     private long start;
 
     private EntityReadClient(Map<String, String> opts) {
@@ -257,16 +273,30 @@ public final class EntityReadClient {
                      .window(timeWindow())
                      .subscribe()) {
             result.setupMs = sinceStart();
+            pauseIfAsked();
             WindowControl window = (WindowControl) consumer;
+            // --give-up-ms: stop waiting for the completion record and report what arrived (M5's TTL demo,
+            // where the record itself can expire); otherwise --timeout-ms fails the read.
+            long giveUpAt = opts.containsKey("give-up-ms") ? start + Long.parseLong(opts.get("give-up-ms")) : Long.MAX_VALUE;
             while (!window.isComplete()) {
+                if (System.currentTimeMillis() > giveUpAt) {
+                    result.gaveUp = true;
+                    break;
+                }
                 checkTimeout();
                 Message<byte[]> m = consumer.receive(500, TimeUnit.MILLISECONDS);
-                if (m != null) {
-                    record(m.getKey(), m.getData().length, m.getProperty("seq"));
-                    consumer.acknowledge(m);
+                if (m == null) {
+                    if (!window.isComplete()) {
+                        result.emptyReceivesBeforeComplete++;
+                    }
+                    continue;
                 }
+                record(m.getKey(), m.getData().length, m.getProperty("seq"), null,
+                        m.getProperty(WindowProtocol.SRC_MSGID_PROPERTY));
+                consumer.acknowledge(m);
             }
             result.elapsedMs = sinceStart();
+            result.distinctSourceIds = (long) sourceIds.size();
             finishWindow(window, ((FilterControl) consumer).privateTopic());
         }
     }
@@ -325,13 +355,30 @@ public final class EntityReadClient {
     // ---------------------------------------------------------------- Helpers
 
     private void record(String recordKey, int payloadBytes, String seq) {
-        record(recordKey, payloadBytes, seq, null);
+        record(recordKey, payloadBytes, seq, null, null);
     }
 
-    /** {@code resolver} binds names for a client-side {@code --selector} in a scan; see {@link #resolve}. */
     private void record(String recordKey, int payloadBytes, String seq, Function<String, Object> resolver) {
+        record(recordKey, payloadBytes, seq, resolver, null);
+    }
+
+    /**
+     * {@code resolver} binds names for a client-side {@code --selector} in a scan (see {@link #resolve});
+     * {@code sourceId} is a windowed record's {@code __src_msgid__}, used to tell duplicates from
+     * out-of-order records.
+     */
+    private void record(String recordKey, int payloadBytes, String seq, Function<String, Object> resolver,
+                        String sourceId) {
         result.recordsReceived++;
         result.payloadBytesReceived += payloadBytes;
+        boolean firstTime = sourceId == null || sourceIds.add(sourceId);
+        if (firstTime && seq != null && recordKey != null) {
+            int s = Integer.parseInt(seq);
+            Integer previous = lastSeqByKey.put(recordKey, s);
+            if (previous != null && s < previous) {
+                result.orderViolations++;
+            }
+        }
         boolean match = result.mode.endsWith("window")
                 || (clientSelector != null && resolver != null ? clientSelector.matches(resolver) : key.equals(recordKey));
         if (match) {
@@ -342,6 +389,15 @@ public final class EntityReadClient {
             if (result.matchedSeqs.size() < MAX_SEQS) {
                 result.matchedSeqs.add(seq == null ? -1 : Integer.parseInt(seq));
             }
+        }
+    }
+
+    /** {@code --pause-ms}: wait after subscribing before reading, as a slow or paused consumer would. */
+    private void pauseIfAsked() throws InterruptedException {
+        long pause = Long.parseLong(opt("pause-ms", "0"));
+        if (pause > 0) {
+            result.pauseMs = pause;
+            Thread.sleep(pause);
         }
     }
 
@@ -373,14 +429,20 @@ public final class EntityReadClient {
         }
     }
 
+    /** {@code --private-ttl-seconds} replaces the windowed private topics' TTL (default 1 h). */
     private Session newSession() throws Exception {
-        return Session.builder()
+        var builder = Session.builder()
                 .serviceUrl(serviceUrl())
                 .adminUrl(adminUrl())
                 .controlTopic(opt("control-topic", "persistent://public/default/filter-requests"))
                 .privateTopicTenant(opt("private-tenant", "public"))
-                .privateTopicNamespace(opt("private-namespace", "default"))
-                .build();
+                .privateTopicNamespace(opt("private-namespace", "default"));
+        if (opts.containsKey("private-ttl-seconds")) {
+            builder = builder.windowedPrivateTopicPolicy(PrivateTopicPolicy.builder()
+                    .messageTtlSeconds(Integer.parseInt(opts.get("private-ttl-seconds")))
+                    .build());
+        }
+        return builder.build();
     }
 
     private Properties kafkaProps() {

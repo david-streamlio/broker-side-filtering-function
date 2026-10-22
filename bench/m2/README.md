@@ -1,9 +1,9 @@
 # M2: where the windowed read wins and where it loses
 
-On the M1 topic, the same selector is read by a client scan and by a windowed read, for each window
-size and selectivity:
+On the M1 topic, the same key selector is read by a client scan and by a windowed read, for each
+window size and selectivity (key selectors only: the talk's scope is a key filter over a time window):
 
-| | 1 entity `__key__ = '8675309'` | ~1% `region = 'r07'` | all `region LIKE 'r%'` |
+| | 1 entity `__key__ = '8675309'` | ~1% of orders `__key__ LIKE '%07'` | all `__key__ LIKE '%'` |
 |---|---|---|---|
 | last 1 min | | | |
 | last 1 h | | | |
