@@ -1,0 +1,51 @@
+# Bench broker for the windowed-read measurements: Apache Pulsar 4.2.1 standalone (native arm64
+# and amd64), functions worker on, the repo's built NARs mounted for the orchestrator.
+#
+#   mvn -DskipTests package            # builds the NARs mounted below
+#   docker compose -f bench/docker-compose.yml up -d
+#
+# Kafka measurements need KoP, which only runs on streamnative/sn-platform; see
+# docker-compose.kop.yml.
+services:
+  pulsar:
+    image: apachepulsar/pulsar:4.2.1
+    container_name: bench-pulsar
+    command:
+      - /bin/bash
+      - -c
+      - bin/apply-config-from-env.py conf/standalone.conf && bin/pulsar standalone
+    environment:
+      # Windows use the log's clock: the broker-entry timestamp.
+      PULSAR_PREFIX_brokerEntryMetadataInterceptors: "org.apache.pulsar.common.intercept.AppendBrokerTimestampMetadataInterceptor,org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor"
+      PULSAR_PREFIX_exposingBrokerEntryMetadataToClientEnabled: "true"
+      PULSAR_PREFIX_functionsWorkerEnabled: "true"
+      PULSAR_PREFIX_allowAutoTopicCreation: "true"
+      PULSAR_PREFIX_allowAutoTopicCreationType: "non-partitioned"
+      # Standalone deletes a topic with no subscriptions after ~60 s of inactivity, even with
+      # retention set, so a loaded source topic would vanish between runs.
+      PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled: "false"
+      # Keep loaded data: no size or time limit on the namespace's retention.
+      PULSAR_PREFIX_defaultRetentionTimeInMinutes: "-1"
+      PULSAR_PREFIX_defaultRetentionSizeInMB: "-1"
+      # The orchestrator spawns filters from a function:// package.
+      PULSAR_PREFIX_enablePackagesManagement: "true"
+      PULSAR_PREFIX_functionsWorkerEnablePackageManagement: "true"
+      # BookKeeper client counters in /metrics: the storage reads behind each window or scan.
+      PULSAR_PREFIX_bookkeeperClientExposeStatsToPrometheus: "true"
+      PULSAR_MEM: "-Xms1g -Xmx1g -XX:MaxDirectMemorySize=1g"
+    ports:
+      - "18080:8080"
+      - "16650:6650"
+    volumes:
+      - pulsar-data:/pulsar/data
+      - ../functions/selector-filter/target:/nars/filter:ro
+      - ../functions/orchestrator/target:/nars/orchestrator:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/admin/v2/clusters | grep -q standalone || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+volumes:
+  pulsar-data:

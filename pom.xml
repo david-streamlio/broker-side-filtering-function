@@ -41,6 +41,7 @@
         <module>sdk/java/kafka</module>
         <module>perf</module>
         <module>demo/multi-query-app</module>
+        <module>bench/clients</module>
     </modules>
 
     <properties>
