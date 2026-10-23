@@ -78,6 +78,13 @@ def test_hot_order_has_fixed_lifecycle_independent_of_seed():
     assert [t for _, t, _ in lifecycles[0]] == [name for name, _ in HOT_LIFECYCLE]
 
 
+def test_hot_steps_stops_the_hot_order_early():
+    events, stream = _events(hot_at_s=DAY * 0.5, hot_steps=4)
+    hot = [e for e in events if e.order_id == 8_675_309]
+    assert [e.event_type for e in hot] == [name for name, _ in HOT_LIFECYCLE[:4]]
+    assert stream.stats.hot_events == 4
+
+
 def test_lifecycle_types_and_terminal_events():
     events, _ = _events(50_000)
     by_order = defaultdict(list)

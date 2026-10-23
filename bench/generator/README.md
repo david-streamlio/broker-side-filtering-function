@@ -25,7 +25,8 @@ stream interleaves them like a real order system.
 | payload | value | ~`--payload-bytes` (default 1024) of JSON: items, totals, address, carrier |
 
 The **hot order** (`--hot-order`, default 8675309) has a fixed 7-event lifecycle, identical in
-every run regardless of seed. It's the order the demo asks about.
+every run regardless of seed. It's the order the demo asks about. `--hot-steps N` sends only its first
+N events; the stage demo (`demo/window`) sends the rest live.
 
 Same `--seed` and parameters give the same events in the same order. Only wall-clock send
 times differ.
