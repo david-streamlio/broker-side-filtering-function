@@ -21,7 +21,7 @@ is running.
 | When | What |
 |---|---|
 | 0:00 | `docker compose up` from clean: Apache Pulsar 4.2.1 standalone (`docker-compose.yml`) |
-| 0:05 | Pulsar is up; order traffic starts (`bench/generator`, ~1,400 events/s in the first minute, ~1 KB each) |
+| 0:05 | Pulsar is up; order traffic starts (`bench/generator`, ~1,400 events/s in the first minute, ~1 KB each); the observability UI starts at http://localhost:3200 |
 | 0:17 | Orchestrator deployed |
 | 0:25 | Order 8675309 is created, then paid, picked and packed over the next ~36 s |
 | 1:11 | **Act 1:** the client scans the last 60 s and keeps order 8675309 |
@@ -77,6 +77,22 @@ Act 3: order 8675309's history, then live
 
 The code under each act's title is abbreviated; the agent is `bench/clients`' `WindowDemo.java`.
 
+## Watching it on the server: the observability UI
+
+The stack includes the [broker-side filter observability UI](https://github.com/david-streamlio/broker-side-filter-observability)
+(0.5.0) at **http://localhost:3200**. Its **Windowed reads** panel shows every windowed read as it runs, from
+the server's side: the source topic, selector and window, the state (scanning, complete, truncated, live), and
+what the server scanned against what reached the client. During the scene:
+
+* **Act 2** appears as `COMPLETE`: about 89,000 events (91 MB) scanned, 4 events (4.1 KB) to the client,
+  99.996% filtered on the server, the same numbers the terminal prints.
+* **Act 3** shows `LIVE` while the warehouse ships the order, then `LIVE · CLOSED`.
+* **Each agent tool call** (below) appears as one more window.
+
+Put the browser next to the terminal. The panel keeps the last 50 windows in memory: restarting the UI
+clears them. The orchestrator is deployed as `window-demo-orchestrator`, the name the UI is configured
+with.
+
 ## Asking an agent (MCP)
 
 After the scene the broker keeps running, with order 8675309's whole lifecycle in the topic. The
@@ -112,6 +128,8 @@ What to expect:
 * Build (`make window-demo-build`) and run the scene once: that creates `demo/window/.venv`
   (needs network for `pip`) and leaves the `apachepulsar/pulsar:4.2.1` image pulled.
 * Stop the bench brokers (`bench-pulsar`, `bench-kop`, `bench-tiered-pulsar`).
+* Open http://localhost:3200 in a browser tab after a rehearsal run, so the image is pulled and the tab is
+  ready (the UI takes ~20 s to start).
 * For the agent part: run `claude` in `demo/window` once beforehand to approve the `entity-events`
   server, and keep that session open on stage.
 * Keep the Mac awake (`caffeinate -dims`): a sleep mid-scene stalls the traffic.

@@ -5,7 +5,9 @@
 #   mvn -DskipTests package
 #   docker compose -p window-demo -f demo/window/docker-compose.yml up -d --wait
 #
-# Same host ports as bench/docker-compose.yml: run one of them at a time.
+# Same host ports as bench/docker-compose.yml: run one of them at a time. The observability UI
+# (http://localhost:3200) shows every windowed read: what the server scanned against what reached the
+# client.
 services:
   pulsar:
     image: apachepulsar/pulsar:4.2.1
@@ -43,6 +45,31 @@ services:
       timeout: 5s
       retries: 90
       start_period: 10s
+
+  observability:
+    # github.com/david-streamlio/broker-side-filter-observability; 0.5.0 adds the Windowed reads panel.
+    image: ghcr.io/david-streamlio/broker-side-filter-observability:${OBSERVABILITY_IMAGE_TAG:-0.5.0}
+    pull_policy: missing
+    container_name: window-demo-observability
+    depends_on:
+      pulsar:
+        condition: service_healthy
+    ports:
+      - "3200:3200"
+    environment:
+      PULSAR_SERVICE_URL: "pulsar://pulsar:6650"
+      PULSAR_ADMIN_URL: "http://pulsar:8080"
+      STATE_TOPIC: "persistent://public/default/orchestrator-state"
+      ORCHESTRATOR_TENANT: "public"
+      ORCHESTRATOR_NAMESPACE: "default"
+      ORCHESTRATOR_FUNCTION: "window-demo-orchestrator"   # deployed under this name by window_demo.py
+      JAVA_OPTS: "-Xms128m -Xmx384m"   # the VM is shared with the broker and the function JVMs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:3200/actuator/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
 
 volumes:
   pulsar-data:
