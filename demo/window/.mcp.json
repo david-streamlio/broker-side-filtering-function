@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "entity-events": {
+      "type": "stdio",
+      "command": "bash",
+      "args": ["entity-events-mcp.sh"]
+    }
+  }
+}
