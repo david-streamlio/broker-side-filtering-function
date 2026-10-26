@@ -41,9 +41,10 @@ import java.util.Objects;
  * caught-up record and keeps forwarding live matches. Both are {@code null} when no position was
  * captured.
  *
- * <p>{@code truncatedByRetention} is set by the orchestrator when {@code fromMs} is earlier than the
- * earliest retained message, so the completion record can say the result doesn't cover the whole
- * requested window.
+ * <p>{@code truncatedByRetention} is set by the orchestrator when it can't vouch that the whole window was
+ * retained: {@code fromMs} is earlier than the earliest retained message, nothing is retained, or
+ * {@code fromMs} is before the topic's time-based retention horizon. The completion record then says the
+ * result may not cover the whole requested window.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)

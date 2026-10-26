@@ -182,7 +182,7 @@ public class OrchestratorFunction implements Function<byte[], Void> {
         }
         this.ownedAdmin = adminBuilder.build();
         this.spawner = new DefaultFilterFunctionSpawner(ownedAdmin, new ClientSubscriptionPositioner(pulsarClient));
-        this.windowPreparer = new ClientWindowPreparer(pulsarClient, ownedAdmin);
+        this.windowPreparer = new ClientWindowPreparer(pulsarClient, ownedAdmin, clock);
 
         if (config.idleGcEnabled()) {
             this.idleFilterSweeper = new IdleFilterSweeper(registry, ownedAdmin, config, clock,

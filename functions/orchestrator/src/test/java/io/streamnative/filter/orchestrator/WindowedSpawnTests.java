@@ -22,6 +22,9 @@ package io.streamnative.filter.orchestrator;
 import io.streamnative.filter.common.ClientType;
 import io.streamnative.filter.common.FilterRequest;
 import io.streamnative.filter.common.WindowSpec;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import org.apache.pulsar.client.admin.Functions;
@@ -41,6 +44,7 @@ import org.apache.pulsar.client.api.TopicMessageId;
 import org.apache.pulsar.client.impl.MessageIdImpl;
 import org.apache.pulsar.common.functions.FunctionConfig;
 import org.apache.pulsar.common.partition.PartitionedTopicMetadata;
+import org.apache.pulsar.common.policies.data.RetentionPolicies;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -68,6 +72,7 @@ class WindowedSpawnTests {
 
     private PulsarAdmin admin;
     private Topics topics;
+    private TopicPolicies topicPolicies;
     private PulsarClient client;
     private ConsumerBuilder<byte[]> consumerBuilder;
     private Consumer<byte[]> consumer;
@@ -79,6 +84,8 @@ class WindowedSpawnTests {
         admin = mock(PulsarAdmin.class);
         topics = mock(Topics.class);
         when(admin.topics()).thenReturn(topics);
+        topicPolicies = mock(TopicPolicies.class);   // retention unknown unless a test sets it
+        when(admin.topicPolicies()).thenReturn(topicPolicies);
         client = mock(PulsarClient.class);
         consumerBuilder = mock(ConsumerBuilder.class, RETURNS_SELF);
         consumer = mock(Consumer.class);
@@ -116,6 +123,14 @@ class WindowedSpawnTests {
         when(readerBuilder.create()).thenReturn(earliest, last);
     }
 
+    private ClientWindowPreparer preparerAt(long nowMs) {
+        return new ClientWindowPreparer(client, admin, Clock.fixed(Instant.ofEpochMilli(nowMs), ZoneOffset.UTC));
+    }
+
+    private void givenRetentionMinutes(int minutes) throws Exception {
+        when(topicPolicies.getRetention(TOPIC, true)).thenReturn(new RetentionPolicies(minutes, -1));
+    }
+
     // ---------- ClientWindowPreparer ----------
 
     @Test
@@ -146,8 +161,9 @@ class WindowedSpawnTests {
                 .isTruncatedByRetention()).isTrue();
     }
 
+    // Deleted and never written look the same, so an empty result can't claim nothing happened.
     @Test
-    void emptyTopicGivesAnEmptyWindowAndRemovesTheSubscription() throws Exception {
+    void emptyTopicGivesAnEmptyTruncatedWindowAndRemovesTheSubscription() throws Exception {
         givenTopic(0, true);
         when(consumer.getLastMessageIds()).thenReturn(List.of(TopicMessageId.create(TOPIC, new MessageIdImpl(3, -1, -1))));
 
@@ -155,9 +171,57 @@ class WindowedSpawnTests {
 
         assertThat(plan.empty()).isTrue();
         assertThat(plan.spec().hasEndPosition()).isFalse();
-        assertThat(plan.spec().isTruncatedByRetention()).isFalse();
+        assertThat(plan.spec().isTruncatedByRetention()).isTrue();
         verify(consumer).unsubscribe();
         verify(client, never()).newReader(any(Schema.class));
+    }
+
+    @Test
+    void emptyTopicIsNotTruncatedForAWindowThatStartsInTheFuture() throws Exception {
+        givenTopic(0, true);
+        when(consumer.getLastMessageIds()).thenReturn(List.of(TopicMessageId.create(TOPIC, new MessageIdImpl(3, -1, -1))));
+
+        assertThat(preparerAt(500L).prepare(TOPIC, SUB, 1_000L, 2_000L).spec().isTruncatedByRetention()).isFalse();
+    }
+
+    @Test
+    void windowStartingBeforeTheRetentionTimeIsTruncatedWhileOlderMessagesAreStillThere() throws Exception {
+        givenTopic(0, true);
+        givenLog(9, 188, 50_000L, 190_000L);
+        givenRetentionMinutes(1);   // horizon: 200_000 - 60_000 = 140_000
+
+        assertThat(preparerAt(200_000L).prepare(TOPIC, SUB, 100_000L, 180_000L).spec()
+                .isTruncatedByRetention()).isTrue();
+    }
+
+    @Test
+    void windowWithinTheRetentionTimeIsNotTruncated() throws Exception {
+        givenTopic(0, true);
+        givenLog(9, 188, 50_000L, 190_000L);
+        givenRetentionMinutes(1);
+
+        assertThat(preparerAt(200_000L).prepare(TOPIC, SUB, 150_000L, 180_000L).spec()
+                .isTruncatedByRetention()).isFalse();
+    }
+
+    @Test
+    void infiniteNoneOrUnknownRetentionSetsNoHorizon() {
+        for (Integer minutes : new Integer[] {-1, 0, null}) {
+            assertThat(ClientWindowPreparer.truncatedByRetention(100_000L, 50_000L, minutes, 200_000L))
+                    .as("retention %s", minutes).isFalse();
+        }
+    }
+
+    @Test
+    void unreadableRetentionLeavesTruncationToRetainedMessages() throws Exception {
+        givenTopic(0, true);
+        givenLog(9, 188, 50_000L, 190_000L);
+        when(topicPolicies.getRetention(TOPIC, true)).thenThrow(new PulsarAdminException("topic policies disabled"));
+
+        WindowPreparer.WindowPlan plan = preparerAt(200_000L).prepare(TOPIC, SUB, 100_000L, 180_000L);
+
+        assertThat(plan.spec().isTruncatedByRetention()).isFalse();
+        assertThat(plan.empty()).isFalse();
     }
 
     @Test

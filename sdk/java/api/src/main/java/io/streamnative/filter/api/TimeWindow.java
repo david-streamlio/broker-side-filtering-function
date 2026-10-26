@@ -41,8 +41,9 @@ import java.util.concurrent.TimeUnit;
  * are resolved on the client's clock when the consumer subscribes. "Now" for a bounded window is the
  * last message present when the server registers the query.
  *
- * <p>"From the beginning" reads everything retained. Unlike a window that starts before the oldest
- * retained message, it is never reported as truncated.
+ * <p>"From the beginning" reads everything retained, and is never reported as truncated. A window that
+ * starts at a time is, when the server can't vouch it was all retained (see
+ * {@code WindowStats.Status.TRUNCATED_BY_RETENTION}).
  */
 public final class TimeWindow {
 
