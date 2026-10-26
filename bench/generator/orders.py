@@ -293,14 +293,18 @@ def _zipf_cdf(n: int, s: float) -> List[float]:
 
 
 class PayloadBuilder:
-    """Builds a ~``target_bytes`` JSON payload for an event, deterministically from the seed."""
+    """Builds a ~``target_bytes`` JSON payload for an event, deterministically from the seed.
+
+    An order's details (items, total, address, carrier, tracking) come from its order id, so every
+    event of the order agrees on them, as a real order's would. ``_pad`` fills to the target size.
+    """
 
     def __init__(self, seed: int, target_bytes: int = 1024):
-        self._rng = random.Random(seed ^ 0x5EED)
+        self._seed = seed ^ 0x5EED
         self.target_bytes = target_bytes
 
     def build(self, event: OrderEvent) -> bytes:
-        rng = self._rng
+        rng = random.Random(self._seed * 1_000_003 + event.order_id)
         items = [{"sku": f"SKU-{rng.randrange(100_000):05d}", "qty": rng.randint(1, 4),
                   "unit_price": round(rng.uniform(2, 400), 2)}
                  for _ in range(rng.randint(1, 5))]
@@ -320,8 +324,8 @@ class PayloadBuilder:
             "tracking": f"TRK{rng.randrange(10 ** 12):012d}",
         }
         raw = json.dumps(body, separators=(",", ":"))
-        pad = self.target_bytes - len(raw) - len(',"notes":""')
+        pad = self.target_bytes - len(raw) - len(',"_pad":""')
         if pad > 0:
-            body["notes"] = "x" * pad
+            body["_pad"] = "x" * pad
             raw = json.dumps(body, separators=(",", ":"))
         return raw.encode()

@@ -124,8 +124,8 @@ $(WINDOW_DEMO_VENV):
 	$@/bin/pip install -q pulsar-client==3.5.0
 
 .PHONY: window-demo-build
-window-demo-build: ## Build what the time-windowed read demo mounts and runs (NARs + bench clients)
-	mvn -B -pl functions/selector-filter,functions/orchestrator,bench/clients -am package -DskipTests
+window-demo-build: ## Build what the time-windowed read demo mounts and runs (NARs, bench clients, MCP server)
+	mvn -B -pl functions/selector-filter,functions/orchestrator,bench/clients,mcp/entity-events -am package -DskipTests
 
 .PHONY: window-demo
 window-demo: $(WINDOW_DEMO_VENV) ## Time-windowed read stage demo from a clean broker (PAUSE=1 waits before each act)

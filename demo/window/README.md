@@ -5,7 +5,7 @@ From a clean broker it runs order traffic, then an agent asks for one order's re
 ways. A key filter over a time window, nothing else.
 
 ```bash
-make window-demo-build        # once: NARs + bench clients (mvn, ~2 min)
+make window-demo-build        # once: NARs, bench clients, MCP server (mvn, ~2 min)
 make window-demo              # the scene, straight through: ~1:40
 make window-demo PAUSE=1      # waits for Enter before each act, for presenting
 make window-demo-down         # stop the broker, delete its data
@@ -77,11 +77,43 @@ Act 3: order 8675309's history, then live
 
 The code under each act's title is abbreviated; the agent is `bench/clients`' `WindowDemo.java`.
 
+## Asking an agent (MCP)
+
+After the scene the broker keeps running, with order 8675309's whole lifecycle in the topic. The
+[entity events MCP server](../../mcp/entity-events/README.md) puts the windowed read behind one tool,
+`get_entity_events`, and this directory's `.mcp.json` registers it for Claude Code:
+
+```bash
+cd demo/window && claude      # approve the project's entity-events server once
+> What happened to order 8675309 in the last 15 minutes?
+```
+
+Claude calls `get_entity_events(key: "8675309", lookback: "15m")` and gets the order's 7 events (about
+9 KB, in ~3.5 s) instead of the topic. A headless rehearsal (~22 s):
+
+```bash
+claude -p "What happened to order 8675309 in the last 15 minutes?" \
+    --mcp-config .mcp.json --strict-mcp-config --allowedTools mcp__entity-events__get_entity_events
+```
+
+What to expect:
+
+* **`TRUNCATED_BY_RETENTION`, on purpose.** The topic is a few minutes old, so a 15-minute window starts
+  before its first event, and the server can't vouch for that part (retention and a newer topic look the
+  same). The tool says so, and Claude explains it, then reasons from the order's gap-free `seq` 0–6 that
+  nothing is missing for this order. That's the "an empty answer must say whether it's complete" point,
+  live.
+* **Compressed lifecycle.** The demo squeezes an order's day into about a minute, and Claude may remark
+  that steps seconds apart look like test data. Say so before it does.
+* An order ID with no events gives an empty list; `x' OR '1'='1` is rejected as an invalid key.
+
 ## Before going on stage
 
 * Build (`make window-demo-build`) and run the scene once: that creates `demo/window/.venv`
   (needs network for `pip`) and leaves the `apachepulsar/pulsar:4.2.1` image pulled.
 * Stop the bench brokers (`bench-pulsar`, `bench-kop`, `bench-tiered-pulsar`).
+* For the agent part: run `claude` in `demo/window` once beforehand to approve the `entity-events`
+  server, and keep that session open on stage.
 * Keep the Mac awake (`caffeinate -dims`): a sleep mid-scene stalls the traffic.
 * With `PAUSE=1`, a long pause grows the windows: each act reads from just after traffic started,
   so the order's history stays in it. More to scan only makes the point stronger.

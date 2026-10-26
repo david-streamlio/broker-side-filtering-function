@@ -84,7 +84,9 @@ history then live. It needs no ShadowTraffic license and runs in under 2 minutes
 make window-demo-build && make window-demo
 ```
 
-See **[demo/window/README.md](demo/window/README.md)**.
+See **[demo/window/README.md](demo/window/README.md)**. To put the windowed read behind an agent tool, the
+**[entity events MCP server](mcp/entity-events/README.md)** offers it as `get_entity_events` to Claude Code
+or any MCP client.
 
 ## How it works (selector-filter, per-instance)
 

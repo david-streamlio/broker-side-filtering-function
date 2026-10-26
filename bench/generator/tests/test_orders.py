@@ -144,6 +144,17 @@ def test_payload_is_json_near_target_size_and_deterministic():
         assert 1000 <= len(raw) <= 1100
 
 
+def test_an_orders_events_agree_on_its_details():
+    events, _ = _events(5_000)
+    builder = PayloadBuilder(42, 1024)
+    details = defaultdict(set)
+    for e in events:
+        body = json.loads(builder.build(e))
+        details[e.order_id].add(json.dumps([body[k] for k in ("items", "total", "ship_to", "carrier", "tracking")]))
+    assert all(len(d) == 1 for d in details.values())
+    assert len({next(iter(d)) for d in details.values()}) > 1  # different orders still differ
+
+
 def test_properties_are_strings():
     events, _ = _events(100)
     for e in events:
