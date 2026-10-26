@@ -32,6 +32,7 @@ import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.common.functions.FunctionConfig;
+import org.apache.pulsar.common.policies.data.RetentionPolicies;
 import org.apache.pulsar.common.policies.data.FunctionStatus;
 import org.apache.pulsar.packages.management.core.common.PackageMetadata;
 import org.junit.jupiter.api.AfterAll;
@@ -251,6 +252,59 @@ class WindowedSessionIT {
             assertThat(window.stats().getMatched()).isEqualTo(expected.size());
             assertThat(window.stats().getEndedBy()).isEqualTo(WindowStats.EndedBy.LOG_END);
             assertThat(window.stats().getStatus()).isEqualTo(WindowStats.Status.COMPLETE);
+        }
+    }
+
+    // Deleted and never written look the same, so a window over a topic that retains nothing can't report
+    // a complete, empty result: that would claim nothing happened.
+    @Test
+    void aWindowOverATopicThatRetainsNothingIsTruncated() throws Exception {
+        String topic = "persistent://public/default/window-it-retains-nothing";
+        admin.topics().createNonPartitionedTopic(topic);
+        try (Session session = newSession();
+             Consumer<byte[]> consumer = session.newConsumer()
+                     .topic(topic)
+                     .selector(SELECTOR)
+                     .window(TimeWindow.last(1, TimeUnit.HOURS))
+                     .subscribe()) {
+
+            WindowControl window = (WindowControl) consumer;
+            Drain d = drainUntil(consumer, window::isComplete, 60_000L);
+
+            assertThat(d.values).isEmpty();
+            assertThat(window.stats().getScanned()).isZero();
+            assertThat(window.stats().getStatus()).isEqualTo(WindowStats.Status.TRUNCATED_BY_RETENTION);
+        }
+    }
+
+    // Retention may delete messages older than its time limit, so a window that starts before that horizon
+    // is truncated even while its messages are still there. Retention is set in whole minutes, so this
+    // waits until the window's start is more than a minute old.
+    @Test
+    void aWindowThatStartsBeforeTheRetentionTimeIsTruncated() throws Exception {
+        Seeded s = seed("retention");
+        admin.topicPolicies().setRetention(s.topic, new RetentionPolicies(1, -1));
+        long deadline = System.currentTimeMillis() + 30_000L;
+        while (!new RetentionPolicies(1, -1).equals(admin.topicPolicies().getRetention(s.topic))) {
+            if (System.currentTimeMillis() > deadline) {
+                throw new AssertionError("retention policy not applied to " + s.topic);
+            }
+            Thread.sleep(500);
+        }
+        Thread.sleep(Math.max(0, s.t1 + 65_000L - System.currentTimeMillis()));
+
+        try (Session session = newSession();
+             Consumer<byte[]> consumer = session.newConsumer()
+                     .topic(s.topic)
+                     .selector(SELECTOR)
+                     .window(TimeWindow.between(Instant.ofEpochMilli(s.t1), Instant.ofEpochMilli(s.t2)))
+                     .subscribe()) {
+
+            WindowControl window = (WindowControl) consumer;
+            Drain d = drainUntil(consumer, window::isComplete, 120_000L);
+
+            assertThat(s.phaseB).containsAll(d.values);
+            assertThat(window.stats().getStatus()).isEqualTo(WindowStats.Status.TRUNCATED_BY_RETENTION);
         }
     }
 

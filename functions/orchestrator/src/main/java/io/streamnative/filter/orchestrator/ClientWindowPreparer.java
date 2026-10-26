@@ -21,6 +21,7 @@ package io.streamnative.filter.orchestrator;
 
 import io.streamnative.filter.common.LogPosition;
 import io.streamnative.filter.common.WindowSpec;
+import java.time.Clock;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.apache.pulsar.client.admin.PulsarAdmin;
@@ -35,6 +36,7 @@ import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.TopicMessageId;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.policies.data.RetentionPolicies;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,8 +48,8 @@ import org.slf4j.LoggerFactory;
  * NAR-only bean ({@code createSubscription} sends a {@code ResetCursorData}) then mix the two
  * classloaders and fail with OpenTelemetry {@code NoClassDefFoundError} / {@code LinkageError}. The
  * runtime client is what the orchestrator already uses for its producers and table views. The admin
- * client is kept for two calls whose responses are simple shapes: partitioned-topic metadata and the
- * namespace's topic list.
+ * client is kept for three calls whose responses are simple shapes: partitioned-topic metadata, the
+ * namespace's topic list and the topic's retention policy.
  *
  * <p>{@code Consumer.seek(timestamp)} resets the subscription on the broker exactly as
  * {@code resetCursor(timestamp)} does: by the log's clock (broker-entry timestamp when the broker
@@ -62,10 +64,16 @@ final class ClientWindowPreparer implements WindowPreparer {
 
     private final PulsarClient client;
     private final PulsarAdmin admin;
+    private final Clock clock;
 
     ClientWindowPreparer(PulsarClient client, PulsarAdmin admin) {
+        this(client, admin, Clock.systemUTC());
+    }
+
+    ClientWindowPreparer(PulsarClient client, PulsarAdmin admin, Clock clock) {
         this.client = client;
         this.admin = admin;
+        this.clock = clock;
     }
 
     @Override
@@ -87,8 +95,8 @@ final class ClientWindowPreparer implements WindowPreparer {
 
             Long earliestTime = hasMessages ? logTimeAt(log, MessageId.earliest, false) : null;
             Long lastTime = hasMessages ? logTimeAt(log, lastId, true) : null;
-            // fromMs = 0 asks for everything retained: getting it is not a truncation.
-            boolean truncated = fromMs > 0 && earliestTime != null && earliestTime > fromMs;
+            boolean truncated = truncatedByRetention(fromMs, earliestTime, retentionMinutes(sourceTopic),
+                    clock.millis());
             // The log's clock only moves forward (broker-entry time), so if the last message is
             // before the window start, nothing in the window exists.
             boolean empty = !hasMessages || lastTime == null || lastTime < fromMs;
@@ -105,6 +113,50 @@ final class ClientWindowPreparer implements WindowPreparer {
         } catch (Exception e) {
             consumer.closeAsync();
             throw e;
+        }
+    }
+
+    /**
+     * Whether the server can't vouch that the whole window was retained, so its result may be missing
+     * messages that retention deleted. True for a window that starts in the past ({@code 0 < fromMs < nowMs})
+     * when any of these hold:
+     * <ul>
+     *   <li>it starts before the oldest retained message. Retention and a topic that is newer than the
+     *       window look the same from here, so a window reaching back before a topic's first message counts;</li>
+     *   <li>nothing is retained ({@code earliestMs} {@code null}). Deleted and never written look the same,
+     *       and a complete, empty result would claim nothing happened;</li>
+     *   <li>it starts before the retention horizon, {@code nowMs} minus a time-based retention, even while
+     *       older messages are still there.</li>
+     * </ul>
+     * {@code fromMs = 0} asks for everything retained, which is never a truncation. A retention of
+     * {@code -1} (infinite), {@code 0} (none: messages last until acknowledged) or {@code null} (unknown)
+     * gives no horizon.
+     */
+    static boolean truncatedByRetention(long fromMs, Long earliestMs, Integer retentionMinutes, long nowMs) {
+        if (fromMs <= 0 || fromMs >= nowMs) {
+            return false;
+        }
+        if (earliestMs == null || earliestMs > fromMs) {
+            return true;
+        }
+        return retentionMinutes != null && retentionMinutes > 0
+                && fromMs < nowMs - TimeUnit.MINUTES.toMillis(retentionMinutes);
+    }
+
+    /**
+     * The retention time that applies to {@code topic} (its own policy, else its namespace's, else the
+     * broker default) in minutes, or {@code null} if it can't be read. Then only retained messages decide
+     * truncation.
+     */
+    private Integer retentionMinutes(String topic) {
+        try {
+            RetentionPolicies retention = admin.topicPolicies().getRetention(topic, true);
+            return retention == null ? null : retention.getRetentionTimeInMinutes();
+        } catch (PulsarAdminException | RuntimeException | LinkageError e) {
+            // LinkageError: the classloader mix described above, should this response ever trigger it.
+            LOG.warn("Couldn't read the retention of {}; checking truncation against retained messages only: {}",
+                    topic, e.toString());
+            return null;
         }
     }
 

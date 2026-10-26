@@ -618,8 +618,14 @@ try (Consumer<byte[]> consumer = session.newConsumer()
 - **Stats.** `stats()` returns the server's `WindowStats`: messages scanned and matched, bytes
   scanned, the first and last timestamps scanned, elapsed time, what ended the window
   (`WINDOW_END` = a record past `toMs`; `LOG_END` = the last record present at registration), and
-  `status`. A `status` of `TRUNCATED_BY_RETENTION` means the window starts before the oldest
-  retained message. `all()` and `allThenLive()` are never reported as truncated.
+  `status`. A `status` of `TRUNCATED_BY_RETENTION` means the server can't vouch that the whole
+  window was retained, so messages may be missing. The window starts before the oldest retained
+  message; or the topic retains nothing at all (then `scanned` is 0: deleted and never written look
+  the same); or the window starts before the topic's retention time (now minus a time-based retention
+  policy), even while older messages are still there. Retention and a topic that's newer than the
+  window also look the same, so a window reaching back before a topic's first message is reported
+  truncated too. A window that starts in the future, `all()` and `allThenLive()` are never reported
+  as truncated.
 - **Restrictions.** A window that reads history needs exactly one source topic
   (`IllegalStateException` otherwise). It runs on its own server-side filter, and its selector is
   fixed (`setSelector` throws `UnsupportedOperationException`). `liveOnly()` runs on the shared
