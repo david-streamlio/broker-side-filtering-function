@@ -52,6 +52,8 @@ from orders import HOT_CUSTOMER_ID, HOT_LIFECYCLE, HOT_REGION, OrderEvent, Paylo
 
 COMPOSE = ["docker", "compose", "-p", "window-demo", "-f", os.path.join(HERE, "docker-compose.yml")]
 CONTAINER = "window-demo-pulsar"
+ORCHESTRATOR = "window-demo-orchestrator"  # the observability UI is configured with this name
+UI_URL = "http://localhost:3200"
 ADMIN_URL = "http://localhost:18080"
 SERVICE_URL = "pulsar://localhost:16650"
 TOPIC = "persistent://public/default/orders"
@@ -113,8 +115,11 @@ class Demo:
         subprocess.run([*COMPOSE, "down", "-v", "--remove-orphans"], capture_output=True, check=True)
         self.t_up = time.time()
         self.note("docker compose up (clean)")
-        subprocess.run([*COMPOSE, "up", "-d", "--wait"], capture_output=True, check=True)
+        subprocess.run([*COMPOSE, "up", "-d", "--wait", "pulsar"], capture_output=True, check=True)
         self.note("Pulsar is up")
+        # The observability UI starts alongside; nothing waits for it.
+        subprocess.run([*COMPOSE, "up", "-d", "observability"], capture_output=True, check=True)
+        self.note(f"observability UI starting at {UI_URL} (Windowed reads panel)")
 
     def start_traffic(self):
         log = open(os.path.join(self.workdir, "generator.log"), "w")
@@ -130,7 +135,7 @@ class Demo:
     def deploy_orchestrator(self):
         broker = m1.Broker(types.SimpleNamespace(container=CONTAINER, admin_url=ADMIN_URL, service_url=SERVICE_URL))
         m1.log = lambda msg: None  # keep the stage output to the demo's own lines
-        m1.ensure_orchestrator(broker, redeploy=False)
+        m1.ensure_orchestrator(broker, redeploy=False, name=ORCHESTRATOR)
         self.note("orchestrator deployed")
 
     def wait_for_traffic(self):
@@ -222,7 +227,8 @@ class Demo:
             if self.generator and self.generator.poll() is None:
                 self.generator.send_signal(signal.SIGINT)
                 self.generator.wait(timeout=30)
-        print(f"{DIM}The broker is still running; stop it with `make window-demo-down`.{RESET}")
+        print(f"{DIM}The broker and the observability UI ({UI_URL}) are still running; "
+              f"stop them with `make window-demo-down`.{RESET}")
 
 
 class Warehouse(threading.Thread):

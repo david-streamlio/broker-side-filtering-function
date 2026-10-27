@@ -152,16 +152,20 @@ def cpu_by_role(before, after):
     return used
 
 
-def ensure_orchestrator(broker, redeploy):
-    """Reuse a running bench orchestrator, or upload the filter package and deploy a fresh one."""
-    running = [f for f in broker.functions() if f.startswith("bench-orchestrator")]
+def ensure_orchestrator(broker, redeploy, name=None):
+    """Reuse a running bench orchestrator, or upload the filter package and deploy a fresh one.
+
+    ``name`` fixes the orchestrator's function name (the default is ``bench-orchestrator-<timestamp>``),
+    for tools that need to know it in advance, such as the observability UI in the window demo.
+    """
+    running = [f for f in broker.functions() if (f == name if name else f.startswith("bench-orchestrator"))]
     if running and not redeploy:
         log(f"using orchestrator {running[0]}")
         return running[0]
     for name in running:
         broker.admin_cli("functions", "delete", "--tenant", "public", "--namespace", "default", "--name", name)
     run_id = time.strftime("%Y%m%d%H%M%S")
-    name, package = f"bench-orchestrator-{run_id}", f"function://public/default/selector-filter@bench-{run_id}"
+    name, package = name or f"bench-orchestrator-{run_id}", f"function://public/default/selector-filter@bench-{run_id}"
     broker.admin_cli("packages", "upload", package, "--path", FILTER_NAR, "--description", "bench filter")
     config = ORCH_CONFIG.format(name=name, requests=REQUESTS_TOPIC, package=package)
     subprocess.run(["docker", "exec", "-i", broker.container, "bash", "-c", "cat > /tmp/bench-orch.yaml"],
