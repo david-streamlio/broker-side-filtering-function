@@ -44,7 +44,11 @@ public final class WindowStats {
     /** Whether the result covers the whole requested window. */
     public enum Status {
         COMPLETE,
-        /** The window starts before the earliest retained message. */
+        /**
+         * The server can't vouch that the whole window was retained, so messages may be missing: the
+         * window starts before the earliest retained message, the topic retains nothing (then nothing was
+         * scanned), or the window starts before the topic's time-based retention horizon.
+         */
         TRUNCATED_BY_RETENTION
     }
 
