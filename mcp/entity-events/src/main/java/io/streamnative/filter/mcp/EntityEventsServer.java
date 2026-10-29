@@ -34,7 +34,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.function.Supplier;
 
 /**
- * An MCP server over stdio with one tool, {@code get_entity_events} (see {@link EntityEventsTool}).
+ * An MCP server over stdio with two tools: {@code get_entity_events} (see {@link EntityEventsTool}), one
+ * entity's events over a recent window, and {@code watch_entity_events} (see {@link EntityWatchTool}), its
+ * history and then its new events as they happen.
  *
  * <p>Configured by environment variables; the defaults point at the time-windowed read demo's broker
  * ({@code make window-demo}):
@@ -49,6 +51,9 @@ import java.util.function.Supplier;
  *   <tr><td>{@code MAX_LOOKBACK}</td><td>{@code 24h}</td></tr>
  *   <tr><td>{@code MAX_EVENTS}</td><td>{@code 200}</td></tr>
  *   <tr><td>{@code CALL_TIMEOUT}</td><td>{@code 60s}</td></tr>
+ *   <tr><td>{@code MAX_WATCHES}</td><td>{@code 5}: open watches at once (each holds a filter)</td></tr>
+ *   <tr><td>{@code WATCH_IDLE_TIMEOUT}</td><td>{@code 5m}: a watch with no call this long is closed</td></tr>
+ *   <tr><td>{@code WATCH_MAX_WAIT}</td><td>{@code 60s}: the longest one watch call waits</td></tr>
  * </table>
  *
  * <p>stdout carries the MCP protocol, so everything else logs to stderr.
@@ -68,19 +73,27 @@ public final class EntityEventsServer {
                 EntityQuery.parseDuration(env("CALL_TIMEOUT", "60s")));
         LazySession sessions = new LazySession();
         EntityEventsTool tool = new EntityEventsTool(sessions, topic, limits, Clock.systemUTC());
+        EntityWatchTool watch = new EntityWatchTool(sessions, topic, limits, new EntityWatchTool.WatchLimits(
+                Integer.parseInt(env("MAX_WATCHES", "5")),
+                EntityQuery.parseDuration(env("WATCH_IDLE_TIMEOUT", "5m")),
+                EntityQuery.parseDuration(env("WATCH_MAX_WAIT", "60s"))), Clock.systemUTC());
 
         McpSyncServer server = McpServer.sync(new StdioServerTransportProvider(new JacksonMcpJsonMapper(new ObjectMapper())))
                 .serverInfo("entity-events", "1.0.0")
                 .instructions("Use get_entity_events to see what happened to one entity (for example a customer or order ID) "
-                        + "recently. Check the result's status before saying an entity had no events.")
+                        + "recently. Use watch_entity_events instead when things may keep changing while you help: "
+                        + "it returns the history, then each call with its watch_id returns what happened since. "
+                        + "Check the result's status before saying an entity had no events.")
                 .capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
                 .toolCall(tool.definition(), (exchange, request) -> tool.call(request.arguments()))
+                .toolCall(watch.definition(), (exchange, request) -> watch.call(request.arguments()))
                 .build();
         LOG.info("entity-events MCP server: topic {}, max lookback {}, max events {}, timeout {}", topic,
                 EntityQuery.format(limits.maxLookback()), limits.maxEvents(), EntityQuery.format(limits.timeout()));
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.closeGracefully();
+            watch.close();
             sessions.close();
         }));
         new CountDownLatch(1).await(); // the stdio transport serves on its own threads until the process ends

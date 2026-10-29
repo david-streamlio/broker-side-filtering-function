@@ -145,6 +145,26 @@ claude -p "Customer 8675309 says checkout keeps failing. What happened in the la
     --mcp-config .mcp.json --strict-mcp-config --allowedTools mcp__entity-events__get_entity_events
 ```
 
+### Watching the customer while they retry (`watch_entity_events`, spike)
+
+The server's second tool keeps a live windowed read open: the first call (with `key`) returns the history and
+a `watch_id`, and each call with that `watch_id` waits for and returns only what happened since. Play a
+customer's story into the running broker, then ask an agent to watch:
+
+```bash
+make window-demo-checkout CHECKOUT_CUSTOMER=5550101 LEAD_S=15   # history now, the retry 15 s later
+claude -p "You are a first-line support agent. Customer 5550101 says checkout keeps failing. Find out what \
+happened in their last 15 minutes. Then keep watching their events while they retry, and tell me what \
+happened. Stop watching once their order is confirmed." \
+    --mcp-config .mcp.json --strict-mcp-config \
+    --allowedTools mcp__entity-events__watch_entity_events mcp__entity-events__get_entity_events
+```
+
+In a rehearsal (Oct 29), Claude Code opened the watch (21 history events, `COMPLETE`), called it 7 more
+times as the retry happened, stopped at `order_confirmed`, and explained the 3-D Secure timeouts: 47 s in
+all. The agent still makes each call (MCP tools answer when asked), so this is a long poll on a live
+subscription, not a push; nothing is re-scanned between calls.
+
 What to expect:
 
 * **`TRUNCATED_BY_RETENTION` on a clean broker.** The topic is a few minutes old, so a 15-minute window

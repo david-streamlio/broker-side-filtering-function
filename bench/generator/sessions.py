@@ -38,6 +38,7 @@ import heapq
 import json
 import random
 from dataclasses import dataclass
+from datetime import date
 from typing import Iterator, List, Optional, Tuple
 
 from orders import FIRST_ORDER_ID, StreamConfig, StreamStats, next_arrival
@@ -85,6 +86,9 @@ HOT_HISTORY: List[Tuple[str, float, dict]] = [
     ("chat_opened", 2, {"channel": "in_app_support"}),
 ]
 
+# The order the live retry places: dated today, so a rehearsal's order number matches its date.
+HOT_ORDER_ID = f"ORD-{date.today():%Y%m%d}-0042"
+
 # What happens once the agent is watching (sent by the stage demo, a few seconds apart): one more
 # timeout, the agent tells the customer to approve the prompt in their bank app, and it goes through.
 HOT_LIVE: List[Tuple[str, dict]] = [
@@ -96,8 +100,8 @@ HOT_LIVE: List[Tuple[str, dict]] = [
     ("3ds_challenge", {"challenge": "bank_app_push"}),
     ("3ds_approved", {"approved_in": "bank_app"}),
     ("payment_approved", {"amount": 184.97}),
-    ("order_placed", {"order_id": "ORD-20261105-0042"}),
-    ("order_confirmed", {"order_id": "ORD-20261105-0042"}),
+    ("order_placed", {"order_id": HOT_ORDER_ID}),
+    ("order_confirmed", {"order_id": HOT_ORDER_ID}),
 ]
 
 _PLATFORMS = ["web", "web", "ios", "android"]

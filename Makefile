@@ -150,6 +150,13 @@ day-measure: $(WINDOW_DEMO_VENV) ## M1 and M2 (Pulsar arms) on the day published
 	$(WINDOW_DEMO_VENV)/bin/python bench/m1/run_m1.py $(DAY_MEASURE_ARGS) --arms pulsar-scan,pulsar-window --window-from-manifest
 	$(WINDOW_DEMO_VENV)/bin/python bench/m2/run_m2.py $(DAY_MEASURE_ARGS)
 
+CHECKOUT_CUSTOMER ?= 8675309
+LEAD_S            ?= 30
+
+.PHONY: window-demo-checkout
+window-demo-checkout: $(WINDOW_DEMO_VENV) ## For the agent demo: play a customer's checkout story into the running broker (CHECKOUT_CUSTOMER=8675309 LEAD_S=30)
+	$(WINDOW_DEMO_VENV)/bin/python demo/window/window_demo.py --checkout $(CHECKOUT_CUSTOMER) --lead-s $(LEAD_S)
+
 .PHONY: window-demo-stop
 window-demo-stop: ## Stop the time-windowed read demo's broker, keeping its data for the next start
 	$(WINDOW_DEMO_COMPOSE) stop
