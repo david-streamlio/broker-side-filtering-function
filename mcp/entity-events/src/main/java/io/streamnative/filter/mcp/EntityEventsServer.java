@@ -71,7 +71,7 @@ public final class EntityEventsServer {
 
         McpSyncServer server = McpServer.sync(new StdioServerTransportProvider(new JacksonMcpJsonMapper(new ObjectMapper())))
                 .serverInfo("entity-events", "1.0.0")
-                .instructions("Use get_entity_events to see what happened to one entity (for example an order ID) "
+                .instructions("Use get_entity_events to see what happened to one entity (for example a customer or order ID) "
                         + "recently. Check the result's status before saying an entity had no events.")
                 .capabilities(McpSchema.ServerCapabilities.builder().tools(false).build())
                 .toolCall(tool.definition(), (exchange, request) -> tool.call(request.arguments()))

@@ -15,18 +15,27 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""The time-windowed read stage demo: "what happened to order 8675309?"
+"""The time-windowed read stage demo: "why can't customer 8675309 check out?"
 
-From a clean broker: start Pulsar, deploy the orchestrator, run order traffic, then ask for one
-order's recent events three ways (bench/clients' WindowDemo):
+A support agent triages a customer whose checkout keeps failing. From a clean broker: start
+Pulsar, deploy the orchestrator, run shopping-session traffic (bench/generator, --model
+sessions), then ask for one customer's recent session events three ways (bench/clients'
+WindowDemo):
 
-  Act 1  client-side scan: read the whole window, keep one order's events
-  Act 2  windowed filtered read: the server scans, the client gets only that order's events
-  Act 3  history, then live: the same read, open-ended; the warehouse ships the order and its
-         next events stream in
+  Act 1  client-side scan: read the whole window, keep one customer's events
+  Act 2  windowed filtered read: the server scans, the client gets only that customer's events:
+         three checkout attempts, each timing out on the card's 3-D Secure challenge
+  Act 3  history, then live: the same read, open-ended; the customer retries while the agent
+         watches, it times out again, the agent says to approve the prompt in the bank app, and
+         the order goes through
 
-    make window-demo              # runs straight through (under 3 minutes)
+    make window-demo              # runs straight through (under 3 minutes), from a clean broker
     make window-demo PAUSE=1      # waits for Enter before each act, for presenting
+    make window-demo KEEP=1       # on top of the broker's retained data instead of a clean broker
+
+The broker's data lives in the `pulsar-data` volume. `make window-demo-load` fills it with session
+traffic over a real time span (default 24h) and keeps it; `make window-demo-stop` stops the broker
+without deleting it, and `make window-demo-down` deletes it.
 """
 
 from __future__ import annotations
@@ -48,7 +57,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "bench", "m1"))
 sys.path.insert(0, os.path.join(REPO, "bench", "generator"))
 import run_m1 as m1  # noqa: E402
-from orders import HOT_CUSTOMER_ID, HOT_LIFECYCLE, HOT_REGION, OrderEvent, PayloadBuilder  # noqa: E402
+from sessions import HOT_LIVE, HOT_HISTORY, SessionPayloadBuilder, hot_event  # noqa: E402
 
 COMPOSE = ["docker", "compose", "-p", "window-demo", "-f", os.path.join(HERE, "docker-compose.yml")]
 CONTAINER = "window-demo-pulsar"
@@ -56,18 +65,20 @@ ORCHESTRATOR = "window-demo-orchestrator"  # the observability UI is configured 
 UI_URL = "http://localhost:3200"
 ADMIN_URL = "http://localhost:18080"
 SERVICE_URL = "pulsar://localhost:16650"
-TOPIC = "persistent://public/default/orders"
+TOPIC = "persistent://public/default/session_events"
 JAR = os.path.join(REPO, "bench", "clients", "target", "bench-clients.jar")
 NARS = [os.path.join(REPO, "functions", "selector-filter", "target", "selector-filter-function-1.0.0-SNAPSHOT.nar"),
         os.path.join(REPO, "functions", "orchestrator", "target", "selector-filter-orchestrator-1.0.0-SNAPSHOT.nar")]
 OTHER_BROKERS = ("bench-pulsar", "bench-kop", "bench-tiered-pulsar")
 
-ORDER = "8675309"
-RATE = 3000          # target order events/s; the generator ramps toward it as orders progress
-HOT_AT_S = 20        # the order is created this long after traffic starts...
-HOT_STEPS = 4        # ...and the generator sends created, paid, picked, packed
-WARMUP_S = 65        # traffic before Act 1: a 60 s window full of it
-LIVE_GAP_S = 3       # between the warehouse's live events in Act 3
+CUSTOMER = "8675309"
+RATE = 3000          # target session events/s; the generator ramps toward it as sessions start
+HOT_AT_S = 12        # the customer's session starts this long after traffic does; its history
+                     # (three failed checkouts, then the support chat) takes about 51 s
+WARMUP_S = 76        # traffic before Act 1: a 70 s window full of it, the whole history inside
+LIVE_GAP_S = 2.5     # between the customer's live events in Act 3
+AGENT_PAUSE_S = 4    # after the live timeout, while the agent tells the customer what to do
+UNTIL = HOT_LIVE[-1][0]  # Act 3 ends when the order is confirmed
 
 TTY = sys.stdout.isatty()
 BOLD, DIM, CYAN, RESET = ("\033[1m", "\033[2m", "\033[36m", "\033[0m") if TTY else ("", "", "", "")
@@ -112,9 +123,11 @@ class Demo:
                      f"{', '.join(busy)}")
 
     def start_broker(self):
-        subprocess.run([*COMPOSE, "down", "-v", "--remove-orphans"], capture_output=True, check=True)
+        if not self.args.keep_data:
+            subprocess.run([*COMPOSE, "down", "-v", "--remove-orphans"], capture_output=True, check=True)
         self.t_up = time.time()
-        self.note("docker compose up (clean)")
+        self.note("docker compose up (keeping the retained data)" if self.args.keep_data
+                  else "docker compose up (clean)")
         subprocess.run([*COMPOSE, "up", "-d", "--wait", "pulsar"], capture_output=True, check=True)
         self.note("Pulsar is up")
         # The observability UI starts alongside; nothing waits for it.
@@ -125,12 +138,12 @@ class Demo:
         log = open(os.path.join(self.workdir, "generator.log"), "w")
         self.generator = subprocess.Popen(
             [sys.executable, os.path.join(REPO, "bench", "generator", "orders_gen.py"),
-             "--mode", "realtime", "--rate", str(RATE), "--duration", "10m",
-             "--hot-order", ORDER, "--hot-at-realtime", f"{HOT_AT_S}s", "--hot-steps", str(HOT_STEPS),
+             "--model", "sessions", "--mode", "realtime", "--rate", str(RATE), "--duration", "10m",
+             "--hot-order", CUSTOMER, "--hot-at-realtime", f"{HOT_AT_S}s",
              "--topic", TOPIC, "--service-url", SERVICE_URL, "--out-dir", self.workdir],
             stdout=log, stderr=subprocess.STDOUT)
         self.t_traffic = time.time()
-        self.note(f"order traffic started, order {ORDER} among it")
+        self.note(f"shopping sessions started, customer {CUSTOMER} among them")
 
     def deploy_orchestrator(self):
         broker = m1.Broker(types.SimpleNamespace(container=CONTAINER, admin_url=ADMIN_URL, service_url=SERVICE_URL))
@@ -143,18 +156,18 @@ class Demo:
         while time.time() < until:
             if self.generator.poll() is not None:
                 sys.exit(f"the generator stopped; see {self.workdir}/generator.log")
-            line = f"orders flowing: {self.events_in_topic():,} events in the topic"
+            line = f"sessions flowing: {self.events_in_topic():,} events in the topic"
             if TTY:
                 print(f"\r{DIM}[{self.clock()}]{RESET} {line}", end="", flush=True)
             time.sleep(1)
         if TTY:
             print()
         events = self.events_in_topic()
-        self.note(f"orders flowing: {events:,} events in the topic, {events / (time.time() - self.t_traffic):,.0f}/s")
+        self.note(f"sessions flowing: {events:,} events in the topic, {events / (time.time() - self.t_traffic):,.0f}/s")
 
     def events_in_topic(self):
         try:
-            with urllib.request.urlopen(f"{ADMIN_URL}/admin/v2/persistent/public/default/orders/stats",
+            with urllib.request.urlopen(f"{ADMIN_URL}/admin/v2/{TOPIC.replace('://', '/')}/stats",
                                         timeout=5) as r:
                 return json.load(r).get("msgInCounter", 0)
         except Exception:
@@ -167,11 +180,11 @@ class Demo:
 
     # ---------------------------------------------------------------- acts
 
-    def run_agent(self, act, lookback, on_line=None):
+    def run_agent(self, act, lookback, on_line=None, until=None):
         java = os.path.join(os.environ["JAVA_HOME"], "bin", "java") if os.environ.get("JAVA_HOME") else "java"
         cmd = [java, "-cp", JAR, "io.streamnative.filter.bench.WindowDemo", act, f"--topic={TOPIC}",
-               f"--key={ORDER}", f"--lookback-s={lookback}", f"--service-url={SERVICE_URL}",
-               f"--admin-url={ADMIN_URL}"]
+               f"--key={CUSTOMER}", f"--lookback-s={lookback}", f"--service-url={SERVICE_URL}",
+               f"--admin-url={ADMIN_URL}"] + ([f"--until={until}"] if until else [])
         err = open(os.path.join(self.workdir, f"{act}.log"), "w")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True, bufsize=1)
         for line in proc.stdout:
@@ -183,33 +196,59 @@ class Demo:
 
     def act1_scan(self):
         n = self.lookback_s()
-        self.act(f"Act 1: the client scans the last {n} s and keeps order {ORDER}",
+        self.act(f"Act 1: the client scans the last {n} s and keeps customer {CUSTOMER}'s events",
                  [f"reader.seek(now - {n} s);",
                   "while (reader.hasMessageAvailable())",
-                  f"    if (reader.readNext().getKey().equals(\"{ORDER}\")) keep(m);"])
+                  f"    if (reader.readNext().getKey().equals(\"{CUSTOMER}\")) keep(m);"])
         self.run_agent("scan", n)
         return n
 
     def act2_window(self, n):
-        self.act(f"Act 2: the server scans the last {n} s; the client gets order {ORDER}",
-                 ["session.newConsumer().topic(\"orders\")",
-                  f"    .selector(\"__key__ = '{ORDER}'\")",
+        self.act(f"Act 2: the server scans the last {n} s; the client gets customer {CUSTOMER}'s session",
+                 ["session.newConsumer().topic(\"session_events\")",
+                  f"    .selector(\"__key__ = '{CUSTOMER}'\")",
                   f"    .window(TimeWindow.last(Duration.ofSeconds({n})))",
                   "    .subscribe();"])
         self.run_agent("window", n)
 
     def act3_follow(self):
         n = self.lookback_s()
-        self.act(f"Act 3: order {ORDER}'s history, then live",
-                 ["session.newConsumer().topic(\"orders\")",
-                  f"    .selector(\"__key__ = '{ORDER}'\")",
+        self.act(f"Act 3: customer {CUSTOMER}'s session, then live while they retry",
+                 ["session.newConsumer().topic(\"session_events\")",
+                  f"    .selector(\"__key__ = '{CUSTOMER}'\")",
                   f"    .window(TimeWindow.since(Duration.ofSeconds({n})))",
                   "    .subscribe();"])
-        warehouse = Warehouse(self)
-        self.run_agent("follow", n, on_line=lambda line: "caught up" in line and warehouse.start())
-        warehouse.join()
+        customer = Customer(self)
+        self.run_agent("follow", n, on_line=lambda line: "caught up" in line and customer.start(), until=UNTIL)
+        customer.join()
 
     # ---------------------------------------------------------------- run
+
+    def load(self):
+        """Fill the retained topic with background session traffic over a real time span."""
+        self.preflight()
+        self.args.keep_data = True
+        self.start_broker()
+        retained = self.retained_entries()
+        self.note(f"{retained:,} entries already retained in {TOPIC}" if retained else f"{TOPIC} is empty")
+        self.note(f"publishing session traffic for {self.args.load} at {self.args.rate:g} events/s "
+                  f"(Ctrl-C stops it; the data stays)")
+        subprocess.run(
+            [sys.executable, os.path.join(REPO, "bench", "generator", "orders_gen.py"),
+             "--model", "sessions", "--mode", "realtime", "--rate", str(self.args.rate),
+             "--duration", self.args.load, "--no-hot-order",
+             "--topic", TOPIC, "--service-url", SERVICE_URL, "--out-dir", self.workdir])
+        self.note(f"done: {self.retained_entries():,} entries retained; stop the broker with "
+                  f"`make window-demo-stop` (keeps the data)")
+
+    def retained_entries(self):
+        """Entries the topic holds, from internal stats (survives broker restarts, unlike msgInCounter)."""
+        try:
+            with urllib.request.urlopen(f"{ADMIN_URL}/admin/v2/{TOPIC.replace('://', '/')}/internalStats",
+                                        timeout=10) as r:
+                return json.load(r).get("numberOfEntries", 0)
+        except Exception:
+            return 0
 
     def run(self):
         self.preflight()
@@ -222,18 +261,20 @@ class Demo:
             self.act2_window(n)
             self.act3_follow()
             print()
-            self.note(f"{BOLD}done{RESET}: {self.clock()} after a clean docker compose up")
+            start = "docker compose up on the retained data" if self.args.keep_data else "a clean docker compose up"
+            self.note(f"{BOLD}done{RESET}: {self.clock()} after {start}")
         finally:
             if self.generator and self.generator.poll() is None:
                 self.generator.send_signal(signal.SIGINT)
                 self.generator.wait(timeout=30)
-        print(f"{DIM}The broker and the observability UI ({UI_URL}) are still running; "
-              f"stop them with `make window-demo-down`.{RESET}")
+        print(f"{DIM}The broker and the observability UI ({UI_URL}) are still running; stop them with "
+              f"`make window-demo-stop` (keeps the data) or `make window-demo-down` (deletes it).{RESET}")
 
 
-class Warehouse(threading.Thread):
-    """Ships the order once the agent is live: sends the rest of its lifecycle, a few seconds apart,
-    in the generator's format."""
+class Customer(threading.Thread):
+    """The customer retries once the agent is live: sends HOT_LIVE a few seconds apart, in the
+    generator's format. After the live timeout the agent tells them to approve the prompt in their
+    bank app, and the order goes through."""
 
     def __init__(self, demo):
         super().__init__(daemon=True)
@@ -254,14 +295,18 @@ class Warehouse(threading.Thread):
         client = pulsar.Client(SERVICE_URL, logger=pulsar.ConsoleLogger(pulsar.LoggerLevel.Error))
         try:
             producer = client.create_producer(TOPIC, batching_enabled=False)
-            payloads = PayloadBuilder(seed=42)
-            for seq in range(HOT_STEPS, len(HOT_LIFECYCLE)):
+            payloads = SessionPayloadBuilder(seed=42)
+            for i, (event_type, detail) in enumerate(HOT_LIVE):
                 time.sleep(LIVE_GAP_S)
-                event = OrderEvent(int(ORDER), HOT_CUSTOMER_ID, HOT_REGION, seq, HOT_LIFECYCLE[seq][0],
-                                   int(time.time() * 1000))
+                event = hot_event(int(CUSTOMER), len(HOT_HISTORY) + i, event_type, int(time.time() * 1000), detail)
                 producer.send(payloads.build(event), partition_key=event.key, properties=event.properties(),
                               event_timestamp=event.event_time_ms)
-                print(f"  {DIM}warehouse: {event.event_type}{RESET}", flush=True)
+                print(f"  {DIM}customer: {event.event_type}{RESET}", flush=True)
+                if event_type == "3ds_timeout":
+                    time.sleep(1)  # let the agent's view show the timeout first
+                    print(f"  {DIM}agent: \"Your bank is asking you to approve the payment. Open your bank app, "
+                          f"approve it, then try again.\"{RESET}", flush=True)
+                    time.sleep(AGENT_PAUSE_S - 1)
             producer.close()
         finally:
             client.close()
@@ -270,7 +315,14 @@ class Warehouse(threading.Thread):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pause", action="store_true", help="wait for Enter before each act")
-    Demo(p.parse_args()).run()
+    p.add_argument("--keep-data", action="store_true",
+                   help="run on top of the broker's retained data instead of starting clean")
+    p.add_argument("--load", metavar="DURATION",
+                   help="instead of the demo: publish background session traffic for DURATION (e.g. 24h), kept")
+    p.add_argument("--rate", type=float, default=50.0, help="--load: events/s (default 50)")
+    args = p.parse_args()
+    demo = Demo(args)
+    demo.load() if args.load else demo.run()
 
 
 if __name__ == "__main__":

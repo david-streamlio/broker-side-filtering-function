@@ -77,7 +77,7 @@ final class EntityEventsTool {
     /** The tool as the agent sees it. */
     McpSchema.Tool definition() {
         Map<String, Object> key = Map.of("type", "string",
-                "description", "The entity's key, for example an order ID. Letters, digits and . _ : - only.");
+                "description", "The entity's key, for example a customer or order ID. Letters, digits and . _ : - only.");
         Map<String, Object> lookback = Map.of("type", "string", "default", "1h",
                 "description", "How far back to read: for example \"15m\", \"6h\" or \"24h\". At most "
                         + EntityQuery.format(limits.maxLookback()) + ".");

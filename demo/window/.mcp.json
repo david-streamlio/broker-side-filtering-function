@@ -3,7 +3,12 @@
     "entity-events": {
       "type": "stdio",
       "command": "bash",
-      "args": ["entity-events-mcp.sh"]
+      "args": [
+        "entity-events-mcp.sh"
+      ],
+      "env": {
+        "ENTITY_TOPIC": "persistent://public/default/session_events"
+      }
     }
   }
 }

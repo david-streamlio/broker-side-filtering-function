@@ -128,8 +128,19 @@ window-demo-build: ## Build what the time-windowed read demo mounts and runs (NA
 	mvn -B -pl functions/selector-filter,functions/orchestrator,bench/clients,mcp/entity-events -am package -DskipTests
 
 .PHONY: window-demo
-window-demo: $(WINDOW_DEMO_VENV) ## Time-windowed read stage demo from a clean broker (PAUSE=1 waits before each act)
-	$(WINDOW_DEMO_VENV)/bin/python demo/window/window_demo.py $(if $(PAUSE),--pause)
+window-demo: $(WINDOW_DEMO_VENV) ## Time-windowed read stage demo from a clean broker (PAUSE=1 waits before each act; KEEP=1 keeps the retained data)
+	$(WINDOW_DEMO_VENV)/bin/python demo/window/window_demo.py $(if $(PAUSE),--pause) $(if $(KEEP),--keep-data)
+
+DURATION ?= 24h
+RATE     ?= 50
+
+.PHONY: window-demo-load
+window-demo-load: $(WINDOW_DEMO_VENV) ## Publish session traffic into the demo broker over a real span (DURATION=24h RATE=50), kept on its volume
+	$(WINDOW_DEMO_VENV)/bin/python demo/window/window_demo.py --load $(DURATION) --rate $(RATE)
+
+.PHONY: window-demo-stop
+window-demo-stop: ## Stop the time-windowed read demo's broker, keeping its data for the next start
+	$(WINDOW_DEMO_COMPOSE) stop
 
 .PHONY: window-demo-down
 window-demo-down: ## Stop the time-windowed read demo's broker and delete its data
