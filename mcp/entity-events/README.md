@@ -5,6 +5,13 @@ events over a recent time window, read with the Pulsar SDK's windowed consumer
 (`__key__ = '<key>'` over `TimeWindow.last(...)`). The window is filtered on the server, so only that
 entity's events reach the agent, along with the server's completeness status.
 
+A second tool, `watch_entity_events` (spike), keeps a live windowed read open (`TimeWindow.since(...)`):
+the first call (with `key`) returns the entity's history, its completeness status and a `watch_id`; each
+call with that `watch_id` waits up to `wait_s` (at most `WATCH_MAX_WAIT`, default 60s) and returns only the
+events that arrived since. `{watch_id, stop: true}` closes it; a watch with no call for
+`WATCH_IDLE_TIMEOUT` (default 5m) is closed, and at most `MAX_WATCHES` (default 5) are open, since each
+holds a filter on the server. The agent still makes each call, so it's a long poll on a live subscription.
+
 It speaks MCP over stdio (MCP Java SDK 2.0.1), so any MCP client can start it: Claude Code, the Claude
 desktop app, or your own agent.
 

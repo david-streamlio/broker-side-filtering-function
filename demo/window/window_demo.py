@@ -280,6 +280,12 @@ class Demo:
         except Exception:
             return 0
 
+    def checkout(self):
+        """Play a customer's checkout story into the running broker, for the agent demo: the history now,
+        then the live retry after a pause, so an agent watching the customer sees it happen."""
+        key = self.args.checkout
+        Customer(self, key=key, history=True, lead_s=self.args.lead_s).run()
+
     def run(self):
         self.preflight()
         try:
@@ -306,9 +312,12 @@ class Customer(threading.Thread):
     generator's format. After the live timeout the agent tells them to approve the prompt in their
     bank app, and the order goes through."""
 
-    def __init__(self, demo):
+    def __init__(self, demo, key=CUSTOMER, history=False, lead_s=0):
         super().__init__(daemon=True)
         self.demo = demo
+        self.key = key
+        self.history = history  # also send the history first (the agent demo; the scene's generator sends it)
+        self.lead_s = lead_s    # pause between the history and the live retry
         self.started = False
 
     def start(self):
@@ -326,9 +335,17 @@ class Customer(threading.Thread):
         try:
             producer = client.create_producer(TOPIC, batching_enabled=False)
             payloads = SessionPayloadBuilder(seed=42)
+            if self.history:
+                for i, (event_type, _, detail) in enumerate(HOT_HISTORY):
+                    event = hot_event(int(self.key), i, event_type, int(time.time() * 1000), detail)
+                    producer.send(payloads.build(event), partition_key=event.key, properties=event.properties(),
+                                  event_timestamp=event.event_time_ms)
+                print(f"  {DIM}customer {self.key}: history sent ({len(HOT_HISTORY)} events); "
+                      f"the retry starts in {self.lead_s} s{RESET}", flush=True)
+                time.sleep(self.lead_s)
             for i, (event_type, detail) in enumerate(HOT_LIVE):
                 time.sleep(LIVE_GAP_S)
-                event = hot_event(int(CUSTOMER), len(HOT_HISTORY) + i, event_type, int(time.time() * 1000), detail)
+                event = hot_event(int(self.key), len(HOT_HISTORY) + i, event_type, int(time.time() * 1000), detail)
                 producer.send(payloads.build(event), partition_key=event.key, properties=event.properties(),
                               event_timestamp=event.event_time_ms)
                 print(f"  {DIM}customer: {event.event_type}{RESET}", flush=True)
@@ -355,11 +372,15 @@ def main():
                    help="--load: order events over the span, the measurement scale (default 2,000,000)")
     p.add_argument("--order-scale", type=float, default=0.1,
                    help="--load: order lifecycle scale (default 0.1: an order takes up to ~4 h)")
+    p.add_argument("--checkout", metavar="CUSTOMER",
+                   help="instead of the demo: play CUSTOMER's checkout story into the running broker (history, "
+                        "then the live retry after --lead-s), for the agent demo")
+    p.add_argument("--lead-s", type=int, default=30, help="--checkout: seconds between the history and the retry")
     p.add_argument("--diurnal", type=float, default=0.6,
                    help="--load: daily traffic shape amplitude, 0..1 (default 0.6: 0.4x at night, 1.6x mid-afternoon)")
     args = p.parse_args()
     demo = Demo(args)
-    demo.load() if args.load else demo.run()
+    demo.load() if args.load else demo.checkout() if args.checkout else demo.run()
 
 
 if __name__ == "__main__":
