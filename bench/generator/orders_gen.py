@@ -29,6 +29,9 @@ Replaces ShadowTraffic. Two modes:
   minutes. ``--backfill`` sends the first N simulated minutes immediately so the stream starts
   in steady state. Use it for the stage demo and long-running loads.
 
+``--model sessions`` generates shopping-session events keyed by customer instead (``sessions.py``),
+for the checkout-troubleshooting stage demo; the hot entity is then a customer (``--hot-order``).
+
 Every run writes a manifest (parameters, counts by type/region/customer, the hot order's
 events with message IDs or offsets) and an expected-counts CSV (events per order) next to it.
 
@@ -58,6 +61,11 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from orders import (FIRST_ORDER_ID, HOT_LIFECYCLE, OrderEvent, OrderStream, PayloadBuilder,  # noqa: E402
                     StreamConfig)
+from sessions import HOT_HISTORY, SessionPayloadBuilder, SessionStream  # noqa: E402
+
+# Stream and payload classes per --model, and the length of each model's hot script.
+MODELS = {"orders": (OrderStream, PayloadBuilder, len(HOT_LIFECYCLE)),
+          "sessions": (SessionStream, SessionPayloadBuilder, len(HOT_HISTORY))}
 
 PROFILES = {"smoke": 100_000, "laptop-lite": 2_000_000, "laptop": 10_000_000}
 PROGRESS_EVERY_S = 5.0
@@ -249,7 +257,9 @@ def build_config(args, now_ms: int) -> StreamConfig:
     return StreamConfig(
         seed=args.seed, events=events, event_rate=args.rate,
         sim_start_ms=now_ms - int(args.backfill * 1000),
-        lifecycle_scale=args.lifecycle_scale if args.lifecycle_scale is not None else 0.01,
+        # Order lifecycles take days, so realtime compresses them; sessions already take seconds.
+        lifecycle_scale=args.lifecycle_scale if args.lifecycle_scale is not None
+        else (1.0 if args.model == "sessions" else 0.01),
         customers=args.customers, zipf_s=args.zipf, regions=args.regions,
         hot_order_id=args.hot_order, hot_at_s=args.backfill + args.hot_at_realtime, hot_steps=args.hot_steps,
         late_fraction=args.late_fraction)
@@ -258,8 +268,9 @@ def build_config(args, now_ms: int) -> StreamConfig:
 def run(args) -> dict:
     start_ms = int(time.time() * 1000)
     cfg = build_config(args, start_ms)
-    stream = OrderStream(cfg)
-    payloads = PayloadBuilder(args.seed, args.payload_bytes)
+    stream_cls, payload_cls, _ = MODELS[args.model]
+    stream = stream_cls(cfg)
+    payloads = payload_cls(args.seed, args.payload_bytes)
     acks = _Acks(args.hot_order)
     sink = SINKS[args.sink](args, acks)
 
@@ -361,6 +372,8 @@ def _git_sha():
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--mode", choices=["bulk", "realtime"], default="bulk")
+    p.add_argument("--model", choices=sorted(MODELS), default="orders",
+                   help="orders: order lifecycles keyed by order id; sessions: shopping sessions keyed by customer")
     p.add_argument("--profile", choices=sorted(PROFILES), default="smoke",
                    help="bulk event count: smoke=100k, laptop-lite=2M, laptop=10M")
     p.add_argument("--events", type=int, help="explicit event count (overrides --profile)")
@@ -394,12 +407,14 @@ def parse_args(argv=None):
     p.add_argument("--zipf", type=float, default=0.8, help="customer popularity skew (Zipf exponent)")
     p.add_argument("--regions", type=int, default=100)
     p.add_argument("--hot-order", type=int, default=8_675_309)
+    p.add_argument("--no-hot-order", action="store_true",
+                   help="background traffic only (e.g. a long load the stage demo later adds the hot entity to)")
     p.add_argument("--hot-at", type=float, default=0.8,
                    help="bulk: when the hot order starts, as a fraction of --sim-span")
     p.add_argument("--hot-at-realtime", type=parse_duration, default=parse_duration("60s"),
                    help="realtime: when the hot order starts, after the backfill")
-    p.add_argument("--hot-steps", type=int, choices=range(1, len(HOT_LIFECYCLE) + 1), metavar="N",
-                   help="emit only the hot order's first N lifecycle steps (the stage demo sends the rest)")
+    p.add_argument("--hot-steps", type=int, metavar="N",
+                   help="emit only the hot entity's first N scripted steps (the stage demo sends the rest)")
     p.add_argument("--late-fraction", type=float, default=0.0,
                    help="fraction of events emitted late (event_time kept, sent 30s-15m later)")
     p.add_argument("--payload-bytes", type=int, default=1024)
@@ -407,6 +422,11 @@ def parse_args(argv=None):
     p.add_argument("--out-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "out"))
     p.add_argument("--dump", type=int, default=0, help="null sink: print the first N events")
     args = p.parse_args(argv)
+    if args.no_hot_order:
+        args.hot_order = None
+    hot_len = MODELS[args.model][2]
+    if args.hot_steps is not None and not 1 <= args.hot_steps <= hot_len:
+        p.error(f"--hot-steps must be 1..{hot_len} for --model {args.model}")
     if args.mode == "realtime" and not args.rate:
         args.rate = 1_000.0
     return args
