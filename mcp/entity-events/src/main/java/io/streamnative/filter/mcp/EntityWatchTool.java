@@ -233,7 +233,8 @@ final class EntityWatchTool {
         return out;
     }
 
-    private void closeIdle() {
+    /** Close watches idle for longer than {@code WATCH_IDLE_TIMEOUT}; runs every 30 s (package-private for tests). */
+    void closeIdle() {
         long now = clock.millis();
         watches.values().removeIf(w -> {
             if (now - w.lastUsed > watchLimits.idleTimeout().toMillis()) {
