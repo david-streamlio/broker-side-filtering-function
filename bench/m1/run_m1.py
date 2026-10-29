@@ -211,6 +211,15 @@ def ensure_data(broker, args):
     return manifest
 
 
+MANIFEST_PAD_MS = 60_000  # generator clock vs broker clock, at the ends of the loaded span
+
+
+def manifest_window(manifest):
+    """Client options that read exactly the span the generator published (plus a minute's pad)."""
+    lo, hi = manifest["start_wall_ms"] - MANIFEST_PAD_MS, manifest["end_wall_ms"] + MANIFEST_PAD_MS
+    return [f"--window=between:{lo}:{hi}"]
+
+
 def wait_for_window_filters_gone(broker, timeout_s=180):
     """Idle GC deletes a windowed filter ~20 s after UNREGISTER; don't measure next to an old one."""
     deadline = time.time() + timeout_s
@@ -313,6 +322,7 @@ def environment(broker, args, manifest):
         "java": run([os.path.join(os.environ["JAVA_HOME"], "bin", "java") if os.environ.get("JAVA_HOME") else "java",
                      "-version"]).splitlines()[0],
         "profile": args.profile, "topic": args.topic, "key": args.key, "lookback_ms": args.lookback_ms,
+        "window_from_manifest": getattr(args, "window_from_manifest", False),
         "events": manifest["events_acked"], "seed": manifest["args"].get("seed"),
         "manifest": manifest["_path"], "generator_sha": manifest.get("git_sha"),
     }
@@ -334,6 +344,12 @@ def main():
     p.add_argument("--redeploy", action="store_true", help="deploy a fresh orchestrator and filter package")
     p.add_argument("--data-dir", default=os.path.join(REPO, "bench", "out", "data"))
     p.add_argument("--out-dir", default=os.path.join(REPO, "bench", "out", "m1"))
+    p.add_argument("--window-from-manifest", action="store_true",
+                   help="read exactly the loaded span (the manifest's start and end) instead of the last "
+                        "--lookback-ms: for a topic published over a real day and measured later")
+    p.add_argument("--orchestrator-name",
+                   help="use (or deploy) the orchestrator with this name, e.g. window-demo-orchestrator on the "
+                        "demo broker (default: bench-orchestrator-*)")
     args = p.parse_args()
     args.topic = args.topic or f"persistent://public/default/orders-m1-{args.profile}"
     arms = [a.strip() for a in args.arms.split(",")]
@@ -348,7 +364,8 @@ def main():
     broker = Broker(args)
     manifest = ensure_data(broker, args)
     if any(a.endswith("window") for a in arms):
-        ensure_orchestrator(broker, args.redeploy)
+        ensure_orchestrator(broker, args.redeploy, name=args.orchestrator_name)
+    window = manifest_window(manifest) if args.window_from_manifest else []
 
     runs = []
     for rep in range(1, args.reps + 1):
@@ -356,7 +373,7 @@ def main():
             if arm.endswith("window"):
                 wait_for_window_filters_gone(broker)
             before = broker.snapshot(args.topic)
-            client, conns = run_client(args, arm)
+            client, conns = run_client(args, arm, extra=window)
             after = broker.snapshot(args.topic)
             procs_before, procs_after = before.pop("procs"), after.pop("procs")
             delta = {k: (after[k] - before[k]) if after[k] is not None and before[k] is not None else None

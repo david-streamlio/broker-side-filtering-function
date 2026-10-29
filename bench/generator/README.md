@@ -31,6 +31,35 @@ N events; the stage demo (`demo/window`) sends the rest live.
 Same `--seed` and parameters give the same events in the same order. Only wall-clock send
 times differ.
 
+## Shopping sessions (`--model sessions`)
+
+For the checkout-troubleshooting stage demo (`demo/window`), `--model sessions` (`sessions.py`) generates
+shopping-session events keyed by **customer** instead: `session_start`, `search`, `product_view`,
+`add_to_cart`, `checkout_started`, `payment_submitted`, `3ds_challenge`, `3ds_approved` or `3ds_timeout`,
+`payment_approved`, `order_placed`, and so on, a few seconds apart. Properties: `customer_id` (also the
+key), `session_id`, `region`, `platform`, `event_type`, `seq`, `event_time`; the ~1 KB JSON value carries
+the cart and the step's detail (for example a decline reason). Lifecycle scale defaults to 1.0 in both
+modes: sessions already take seconds.
+
+The hot entity (`--hot-order`, default 8675309) is then a customer with a fixed 21-event history: three
+checkout attempts time out on 3-D Secure, then they open the support chat. `HOT_LIVE` is what the stage
+demo sends live afterwards. `--no-hot-order` sends background traffic only, for a long load the demo later
+adds the customer to:
+
+```bash
+orders_gen.py --model sessions --mode realtime --rate 50 --duration 24h --no-hot-order \
+    --topic persistent://public/default/session_events
+```
+
+## Daily traffic shape (`--diurnal`)
+
+`--diurnal A` (0..1) shapes arrivals over the day: the rate is multiplied by
+`1 + A·cos(2π(hour − peak)/24)`, local hour of day (`--diurnal-peak-hour`, default 14; `--utc-offset-h`,
+default this machine's). The multiplier averages 1 over a day, so a full day's total is unchanged; a
+shorter run's total depends on which hours it covers, so with `--diurnal` a realtime run ends on
+`--duration`, not on a count. Implemented by thinning the arrival process; without `--diurnal` the stream
+is identical to before.
+
 ## Two clocks, two modes
 
 A windowed read uses the **log's clock**: broker receive time (spike S1). A client can't
