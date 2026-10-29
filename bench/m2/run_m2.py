@@ -69,6 +69,7 @@ def main():
     p.add_argument("--service-url", default="pulsar://localhost:16650")
     p.add_argument("--kafka-bootstrap", default="localhost:19092")
     p.add_argument("--redeploy", action="store_true")
+    p.add_argument("--orchestrator-name", help="use (or deploy) the orchestrator with this name (see M1)")
     p.add_argument("--data-dir", default=os.path.join(m1.REPO, "bench", "out", "data"))
     p.add_argument("--out-dir", default=os.path.join(m1.REPO, "bench", "out", "m2"))
     args = p.parse_args()
@@ -76,7 +77,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     broker = m1.Broker(args)
     manifest = m1.ensure_data(broker, args)  # an existing topic needs its manifest in --data-dir
-    m1.ensure_orchestrator(broker, args.redeploy)
+    m1.ensure_orchestrator(broker, args.redeploy, name=args.orchestrator_name)
 
     runs = []
     for rep in range(1, args.reps + 1):

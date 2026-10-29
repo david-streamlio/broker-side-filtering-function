@@ -93,3 +93,26 @@ def test_generator_runs_the_sessions_model(tmp_path):
     manifest = orders_gen.run(args)
     assert manifest["events_sent"] == 5000
     assert "3ds_challenge" in manifest["by_event_type"]
+
+
+def test_diurnal_shape_keeps_the_daily_total_and_peaks_in_the_afternoon():
+    from orders import diurnal_multiplier
+    day = 86_400
+    flat = StreamConfig(events=None, event_rate=20, lifecycle_scale=1.0, hot_order_id=None)
+    shaped = StreamConfig(events=None, event_rate=20, lifecycle_scale=1.0, hot_order_id=None,
+                          diurnal_amplitude=0.6, diurnal_peak_hour=14.0, utc_offset_h=0.0)
+    # The multiplier averages 1 over a day, so the expected total is unchanged...
+    mean = sum(diurnal_multiplier(shaped, s) for s in range(0, day, 60)) / (day // 60)
+    assert abs(mean - 1) < 1e-6
+    # ...and sessions started per hour follow it: busier at 14:00 than at 02:00.
+    def starts_by_hour(cfg):
+        hours = [0] * 24
+        for t, e in SessionStream(cfg):
+            if t >= day:
+                break
+            if e.event_type == "session_start":
+                hours[int(t // 3600)] += 1
+        return hours
+    f, s = starts_by_hour(flat), starts_by_hour(shaped)
+    assert abs(sum(s) - sum(f)) / sum(f) < 0.05
+    assert s[14] > 2.5 * s[2]

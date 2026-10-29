@@ -40,6 +40,7 @@ from __future__ import annotations
 import bisect
 import heapq
 import json
+import math
 import random
 from array import array
 from dataclasses import dataclass, field
@@ -139,6 +140,29 @@ class StreamConfig:
     late_fraction: float = 0.0
     late_delay_s: Tuple[int, int] = (30, 900)
     hot_order_late: bool = False
+    # Daily traffic shape: arrivals follow 1 + amplitude * cos(2π (hour - peak) / 24), whose mean over a
+    # day is 1, so the day's total is unchanged. 0 = flat (the default, and the original stream).
+    diurnal_amplitude: float = 0.0
+    diurnal_peak_hour: float = 14.0
+    utc_offset_h: float = 0.0                # local time = UTC + this, for the hour of day
+
+
+def diurnal_multiplier(cfg: StreamConfig, t: float) -> float:
+    """The arrival-rate multiplier at simulated second ``t`` of the run, by local hour of day."""
+    hour = ((cfg.sim_start_ms / 1000 + t) / 3600 + cfg.utc_offset_h) % 24
+    return 1 + cfg.diurnal_amplitude * math.cos(2 * math.pi * (hour - cfg.diurnal_peak_hour) / 24)
+
+
+def next_arrival(rng: random.Random, t: float, rate: float, cfg: StreamConfig) -> float:
+    """The next arrival after ``t``: Poisson at ``rate``, or with the daily shape, a non-homogeneous
+    Poisson process by thinning (draw at the peak rate, keep each draw with probability m(t) / peak)."""
+    if cfg.diurnal_amplitude <= 0:
+        return t + rng.expovariate(rate)
+    peak = 1 + cfg.diurnal_amplitude
+    while True:
+        t += rng.expovariate(rate * peak)
+        if rng.random() * peak <= diurnal_multiplier(cfg, t):
+            return t
 
 
 @dataclass
@@ -183,7 +207,7 @@ class OrderStream:
             t, _, kind, item = heapq.heappop(self._heap)
             if kind == "arrival":
                 self._start_order(t, self._new_order())
-                self._push(t + self._rng.expovariate(self._arrival_rate), "arrival", None)
+                self._push(next_arrival(self._rng, t, self._arrival_rate, self.cfg), "arrival", None)
             elif kind == "hot":
                 order = _Order(self.cfg.hot_order_id, HOT_CUSTOMER_ID, HOT_REGION, hot=True)
                 self.stats.orders += 1

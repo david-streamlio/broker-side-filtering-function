@@ -9,7 +9,7 @@ filter over a time window, nothing else.
 make window-demo-build        # once: NARs, bench clients, MCP server (mvn, ~2 min)
 make window-demo              # the scene, straight through: ~2:05, from a clean broker
 make window-demo PAUSE=1      # waits for Enter before each act, for presenting
-make window-demo KEEP=1       # the scene on top of the broker's retained data
+make window-demo KEEP=1       # the scene on top of the broker's retained data (see make day-load)
 make window-demo-stop         # stop the broker, keep its data
 make window-demo-down         # stop the broker, delete its data
 ```
@@ -78,23 +78,36 @@ Act 3: customer 8675309's session, then live while they retry
 
 The code under each act's title is abbreviated; the agent is `bench/clients`' `WindowDemo.java`.
 
-## Retained data: a topic with real history
+## A real day of data: `make day-load` and `make day-measure`
 
 The broker's data lives in the compose project's `pulsar-data` volume, with retention unlimited
-(`defaultRetentionTimeInMinutes=-1`). Broker time is set on arrival, so a day of history has to really
-arrive over a day:
+(`defaultRetentionTimeInMinutes=-1`). Broker time is set on arrival, and windows run on it, so a day
+of history has to really arrive over a day:
 
 ```bash
-make window-demo-load                    # 24 h of session traffic at 50 events/s (~4.3M events), kept
-make window-demo-load DURATION=2h RATE=200
-make window-demo-stop                    # later: stop the broker; the volume keeps the data
-make window-demo KEEP=1                  # the scene on top of it (no wipe)
+make window-demo-down     # start from an empty broker
+make day-load             # 24 h, kept: session_events for this scene + orders-day for M1/M2
+make window-demo-stop     # optional: stop the broker; the volume keeps the day
+make day-measure          # M1 and M2 (Pulsar arms) on the day
+make window-demo KEEP=1   # the scene on top of it
 ```
 
-The load publishes background sessions only. The demo adds customer 8675309's story live, so it's always
-recent. On retained data, a window that starts after the topic's first event comes back `COMPLETE` instead
-of `TRUNCATED_BY_RETENTION`. Ctrl-C stops a load; what was sent stays. `make window-demo-down` deletes the
-volume.
+`day-load` publishes two topics at once, both with a daily traffic shape (`DIURNAL=0.6`: arrivals at
+0.4x around 02:00 and 1.6x around 14:00 local time, the same daily total):
+
+* `session_events`: background shopping sessions for this scene, `RATE=50` events/s on average.
+* `orders-day`: the measurement data set, `ORDER_EVENTS=2000000` order events over the day (about 23/s),
+  order lifecycles up to ~4 h (`--order-scale 0.1`), and hot order 8675309 at 85% of the day so its whole
+  lifecycle lands inside it. The manifest goes to `bench/out/data/`, where M1 and M2 look for it.
+
+`day-measure` runs M1 with `--window-from-manifest` (it reads exactly the published day, whenever it runs)
+and M2 (its windows are already set from the manifest), against this broker and its orchestrator. The
+Kafka arms need the KoP broker, which can't run alongside, so they stay on the bulk data set.
+
+`make day-load` keeps the Mac awake (`caffeinate`). Ctrl-C stops it; what was sent stays, and the
+manifests record what was published. Customer 8675309's checkout story isn't in the load: the scene adds
+it live, so it's always recent. On the retained day, the agent's windows come back `COMPLETE` instead of
+`TRUNCATED_BY_RETENTION`.
 
 ## Watching it on the server: the observability UI
 

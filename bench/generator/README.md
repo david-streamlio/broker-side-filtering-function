@@ -51,6 +51,15 @@ orders_gen.py --model sessions --mode realtime --rate 50 --duration 24h --no-hot
     --topic persistent://public/default/session_events
 ```
 
+## Daily traffic shape (`--diurnal`)
+
+`--diurnal A` (0..1) shapes arrivals over the day: the rate is multiplied by
+`1 + A·cos(2π(hour − peak)/24)`, local hour of day (`--diurnal-peak-hour`, default 14; `--utc-offset-h`,
+default this machine's). The multiplier averages 1 over a day, so a full day's total is unchanged; a
+shorter run's total depends on which hours it covers, so with `--diurnal` a realtime run ends on
+`--duration`, not on a count. Implemented by thinning the arrival process; without `--diurnal` the stream
+is identical to before.
+
 ## Two clocks, two modes
 
 A windowed read uses the **log's clock**: broker receive time (spike S1). A client can't

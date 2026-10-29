@@ -25,6 +25,10 @@ services:
       PULSAR_PREFIX_allowAutoTopicCreation: "true"
       PULSAR_PREFIX_allowAutoTopicCreationType: "non-partitioned"
       PULSAR_PREFIX_brokerDeleteInactiveTopicsEnabled: "false"
+      # As on the bench broker, so M1-M5 can run against a day loaded here (make day-load):
+      # BookKeeper read counts for M1, and a 1-minute TTL check for M5.
+      PULSAR_PREFIX_bookkeeperClientExposeStatsToPrometheus: "true"
+      PULSAR_PREFIX_messageExpiryCheckIntervalInMinutes: "1"
       # Keep the order history when no subscription holds it: the windows read it back.
       PULSAR_PREFIX_defaultRetentionTimeInMinutes: "-1"
       PULSAR_PREFIX_defaultRetentionSizeInMB: "-1"

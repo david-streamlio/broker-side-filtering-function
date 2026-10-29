@@ -33,9 +33,10 @@ WindowDemo):
     make window-demo PAUSE=1      # waits for Enter before each act, for presenting
     make window-demo KEEP=1       # on top of the broker's retained data instead of a clean broker
 
-The broker's data lives in the `pulsar-data` volume. `make window-demo-load` fills it with session
-traffic over a real time span (default 24h) and keeps it; `make window-demo-stop` stops the broker
-without deleting it, and `make window-demo-down` deletes it.
+The broker's data lives in the `pulsar-data` volume. `make day-load` publishes a real day into it
+(session traffic for this scene, and the order data set M1/M2 measure) and keeps it; `make day-measure`
+runs M1 and M2 on that day; `make window-demo-stop` stops the broker without deleting it, and
+`make window-demo-down` deletes it.
 """
 
 from __future__ import annotations
@@ -66,6 +67,9 @@ UI_URL = "http://localhost:3200"
 ADMIN_URL = "http://localhost:18080"
 SERVICE_URL = "pulsar://localhost:16650"
 TOPIC = "persistent://public/default/session_events"
+ORDER_TOPIC = "persistent://public/default/orders-day"         # the measurement data set, over a real day
+ORDER_DATA_DIR = os.path.join(REPO, "bench", "out", "data")     # where M1/M2 look for its manifest
+HOT_ORDER_AT = 0.85                                             # the hot order starts this far into the day
 JAR = os.path.join(REPO, "bench", "clients", "target", "bench-clients.jar")
 NARS = [os.path.join(REPO, "functions", "selector-filter", "target", "selector-filter-function-1.0.0-SNAPSHOT.nar"),
         os.path.join(REPO, "functions", "orchestrator", "target", "selector-filter-orchestrator-1.0.0-SNAPSHOT.nar")]
@@ -225,26 +229,52 @@ class Demo:
     # ---------------------------------------------------------------- run
 
     def load(self):
-        """Fill the retained topic with background session traffic over a real time span."""
+        """Publish a real day into the retained broker: session traffic for the demo (session_events) and
+        the order data set for the measurements (orders-day, manifest in bench/out/data), both with the
+        daily traffic shape. Broker time is set on arrival, so the day has to really happen."""
+        from orders_gen import parse_duration
         self.preflight()
         self.args.keep_data = True
         self.start_broker()
-        retained = self.retained_entries()
-        self.note(f"{retained:,} entries already retained in {TOPIC}" if retained else f"{TOPIC} is empty")
-        self.note(f"publishing session traffic for {self.args.load} at {self.args.rate:g} events/s "
-                  f"(Ctrl-C stops it; the data stays)")
-        subprocess.run(
-            [sys.executable, os.path.join(REPO, "bench", "generator", "orders_gen.py"),
-             "--model", "sessions", "--mode", "realtime", "--rate", str(self.args.rate),
-             "--duration", self.args.load, "--no-hot-order",
-             "--topic", TOPIC, "--service-url", SERVICE_URL, "--out-dir", self.workdir])
-        self.note(f"done: {self.retained_entries():,} entries retained; stop the broker with "
-                  f"`make window-demo-stop` (keeps the data)")
+        duration_s = parse_duration(self.args.load)
+        order_rate = self.args.order_events / duration_s
+        for topic in (TOPIC, ORDER_TOPIC):
+            n = self.retained_entries(topic)
+            self.note(f"{n:,} entries already retained in {topic}" if n else f"{topic} is empty")
+        self.note(f"publishing for {self.args.load}, daily shape {self.args.diurnal:g} (Ctrl-C stops; the data stays):")
+        self.note(f"  {TOPIC}: sessions at {self.args.rate:g} events/s on average")
+        self.note(f"  {ORDER_TOPIC}: {self.args.order_events:,} order events ({order_rate:.1f}/s on average), "
+                  f"order {CUSTOMER} at {HOT_ORDER_AT:.0%} of the span")
+        gen = os.path.join(REPO, "bench", "generator", "orders_gen.py")
+        common = ["--mode", "realtime", "--duration", self.args.load, "--diurnal", str(self.args.diurnal),
+                  "--service-url", SERVICE_URL]
+        procs = [
+            subprocess.Popen([sys.executable, gen, *common, "--model", "sessions", "--rate", str(self.args.rate),
+                              "--no-hot-order", "--topic", TOPIC, "--out-dir", self.workdir],
+                             stdout=subprocess.DEVNULL, stderr=open(os.path.join(self.workdir, "sessions.log"), "w")),
+            subprocess.Popen([sys.executable, gen, *common, "--model", "orders", "--rate", str(order_rate),
+                              "--lifecycle-scale", str(self.args.order_scale), "--hot-order", CUSTOMER,
+                              "--hot-at-realtime", f"{int(duration_s * HOT_ORDER_AT)}s",
+                              "--topic", ORDER_TOPIC, "--out-dir", ORDER_DATA_DIR],
+                             stdout=subprocess.DEVNULL, stderr=open(os.path.join(self.workdir, "orders.log"), "w")),
+        ]
+        try:
+            for p in procs:
+                p.wait()
+        except KeyboardInterrupt:
+            for p in procs:
+                p.send_signal(signal.SIGINT)
+            for p in procs:
+                p.wait(timeout=60)
+        self.note(f"done: {self.retained_entries(TOPIC):,} entries in {TOPIC}, "
+                  f"{self.retained_entries(ORDER_TOPIC):,} in {ORDER_TOPIC}; logs in {self.workdir}")
+        self.note("next: `make window-demo-stop` keeps it; `make day-measure` runs M1 and M2 on it; "
+                  "`make window-demo KEEP=1` runs the scene on it")
 
-    def retained_entries(self):
+    def retained_entries(self, topic=TOPIC):
         """Entries the topic holds, from internal stats (survives broker restarts, unlike msgInCounter)."""
         try:
-            with urllib.request.urlopen(f"{ADMIN_URL}/admin/v2/{TOPIC.replace('://', '/')}/internalStats",
+            with urllib.request.urlopen(f"{ADMIN_URL}/admin/v2/{topic.replace('://', '/')}/internalStats",
                                         timeout=10) as r:
                 return json.load(r).get("numberOfEntries", 0)
         except Exception:
@@ -318,8 +348,15 @@ def main():
     p.add_argument("--keep-data", action="store_true",
                    help="run on top of the broker's retained data instead of starting clean")
     p.add_argument("--load", metavar="DURATION",
-                   help="instead of the demo: publish background session traffic for DURATION (e.g. 24h), kept")
-    p.add_argument("--rate", type=float, default=50.0, help="--load: events/s (default 50)")
+                   help="instead of the demo: publish a real DURATION (e.g. 24h) of session traffic and the order "
+                        "data set into the retained broker")
+    p.add_argument("--rate", type=float, default=50.0, help="--load: session events/s on average (default 50)")
+    p.add_argument("--order-events", type=int, default=2_000_000,
+                   help="--load: order events over the span, the measurement scale (default 2,000,000)")
+    p.add_argument("--order-scale", type=float, default=0.1,
+                   help="--load: order lifecycle scale (default 0.1: an order takes up to ~4 h)")
+    p.add_argument("--diurnal", type=float, default=0.6,
+                   help="--load: daily traffic shape amplitude, 0..1 (default 0.6: 0.4x at night, 1.6x mid-afternoon)")
     args = p.parse_args()
     demo = Demo(args)
     demo.load() if args.load else demo.run()

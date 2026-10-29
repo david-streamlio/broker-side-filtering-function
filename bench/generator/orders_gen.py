@@ -250,9 +250,11 @@ def build_config(args, now_ms: int) -> StreamConfig:
             lifecycle_scale=args.lifecycle_scale if args.lifecycle_scale is not None else 1.0,
             customers=args.customers, zipf_s=args.zipf, regions=args.regions,
             hot_order_id=args.hot_order, hot_at_s=args.hot_at * span, hot_steps=args.hot_steps,
-            late_fraction=args.late_fraction)
+            late_fraction=args.late_fraction, **_diurnal(args))
     events = args.events
-    if events is None and args.duration is not None:
+    if events is None and args.duration is not None and not args.diurnal:
+        # Flat traffic: stop on the count. With the daily shape the count depends on which hours the
+        # run covers, so the duration alone ends it (and the hot entity's scheduled time is reached).
         events = int(args.rate * (args.duration + args.backfill))
     return StreamConfig(
         seed=args.seed, events=events, event_rate=args.rate,
@@ -262,7 +264,12 @@ def build_config(args, now_ms: int) -> StreamConfig:
         else (1.0 if args.model == "sessions" else 0.01),
         customers=args.customers, zipf_s=args.zipf, regions=args.regions,
         hot_order_id=args.hot_order, hot_at_s=args.backfill + args.hot_at_realtime, hot_steps=args.hot_steps,
-        late_fraction=args.late_fraction)
+        late_fraction=args.late_fraction, **_diurnal(args))
+
+
+def _diurnal(args) -> dict:
+    return {"diurnal_amplitude": args.diurnal, "diurnal_peak_hour": args.diurnal_peak_hour,
+            "utc_offset_h": args.utc_offset_h}
 
 
 def run(args) -> dict:
@@ -418,10 +425,18 @@ def parse_args(argv=None):
     p.add_argument("--late-fraction", type=float, default=0.0,
                    help="fraction of events emitted late (event_time kept, sent 30s-15m later)")
     p.add_argument("--payload-bytes", type=int, default=1024)
+    p.add_argument("--diurnal", type=float, default=0.0, metavar="AMPLITUDE",
+                   help="daily traffic shape, 0..1: rate x (1 + A cos(2π(hour - peak)/24)), same daily total "
+                        "(default 0, flat)")
+    p.add_argument("--diurnal-peak-hour", type=float, default=14.0, help="local hour of the daily peak (default 14)")
+    p.add_argument("--utc-offset-h", type=float, default=-time.altzone / 3600 if time.daylight else -time.timezone / 3600,
+                   help="local time = UTC + this, for --diurnal (default: this machine's)")
 
     p.add_argument("--out-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "out"))
     p.add_argument("--dump", type=int, default=0, help="null sink: print the first N events")
     args = p.parse_args(argv)
+    if not 0 <= args.diurnal <= 1:
+        p.error("--diurnal must be between 0 and 1")
     if args.no_hot_order:
         args.hot_order = None
     hot_len = MODELS[args.model][2]

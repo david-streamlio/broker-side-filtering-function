@@ -40,7 +40,7 @@ import random
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
-from orders import FIRST_ORDER_ID, StreamConfig, StreamStats
+from orders import FIRST_ORDER_ID, StreamConfig, StreamStats, next_arrival
 
 # Journeys a background session can take: (weight, steps). Each step is (event_type, detail).
 _BROWSE = [("session_start", {}), ("page_view", {"path": "/"}), ("search", {}), ("product_view", {}),
@@ -177,7 +177,7 @@ class SessionStream:
             t, _, kind, item = heapq.heappop(self._heap)
             if kind == "arrival":
                 self._push(t, "step", self._new_session())
-                self._push(t + self._rng.expovariate(self._arrival_rate), "arrival", None)
+                self._push(next_arrival(self._rng, t, self._arrival_rate, self.cfg), "arrival", None)
             elif kind == "hot":
                 steps = HOT_HISTORY[: self.cfg.hot_steps or len(HOT_HISTORY)]
                 session = _Session(self.cfg.hot_order_id, HOT_SESSION, HOT_REGION, HOT_PLATFORM, steps, hot=True)

@@ -131,12 +131,24 @@ window-demo-build: ## Build what the time-windowed read demo mounts and runs (NA
 window-demo: $(WINDOW_DEMO_VENV) ## Time-windowed read stage demo from a clean broker (PAUSE=1 waits before each act; KEEP=1 keeps the retained data)
 	$(WINDOW_DEMO_VENV)/bin/python demo/window/window_demo.py $(if $(PAUSE),--pause) $(if $(KEEP),--keep-data)
 
-DURATION ?= 24h
-RATE     ?= 50
+DURATION     ?= 24h
+RATE         ?= 50
+ORDER_EVENTS ?= 2000000
+DIURNAL      ?= 0.6
+CAFFEINATE   := $(shell command -v caffeinate >/dev/null 2>&1 && echo caffeinate -dims)
 
-.PHONY: window-demo-load
-window-demo-load: $(WINDOW_DEMO_VENV) ## Publish session traffic into the demo broker over a real span (DURATION=24h RATE=50), kept on its volume
-	$(WINDOW_DEMO_VENV)/bin/python demo/window/window_demo.py --load $(DURATION) --rate $(RATE)
+.PHONY: day-load
+day-load: $(WINDOW_DEMO_VENV) ## Publish a real day into the demo broker, kept: sessions for the scene + the order data set for M1/M2 (DURATION=24h RATE=50 ORDER_EVENTS=2000000 DIURNAL=0.6)
+	$(CAFFEINATE) $(WINDOW_DEMO_VENV)/bin/python demo/window/window_demo.py --load $(DURATION) --rate $(RATE) \
+		--order-events $(ORDER_EVENTS) --diurnal $(DIURNAL)
+
+DAY_MEASURE_ARGS := --topic persistent://public/default/orders-day --container window-demo-pulsar \
+	--orchestrator-name window-demo-orchestrator
+
+.PHONY: day-measure
+day-measure: $(WINDOW_DEMO_VENV) ## M1 and M2 (Pulsar arms) on the day published by day-load
+	$(WINDOW_DEMO_VENV)/bin/python bench/m1/run_m1.py $(DAY_MEASURE_ARGS) --arms pulsar-scan,pulsar-window --window-from-manifest
+	$(WINDOW_DEMO_VENV)/bin/python bench/m2/run_m2.py $(DAY_MEASURE_ARGS)
 
 .PHONY: window-demo-stop
 window-demo-stop: ## Stop the time-windowed read demo's broker, keeping its data for the next start
