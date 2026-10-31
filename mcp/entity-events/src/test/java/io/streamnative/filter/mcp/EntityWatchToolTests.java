@@ -65,7 +65,7 @@ class EntityWatchToolTests {
     private static final String TOPIC = "persistent://public/default/session_events";
     private static final String KEY = "8675309";
     private static final EntityQuery.Limits LIMITS =
-            new EntityQuery.Limits(Duration.ofHours(24), 200, Duration.ofSeconds(1));
+            new EntityQuery.Limits(Duration.ofHours(24), Duration.ofSeconds(1));
     private static final EntityWatchTool.WatchLimits WATCH_LIMITS =
             new EntityWatchTool.WatchLimits(2, Duration.ofMinutes(5), Duration.ofSeconds(30));
     private static final WindowStats COMPLETE =
@@ -170,7 +170,7 @@ class EntityWatchToolTests {
     }
 
     @Test
-    void theHistoryIsCappedAtMaxEventsButCountsEveryMatch() {
+    void theHistoryKeepsTheNewestMaxEventsButCountsEveryMatch() {
         log.add(event("1:0:-1", "a"));
         log.add(event("1:1:-1", "b"));
         log.add(event("1:2:-1", "c"));
@@ -178,6 +178,48 @@ class EntityWatchToolTests {
         Map<String, Object> r = body(tool.call(Map.of("key", KEY, "max_events", 2)));
 
         assertThat(r).containsEntry("matched", 3L).containsEntry("returned", 2).containsEntry("more_events", true);
+        assertThat(types(r)).containsExactly("b", "c");
+        assertThat((String) r.get("omitted")).startsWith("1 older matching events");
+    }
+
+    @Test
+    void theHistoryReturnsAThousandEventsByDefaultAndMoreWhenAsked() {
+        for (int i = 0; i < 1200; i++) {
+            log.add(event("1:" + i + ":-1", "e" + i));
+        }
+
+        Map<String, Object> r = body(tool.call(Map.of("key", KEY)));
+
+        assertThat(r).containsEntry("matched", 1200L).containsEntry("returned", 1000).containsEntry("more_events", true);
+        assertThat(types(r)).first().isEqualTo("e200");
+        assertThat(types(r)).last().isEqualTo("e1199");
+    }
+
+    @Test
+    void theHistoryReturnsMoreThanTheDefaultWhenTheAgentAsks() {
+        for (int i = 0; i < 1200; i++) {
+            log.add(event("1:" + i + ":-1", "e" + i));
+        }
+
+        Map<String, Object> r = body(tool.call(Map.of("key", KEY, "max_events", 2000)));
+
+        assertThat(r).containsEntry("matched", 1200L).containsEntry("returned", 1200).containsEntry("more_events", false);
+    }
+
+    @Test
+    void aLaterCallStopsAtMaxEventsAndTheRestComeBackNextCall() {
+        String id = open(Map.of("key", KEY));
+        log.add(event("1:1:-1", "a"));
+        log.add(event("1:2:-1", "b"));
+        log.add(event("1:3:-1", "c"));
+
+        Map<String, Object> first = body(tool.call(Map.of("watch_id", id, "wait_s", 5, "max_events", 2)));
+        Map<String, Object> second = body(tool.call(Map.of("watch_id", id, "wait_s", 1)));
+
+        assertThat(first).containsEntry("new_events", 2).containsEntry("more_events", true);
+        assertThat(types(first)).containsExactly("a", "b");
+        assertThat(second).containsEntry("new_events", 1).containsEntry("more_events", false);
+        assertThat(types(second)).containsExactly("c");
     }
 
     @Test

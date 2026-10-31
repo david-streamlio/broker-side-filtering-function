@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -35,7 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class EntityEventsToolTests {
 
     private static final EntityQuery.Limits LIMITS =
-            new EntityQuery.Limits(Duration.ofHours(24), 200, Duration.ofSeconds(60));
+            new EntityQuery.Limits(Duration.ofHours(24), Duration.ofSeconds(60));
     private static final String TOPIC = "persistent://public/default/orders";
 
     private static EntityEventsTool toolWithoutBroker() {
@@ -116,6 +117,7 @@ class EntityEventsToolTests {
         Map<String, Object> r = EntityEventsTool.result(q, TOPIC, stats(10, WindowStats.Status.COMPLETE), List.of(one), 3, 1);
 
         assertThat(r).containsEntry("matched", 3L).containsEntry("returned", 1).containsEntry("more_events", true);
+        assertThat((String) r.get("omitted")).startsWith("2 older matching events");
     }
 
     @Test
@@ -136,5 +138,15 @@ class EntityEventsToolTests {
         Map<String, Object> e = EntityEventsTool.event("k", Map.of(), "plain text".getBytes(StandardCharsets.UTF_8), 1_000);
 
         assertThat(e).containsEntry("value", "plain text").containsEntry("time", "1970-01-01T00:00:01Z");
+    }
+
+    @Test
+    void keepNewestKeepsTheNewestMaxEventsOldestFirst() {
+        List<Map<String, Object>> events = new ArrayList<>();
+        for (int i = 1; i <= 5; i++) {
+            EntityEventsTool.keepNewest(events, Map.of("n", i), 3);
+        }
+
+        assertThat(events).extracting(e -> e.get("n")).containsExactly(3, 4, 5);
     }
 }

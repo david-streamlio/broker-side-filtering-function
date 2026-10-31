@@ -103,7 +103,9 @@ final class EntityWatchTool {
                 "description", "First call: how much history to return before watching, for example \"15m\". At most "
                         + EntityQuery.format(limits.maxLookback()) + "."));
         props.put("max_events", Map.of("type", "integer", "minimum", 1, "default", EntityQuery.DEFAULT_MAX_EVENTS,
-                "description", "First call: the most history events to return. At most " + limits.maxEvents() + "."));
+                "description", "The most events to return, listed oldest first. First call: the newest history events "
+                        + "(older ones are counted, not returned). Later calls: new events (defaults to the first "
+                        + "call's value); any beyond it wait for your next call."));
         props.put("watch_id", Map.of("type", "string",
                 "description", "Later calls: the watch_id the first call returned, to get the events since your last call."));
         props.put("wait_s", Map.of("type", "integer", "minimum", 1, "default", 20,
@@ -207,14 +209,17 @@ final class EntityWatchTool {
             return Map.of("watch_id", id, "watching", false, "total_events", w.matched);
         }
         long waitMs = Math.min(parseWait(args.get("wait_s")), watchLimits.maxWait().toSeconds()) * 1000L;
+        Object rawMax = args.get("max_events");
+        int max = rawMax == null ? w.query.maxEvents() : EntityQuery.parseCount(rawMax);
         List<Map<String, Object>> events = new ArrayList<>();
         synchronized (w) {
             long until = clock.millis() + waitMs;
-            while (clock.millis() < until) {
+            // Stop reading at max: the rest stay unread (not acked) and come back on the next call.
+            while (clock.millis() < until && events.size() < max) {
                 Message<byte[]> m = w.consumer.receive((int) Math.max(1, Math.min(500, until - clock.millis())),
                         TimeUnit.MILLISECONDS);
                 if (m != null) {
-                    w.take(m, events, limits.maxEvents());
+                    w.take(m, events, max);
                     until = Math.min(until, clock.millis() + LINGER_MS); // gather the rest of a burst, then answer
                 }
             }
@@ -224,10 +229,13 @@ final class EntityWatchTool {
         out.put("watch_id", id);
         out.put("watching", true);
         out.put("key", w.query.key());
+        boolean more = events.size() >= max;
         out.put("new_events", events.size());
+        out.put("more_events", more);
         out.put("events", events);
         out.put("next", events.isEmpty()
                 ? "Nothing new in " + waitMs / 1000 + " s. Call again with the same watch_id to keep watching."
+                : more ? "More events are waiting: call again with the same watch_id to get them."
                 : "Call again with the same watch_id to keep watching.");
         LOG.info("{} {}: {} new events", NAME, id, events.size());
         return out;
@@ -291,14 +299,16 @@ final class EntityWatchTool {
             this.consumer = consumer;
         }
 
-        /** Add a message to events if it's new (delivery is at-least-once) and there's room; ack it. */
+        /**
+         * Add a message to events if it's new (delivery is at-least-once), keeping the newest {@code max};
+         * ack it. Later calls stop reading at max, so only the history ever lets older events go.
+         */
         void take(Message<byte[]> m, List<Map<String, Object>> events, int max) throws Exception {
             String sourceId = m.getProperty(WindowProtocol.SRC_MSGID_PROPERTY);
             if (seen.add(sourceId != null ? sourceId : m.getMessageId().toString())) {
                 matched++;
-                if (events.size() < max) {
-                    events.add(EntityEventsTool.event(m.getKey(), m.getProperties(), m.getData(), m.getPublishTime()));
-                }
+                EntityEventsTool.keepNewest(events,
+                        EntityEventsTool.event(m.getKey(), m.getProperties(), m.getData(), m.getPublishTime()), max);
             }
             consumer.acknowledge(m);
         }

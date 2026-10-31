@@ -28,9 +28,9 @@ cd demo/window && claude        # approve the project's entity-events server, th
 |---|---|
 | **In** | `key` (required): the entity's key, 1–128 letters, digits or `. _ : -` |
 | | `lookback`: how far back to read, e.g. `15m`, `6h` (default `1h`, at most `MAX_LOOKBACK`) |
-| | `max_events`: the most events to return, oldest first (default 50, lowered to `MAX_EVENTS`) |
+| | `max_events`: the most events to return (default 1000; the agent can ask for more or fewer, with no server cap). When more match, the tool keeps the newest and lists them oldest first |
 | **Out** | `status`: `COMPLETE` or `TRUNCATED_BY_RETENTION`, plus `status_meaning`, a sentence for the agent |
-| | `window` (`from`, `to`), `scanned` (events the server read), `matched`, `returned`, `more_events` |
+| | `window` (`from`, `to`), `scanned` (events the server read), `matched`, `returned`, `more_events`, and `omitted` (how many older events were left out) when there were more |
 | | `events`: `{ time, key, properties, value }`. `time` is when the log received the event, `properties` are the event's own (the filter's `__` ones are dropped), and `value` is parsed JSON when the value is JSON |
 
 Invalid arguments and failures come back as tool errors with a message the agent can act on (for
@@ -42,7 +42,8 @@ example "lookback 48h is longer than this server allows (24h)").
   close the quote it's placed in.
 - **The server picks the topic** (`ENTITY_TOPIC`); the agent can't name one.
 - **Bounded cost:** the lookback is capped and rejected beyond the cap, not shortened, because a shorter
-  window answers a different question. The result size is capped, and each call has a timeout.
+  window answers a different question. Each call has a timeout. The agent sets the result size with `max_events` (default 1000, no server
+  cap), and `matched` and `more_events` say whether there were more.
 - **Honest answers:** the tool answers at the window's completion record, never on an empty receive. It
   deduplicates on `__src_msgid__`, because delivery is at-least-once. And it passes the server's status
   through: `TRUNCATED_BY_RETENTION` means the window starts before the oldest event the log holds,
@@ -61,7 +62,6 @@ Environment variables, with defaults for the window demo's broker:
 | `PRIVATE_TOPIC_NAMESPACE` | `public/default` |
 | `ENTITY_TOPIC` | `persistent://public/default/orders` |
 | `MAX_LOOKBACK` | `24h` |
-| `MAX_EVENTS` | `200` |
 | `CALL_TIMEOUT` | `60s` |
 
 stdout carries the protocol; logs go to stderr. The SDK session opens on the first call, so the agent

@@ -49,7 +49,6 @@ import java.util.function.Supplier;
  *   <tr><td>{@code PRIVATE_TOPIC_NAMESPACE}</td><td>{@code public/default}</td></tr>
  *   <tr><td>{@code ENTITY_TOPIC}</td><td>{@code persistent://public/default/orders}: the only topic the tool reads</td></tr>
  *   <tr><td>{@code MAX_LOOKBACK}</td><td>{@code 24h}</td></tr>
- *   <tr><td>{@code MAX_EVENTS}</td><td>{@code 200}</td></tr>
  *   <tr><td>{@code CALL_TIMEOUT}</td><td>{@code 60s}</td></tr>
  *   <tr><td>{@code MAX_WATCHES}</td><td>{@code 5}: open watches at once (each holds a filter)</td></tr>
  *   <tr><td>{@code WATCH_IDLE_TIMEOUT}</td><td>{@code 5m}: a watch with no call this long is closed</td></tr>
@@ -69,7 +68,6 @@ public final class EntityEventsServer {
         String topic = env("ENTITY_TOPIC", "persistent://public/default/orders");
         EntityQuery.Limits limits = new EntityQuery.Limits(
                 EntityQuery.parseDuration(env("MAX_LOOKBACK", "24h")),
-                Integer.parseInt(env("MAX_EVENTS", "200")),
                 EntityQuery.parseDuration(env("CALL_TIMEOUT", "60s")));
         LazySession sessions = new LazySession();
         EntityEventsTool tool = new EntityEventsTool(sessions, topic, limits, Clock.systemUTC());
@@ -88,8 +86,8 @@ public final class EntityEventsServer {
                 .toolCall(tool.definition(), (exchange, request) -> tool.call(request.arguments()))
                 .toolCall(watch.definition(), (exchange, request) -> watch.call(request.arguments()))
                 .build();
-        LOG.info("entity-events MCP server: topic {}, max lookback {}, max events {}, timeout {}", topic,
-                EntityQuery.format(limits.maxLookback()), limits.maxEvents(), EntityQuery.format(limits.timeout()));
+        LOG.info("entity-events MCP server: topic {}, max lookback {}, timeout {}", topic,
+                EntityQuery.format(limits.maxLookback()), EntityQuery.format(limits.timeout()));
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.closeGracefully();
