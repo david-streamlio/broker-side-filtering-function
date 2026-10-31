@@ -155,14 +155,15 @@ customer's story into the running broker, then ask an agent to watch:
 make window-demo-checkout CHECKOUT_CUSTOMER=5550101 LEAD_S=15   # history now, the retry 15 s later
 claude -p "You are a first-line support agent. Customer 5550101 says checkout keeps failing. Find out what \
 happened in their last 15 minutes. Then keep watching their events while they retry, and tell me what \
-happened. Stop watching once their order is confirmed." \
+happened. Stop watching once you see their order_confirmed event." \
     --mcp-config .mcp.json --strict-mcp-config \
     --allowedTools mcp__entity-events__watch_entity_events mcp__entity-events__get_entity_events
 ```
 
-In a rehearsal (Oct 29), Claude Code opened the watch (21 history events, `COMPLETE`), called it 7 more
-times as the retry happened, stopped at `order_confirmed`, and explained the 3-D Secure timeouts: 47 s in
-all. The agent still makes each call (MCP tools answer when asked), so this is a long poll on a live
+In a rehearsal (Oct 31), Claude Code opened the watch (21 history events, `COMPLETE`), called it 10 more
+times as the retry happened, stopped at `order_confirmed`, and explained the 3-D Secure timeouts: 72 s in
+all. Name the event in the prompt: asked only to stop "once their order is confirmed", an earlier run
+stopped at `order_placed`, a few seconds before `order_confirmed` arrived. The agent still makes each call (MCP tools answer when asked), so this is a long poll on a live
 subscription, not a push; nothing is re-scanned between calls.
 
 What to expect:
