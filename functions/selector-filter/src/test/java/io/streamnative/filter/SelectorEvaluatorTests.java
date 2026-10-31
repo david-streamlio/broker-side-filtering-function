@@ -194,4 +194,22 @@ class SelectorEvaluatorTests {
         SelectorEvaluator e = SelectorEvaluator.compile("JMSPriority = 5");
         assertThat(e.matches(bindings("k", "t", Map.of()))).isFalse();
     }
+
+    @Test
+    void nonMatchingKeyAndBodyFieldSkipsValueDecode() {
+        // AND short-circuits: a key that rules the event out never triggers the value decode.
+        java.util.concurrent.atomic.AtomicInteger decodes = new java.util.concurrent.atomic.AtomicInteger();
+        ValueDecoder decoder = payload -> {
+            decodes.incrementAndGet();
+            return Map.of("detail", Map.of("reason", "timeout"));
+        };
+        SelectorEvaluator e = SelectorEvaluator.compile("__key__ = '8675309' AND detail.reason = 'timeout'");
+        byte[] payload = {1, 2, 3};
+
+        assertThat(e.matches(new MessageBindings("other", "t", Map.of(), payload), decoder)).isFalse();
+        assertThat(decodes.get()).isZero();
+
+        assertThat(e.matches(new MessageBindings("8675309", "t", Map.of(), payload), decoder)).isTrue();
+        assertThat(decodes.get()).isEqualTo(1);
+    }
 }

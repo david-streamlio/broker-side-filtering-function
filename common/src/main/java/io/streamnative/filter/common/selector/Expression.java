@@ -68,14 +68,26 @@ sealed interface Expression {
     record And(Expression left, Expression right) implements Expression {
         @Override
         public Object evaluate(Function<String, Object> resolver) {
-            return Bool.and(Bool.truth(left.evaluate(resolver)), Bool.truth(right.evaluate(resolver)));
+            // Short-circuit: FALSE AND x = FALSE for every x (incl. UNKNOWN), so the right side --
+            // and any name resolution it would trigger, e.g. a message-value decode -- is skipped.
+            Boolean l = Bool.truth(left.evaluate(resolver));
+            if (Boolean.FALSE.equals(l)) {
+                return Boolean.FALSE;
+            }
+            return Bool.and(l, Bool.truth(right.evaluate(resolver)));
         }
     }
 
     record Or(Expression left, Expression right) implements Expression {
         @Override
         public Object evaluate(Function<String, Object> resolver) {
-            return Bool.or(Bool.truth(left.evaluate(resolver)), Bool.truth(right.evaluate(resolver)));
+            // Short-circuit: TRUE OR x = TRUE for every x (incl. UNKNOWN). UNKNOWN still needs the
+            // right side (UNKNOWN OR TRUE = TRUE), as does FALSE.
+            Boolean l = Bool.truth(left.evaluate(resolver));
+            if (Boolean.TRUE.equals(l)) {
+                return Boolean.TRUE;
+            }
+            return Bool.or(l, Bool.truth(right.evaluate(resolver)));
         }
     }
 
