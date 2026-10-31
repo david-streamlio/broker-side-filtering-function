@@ -70,8 +70,10 @@ final class SelectorCheckTool {
     McpSchema.Tool definition() {
         Map<String, Object> properties = new LinkedHashMap<>();
         properties.put("selector", Map.of("type", "string", "maxLength", EntityQuery.MAX_SELECTOR_LENGTH,
-                "description", "The JMS selector to check, as you would pass it to get_entity_events or "
-                        + "watch_entity_events, for example event_type LIKE '3ds_%'."));
+                "description", "The selector to check (a SQL WHERE clause without the WHERE: the SQL-92 subset JMS "
+                        + "selectors use), as you would pass it to get_entity_events or watch_entity_events, for "
+                        + "example event_type LIKE '3ds_%'. Give selector or sql."));
+        properties.put("sql", EntityEventsTool.sqlProperty("Instead of selector: "));
         properties.put("topic", EntityEventsTool.topicProperty(topics, "Optional: "));
         properties.put("key", Map.of("type", "string",
                 "description", "Optional: the entity key you would pass with it; the check then covers both, "
@@ -79,12 +81,12 @@ final class SelectorCheckTool {
         Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "object");
         schema.put("properties", properties);
-        schema.put("required", List.of("selector"));
         schema.put("additionalProperties", false);
         return McpSchema.Tool.builder()
                 .name(NAME)
                 .title("Check a selector")
-                .description("Checks a selector without reading the topic or starting a filter: whether it's valid "
+                .description("Checks a selector, or a SQL query (sql) and the selector and arguments it translates "
+                        + "to, without reading the topic or starting a filter: whether it's valid "
                         + "(and how to fix it if not), the filter that would run, the fields it uses and what they "
                         + "cost, how many of the topic's most recent events it matches, and warnings about selectors "
                         + "that match everything, match nothing, or can't match as written. Call it before "
@@ -96,6 +98,9 @@ final class SelectorCheckTool {
     /** Handle one call. An invalid selector is a normal result ({@code valid: false}); a bad topic or key is an error. */
     McpSchema.CallToolResult call(Map<String, Object> args) {
         Map<String, Object> a = args == null ? Map.of() : args;
+        if (a.get("sql") != null) {
+            return callSql(a);
+        }
         String topic;
         String key;
         try {
@@ -106,9 +111,53 @@ final class SelectorCheckTool {
         }
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("topic", topic);
+        return checkAndReport(r, a.get("selector"), topic, key);
+    }
+
+    /**
+     * A call with {@code sql}: the translation (the selector, and the topic, lookback and max_events the SQL
+     * sets), then the usual check of that selector. A SQL that can't be translated is {@code valid: false}.
+     */
+    private McpSchema.CallToolResult callSql(Map<String, Object> a) {
+        String key;
+        SqlTranslation sql;
+        Map<String, Object> r = new LinkedHashMap<>();
+        try {
+            key = a.get("key") == null ? null : EntityQuery.parseKey(a.get("key"));
+            topics.resolve(a.get("topic"));
+        } catch (IllegalArgumentException e) {
+            return error(e.getMessage());
+        }
+        String topic;
+        try {
+            sql = EntityQuery.translate(a, topics, fields);
+            topic = topics.resolve(EntityQuery.withSql(a, sql, topics).get("topic"));
+        } catch (IllegalArgumentException e) {
+            r.put("topic", topics.resolve(a.get("topic")));
+            r.put("sql", a.get("sql"));
+            r.put("valid", false);
+            r.put("error", e.getMessage());
+            LOG.info("{} sql: invalid: {}", NAME, e.getMessage());
+            return ok(r);
+        } catch (IllegalStateException e) {
+            return error(e.getMessage());
+        }
+        r.put("topic", topic);
+        r.put("sql", sql.sql());
+        r.put("translation", sql.describe());
+        if (sql.selector() == null) {
+            r.put("valid", false);
+            r.put("error", "the SQL has no condition besides the time window, so there is no selector to check; "
+                    + "add a WHERE condition, for example event_type = 'login'");
+            return ok(r);
+        }
+        return checkAndReport(r, sql.selector(), topic, key);
+    }
+
+    private McpSchema.CallToolResult checkAndReport(Map<String, Object> r, Object selector, String topic, String key) {
         EntityQuery.CheckedSelector checked;
         try {
-            checked = EntityQuery.checkSelector(a.get("selector"), topic, fields);
+            checked = EntityQuery.checkSelector(selector, topic, fields);
         } catch (IllegalArgumentException e) {
             r.put("valid", false);
             r.put("error", e.getMessage());

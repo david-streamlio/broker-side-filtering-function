@@ -124,6 +124,7 @@ final class EntityWatchTool {
                 "description", "First call: the entity's key, for example a customer or order ID. Letters, digits "
                         + "and . _ : - only. Give a key, a selector, or both."));
         props.put("selector", EntityEventsTool.selectorProperty("First call, optional: "));
+        props.put("sql", EntityEventsTool.sqlProperty("First call, optional: "));
         props.put("lookback", Map.of("type", "string", "default", "1h",
                 "description", "First call: how much history to return before watching, for example \"15m\". At most "
                         + EntityQuery.format(limits.maxLookback()) + "."));
@@ -147,10 +148,11 @@ final class EntityWatchTool {
                 .title("Watch entity events")
                 .description("Watches the events matching a key, a selector, or both, in an event log topic ("
                         + String.join(", ", topics.all()) + ") while you help: the first call (with key and/or "
-                        + "selector) returns the history and a watch_id; each later call (with watch_id) waits for "
-                        + "and returns only the matching events that happened since your last call. Topic, key "
-                        + "and selector apply to the first call only. Call get_schema first to learn the fields a "
-                        + "selector can use. Use it when the "
+                        + "selector, a SQL WHERE clause; or sql, a whole SELECT … WHERE … query) returns the "
+                        + "history and a watch_id; each later call (with watch_id) waits for and returns only the "
+                        + "matching events that happened since your last call. Topic, key, selector and sql apply to "
+                        + "the first call only; a SQL column list trims every call's events. Call get_schema first "
+                        + "to learn the fields a selector can use. Use it when the "
                         + "situation may change while you work, for example a customer retrying a checkout. Call "
                         + "again with watch_id after each answer to keep watching; stop when done. Times are when "
                         + "the log received each event. If status is TRUNCATED_BY_RETENTION, history may be "
@@ -337,8 +339,8 @@ final class EntityWatchTool {
             String sourceId = m.getProperty(WindowProtocol.SRC_MSGID_PROPERTY);
             if (seen.add(sourceId != null ? sourceId : m.getMessageId().toString())) {
                 matched++;
-                EntityEventsTool.keepNewest(events,
-                        EntityEventsTool.event(m.getKey(), m.getProperties(), m.getData(), m.getPublishTime()), max);
+                EntityEventsTool.keepNewest(events, query.project(
+                        EntityEventsTool.event(m.getKey(), m.getProperties(), m.getData(), m.getPublishTime())), max);
             }
             consumer.acknowledge(m);
         }

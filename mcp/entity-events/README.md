@@ -3,7 +3,9 @@
 An [MCP](https://modelcontextprotocol.io) server that lets an agent read recent events from Pulsar topics,
 filtered on the broker. Its tools follow the shape of Confluent's Real-Time Context Engine
 (`listTopics`, `getMetadata`, `queryData`): the agent finds the topics it may read, asks which fields it
-can filter on, then reads events with a JMS selector built from those fields.
+can filter on, then reads events with a JMS selector built from those fields. A selector is a SQL `WHERE`
+clause (the SQL-92 subset JMS defines); an agent that would rather write a whole RTCE-style query
+(`SELECT … WHERE … LIMIT`) passes it as `sql` instead, and the server translates it (see [SQL](#sql)).
 
 | Tool | What it does |
 |---|---|
@@ -59,12 +61,13 @@ parsing recent values as JSON; nested fields use dotted paths (`customer.tier`),
 
 | | |
 |---|---|
-| **In** | `selector` (required), `topic` (short or full name, default the first topic), `key` (optional, checked with the selector as the read would) |
+| **In** | `selector` or `sql` (one of them), `topic` (short or full name, default the first topic), `key` (optional, checked with the selector as the read would) |
 | **Out** | `valid`; when `false`, `error` is the same message `get_entity_events` would return (see below) |
 | | `filter`: the effective selector, `__key__ = '<key>' AND (<selector>)` when a key is given |
 | | `fields_used`: `{ name, source, type }`; `cost`: `metadata only`, or `decodes each event's value` when a body field is used |
 | | `sampled`, `matched_in_sample` (and `selector_matched_in_sample` with a key): the selector tried on the recent messages `get_schema` sampled |
 | | `warnings`: plain sentences, below; `sample_note`: the sample is small and recent |
+| | with `sql`: `sql` as given and `translation` (`selector`, and the `topic`, `lookback`, `max_events` and `columns` the SQL sets, with `notes`); a SQL that can't be translated is `valid: false` with the reason |
 
 It starts no filter and opens no SDK session. The only broker read is `get_schema`'s sample, which is
 cached, so checking several drafts is cheap. The sample is evaluated with a resolver that mirrors the
@@ -89,6 +92,7 @@ in the sample; `sample_note` says so.
 |---|---|
 | **In** | `key`: the entity's key, 1–128 letters, digits or `. _ : -` |
 | | `selector`: a JMS selector over the fields `get_schema` returns, e.g. `event_type = 'login' AND device.os = 'ios'` |
+| | `sql`: instead of `selector`, a whole SQL query, e.g. `SELECT * FROM orders WHERE event_type = 'login' AND ts > now() - INTERVAL '15' MINUTE LIMIT 50` (see [SQL](#sql)) |
 | | `topic`: short or full name from `list_topics` (default: the first topic) |
 | | `lookback`: how far back to read, e.g. `15m`, `6h` (default `1h`, at most `MAX_LOOKBACK`) |
 | | `max_events`: the most events to return (default 1000; the agent can ask for more or fewer, with no server cap). When more match, the tool keeps the newest and lists them oldest first |
@@ -96,9 +100,10 @@ in the sample; `sample_note` says so.
 | | `window` (`from`, `to`), `scanned` (events the server read), `matched`, `returned`, `more_events`, and `omitted` (how many older events were left out) when there were more |
 | | `events`: `{ time, key, properties, value }`. `time` is when the log received the event, `properties` are the event's own (the filter's `__` ones are dropped), and `value` is parsed JSON when the value is JSON |
 | | `selector_warnings`, when the selector has comparisons that can't match as written (below) |
+| | with `sql`: `sql` as given, `selector` as it ran, and `translation` (`selector`, plus the `topic`, `lookback`, `max_events` and `columns` the SQL set, and `notes` on each part) |
 
 When both `key` and `selector` are given, an event must match both. `watch_entity_events` takes the same
-`key`, `selector` and `topic` on its first call.
+`key`, `selector`, `sql` and `topic` on its first call.
 
 ### How a selector is checked
 
@@ -130,11 +135,70 @@ number, so `=` is false and `<>` true for every event; ordering a string against
   quotes. This includes a JSON string field whose values are numeric text (`"price": "77351.21"`), since the
   filter reads such text as a number.
 
-The time window is `lookback`, not a selector term.
+The time window is `lookback`, not a selector term (with `sql`, a top-level `ts > now() - INTERVAL …` term becomes the lookback; see [SQL](#sql)).
 
 Invalid arguments and failures come back as tool errors with a message the agent can act on (for
 example "lookback 48h is longer than this server allows (24h)", or a topic that isn't on the allowlist,
 with the ones that are).
+
+## SQL
+
+`get_entity_events`, `watch_entity_events` (first call) and `check_selector` take `sql` instead of
+`selector`: a whole query, the way an agent would write it for Confluent RTCE's `queryData`. Passing both
+is an error. The server translates it with [JSqlParser](https://github.com/JSQLParser/JSqlParser) into a
+selector and the tool's own arguments, then checks the selector exactly as a hand-written one (the steps
+above), so the translation adds no trust. The result says what ran: `sql`, `selector`, and
+`translation` with each argument the SQL set and a note per part (`LIMIT 50 → max_events 50`).
+
+Accepted: a bare condition (`event_type = 'login' AND amount > 100`), `WHERE <condition>`, or one
+`SELECT … [FROM t] [WHERE …] [ORDER BY <time> DESC] [LIMIT n]`.
+
+| SQL | Becomes | Notes |
+|---|---|---|
+| `FROM t` | `topic` | Short or full name (quote a full one: `FROM "persistent://public/default/orders"`), checked against the allowlist. Optional |
+| `WHERE <expr>` | `selector` | Printed from the parse tree through the whitelist below |
+| `LIMIT n` | `max_events` | `n ≥ 1` |
+| `ORDER BY <time> DESC` | (the default) | The tools return the newest events, listed oldest first. Any other `ORDER BY` is rejected |
+| `SELECT *` / `SELECT a, b` | (projection) | `a, b`: each returned event keeps `time`, `key`, and only those properties and value fields (dotted paths keep their nesting). The filter still reads whole events; for a watch it applies to every call |
+| `<time> > now() - INTERVAL '15' MINUTE` | `lookback` | A top-level `AND` term only, and taken out of the selector. `>` or `>=`; `now()`, `CURRENT_TIMESTAMP` or `LOCALTIMESTAMP`; `INTERVAL '15' MINUTE`, `INTERVAL 15 MINUTE` or `INTERVAL '15 minutes'`; units SECOND, MINUTE, HOUR, DAY (singular or plural). Over `MAX_LOOKBACK` is the usual rejection. Under `OR` or `NOT` it's an error |
+
+The time column is `__publish_time__`, or `ts`, `time`, `timestamp` or `publish_time` when the topic has no
+real field of that name. The filter reads a real field first, so on a topic whose events carry a `ts` field,
+`ts > 5` is a condition on that field, and a time window must be written on `__publish_time__`.
+
+A call's own `topic`, `lookback` or `max_events` may repeat what the SQL says; if it disagrees, that's an
+error, since either could be the one meant. A SQL whose only condition is the time window still needs a
+`key`, as a call without a selector does.
+
+**`WHERE` whitelist:** `=`, `<>` and `!=` (written `<>`), `<`, `<=`, `>`, `>=`, `AND`, `OR`, `NOT`,
+parentheses, `IN` / `NOT IN` of literal values (numbers and booleans are written as `=` terms joined by `OR`,
+since a selector's `IN` takes strings), `LIKE` / `NOT LIKE` with optional `ESCAPE`, `BETWEEN` / `NOT BETWEEN`,
+`IS [NOT] NULL`, `+ - * /`, numbers, single-quoted strings (re-quoted, `'` doubled), `TRUE` / `FALSE`, and
+field names: unquoted, double-quoted or backtick-quoted, dotted for nested body fields. Names come out
+unquoted; a quoted name no selector can express (`"event-type"`) is an error naming it.
+
+**Rejected,** each with the construct and the nearest supported form, never approximated:
+
+- function calls (`LOWER`, `UPPER`, `CAST`, `COALESCE`, `SUBSTRING`, date functions; `now()` only in the time
+  window), casts (`::`, `DATE '…'`), `||`, `CASE`;
+- case-insensitive matching (`LOWER(x) = 'y'`, `ILIKE`): the error suggests `IN` over the spellings in
+  `get_schema`'s examples, e.g. `customer.tier IN ('Gold', 'gold')`;
+- `SIMILAR TO`, `REGEXP`, `RLIKE`, `~` (use `LIKE`);
+- subqueries, `EXISTS`, `ANY`, `IN (SELECT …)`, `FROM (SELECT …)`, joins;
+- `GROUP BY`, `HAVING`, aggregates and window functions, `DISTINCT`, `UNION` and other set operations,
+  `WITH`;
+- `OFFSET`, `TOP`, `FETCH FIRST`, `LIMIT ALL`, `ORDER BY` anything but the time column descending;
+- `= NULL` (use `IS NULL`), `IS TRUE`, `%`, `XOR`, hex literals, column and table aliases;
+- parameters (`?`, `:name`, `$1`), more than one statement, statements other than `SELECT`, and SQL that
+  doesn't parse (with the parser's message, trimmed);
+- a time window under `OR` or `NOT`, two time windows, intervals in other units (`WEEK`, `MONTH`).
+
+A header compared with a number (`seq > 5`) is translated as written and flagged in `selector_warnings`, as
+for a hand-written selector.
+
+JSqlParser 5.3 parses the right side of `IN` as a whole expression, so what follows an `IN (…)` list
+(`x IN ('a') AND y = 1`) lands inside the list. The translator takes each `[NOT] IN (…)` list out before
+parsing and puts it back when printing, so the selector keeps SQL's precedence.
 
 ## What makes it safe to hand to an agent
 
