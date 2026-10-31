@@ -21,7 +21,11 @@ package io.streamnative.filter.mcp;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.modelcontextprotocol.spec.McpSchema;
+import io.streamnative.filter.api.WindowControl;
+import io.streamnative.filter.client.FilterableConsumerBuilder;
+import io.streamnative.filter.client.Session;
 import io.streamnative.filter.common.WindowStats;
+import org.apache.pulsar.client.api.Consumer;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -30,8 +34,14 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 class EntityEventsToolTests {
 
@@ -43,6 +53,19 @@ class EntityEventsToolTests {
         return new EntityEventsTool(() -> {
             throw new AssertionError("an invalid call must not reach the broker");
         }, TOPIC, LIMITS, Clock.systemUTC());
+    }
+
+    private static final String SESSIONS = "persistent://public/default/session_events";
+    private static final Topics TOPICS = Topics.of(SESSIONS, TOPIC);
+
+    private static EntityEventsTool selectorToolWithoutBroker() {
+        return new EntityEventsTool(() -> {
+            throw new AssertionError("an invalid call must not reach the broker");
+        }, TOPICS, t -> Set.of("__key__", "event_type"), LIMITS, Clock.systemUTC());
+    }
+
+    private static String text(McpSchema.CallToolResult r) {
+        return ((McpSchema.TextContent) r.content().get(0)).text();
     }
 
     private static WindowStats stats(long scanned, WindowStats.Status status) {
@@ -61,11 +84,102 @@ class EntityEventsToolTests {
         assertThat(tool.name()).isEqualTo("get_entity_events");
         assertThat(tool.description()).contains(TOPIC).contains("TRUNCATED_BY_RETENTION");
         Map<String, Object> schema = tool.inputSchema();
-        assertThat(schema.get("required")).isEqualTo(List.of("key"));
+        assertThat(schema).doesNotContainKey("required"); // a key, a selector, or both
+        assertThat(schema).containsEntry("additionalProperties", false);
         @SuppressWarnings("unchecked")
         Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
-        assertThat(properties).containsOnlyKeys("key", "lookback", "max_events");
+        assertThat(properties).containsOnlyKeys("topic", "key", "selector", "lookback", "max_events");
         assertThat(properties.get("lookback").toString()).contains("At most 24h");
+        assertThat(tool.description()).contains("get_schema");
+    }
+
+    @Test
+    void theDefinitionListsTheTopicsAndDescribesSelectors() {
+        McpSchema.Tool tool = selectorToolWithoutBroker().definition();
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> properties = (Map<String, Object>) tool.inputSchema().get("properties");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> topic = (Map<String, Object>) properties.get("topic");
+        assertThat(topic).containsEntry("default", "session_events");
+        assertThat((String) topic.get("description")).contains("session_events, orders");
+        assertThat(properties.get("selector").toString()).contains("SQL-92").contains("get_schema")
+                .contains("event_type LIKE '3ds_%'").contains("body fields decode");
+    }
+
+    @Test
+    void anUnknownSelectorFieldIsAToolErrorBeforeTheBroker() {
+        McpSchema.CallToolResult result = selectorToolWithoutBroker().call(Map.of("selector", "colour = 'red'"));
+
+        assertThat(result.isError()).isTrue();
+        assertThat(text(result)).contains("colour").contains("get_schema");
+    }
+
+    @Test
+    void badSelectorSyntaxAndAnUnknownTopicAreToolErrors() {
+        assertThat(text(selectorToolWithoutBroker().call(Map.of("selector", "event_type ="))))
+                .contains("isn't valid JMS selector syntax");
+        assertThat(text(selectorToolWithoutBroker().call(Map.of("key", "1", "topic", "nope"))))
+                .contains("isn't one this server reads");
+        assertThat(text(selectorToolWithoutBroker().call(Map.of()))).contains("give a key, a selector, or both");
+    }
+
+    @Test
+    void aFieldCatalogFailureIsAToolError() {
+        EntityEventsTool tool = new EntityEventsTool(() -> {
+            throw new AssertionError("must not reach the broker");
+        }, TOPICS, t -> {
+            throw new IllegalStateException("couldn't read the fields of session_events");
+        }, LIMITS, Clock.systemUTC());
+
+        McpSchema.CallToolResult result = tool.call(Map.of("selector", "event_type = 'a'"));
+
+        assertThat(result.isError()).isTrue();
+        assertThat(text(result)).contains("couldn't read the fields");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aValidCallReadsTheNamedTopicWithTheCombinedFilter() throws Exception {
+        Session session = mock(Session.class);
+        FilterableConsumerBuilder<byte[]> builder = mock(FilterableConsumerBuilder.class, RETURNS_SELF);
+        Consumer<byte[]> consumer = mock(Consumer.class, withSettings().extraInterfaces(WindowControl.class));
+        when(session.newConsumer()).thenReturn(builder);
+        when(builder.subscribe()).thenReturn(consumer);
+        when(((WindowControl) consumer).isComplete()).thenReturn(true);
+        when(((WindowControl) consumer).stats()).thenReturn(stats(5, WindowStats.Status.COMPLETE));
+        EntityEventsTool tool = new EntityEventsTool(() -> session, TOPICS, t -> Set.of("__key__", "event_type"),
+                LIMITS, Clock.systemUTC());
+
+        McpSchema.CallToolResult result = tool.call(Map.of("topic", "session_events", "key", "8675309",
+                "selector", "event_type LIKE '3ds_%'"));
+
+        assertThat(result.isError()).as("tool error: %s", result.content()).isNotEqualTo(Boolean.TRUE);
+        verify(builder).topic(SESSIONS);
+        verify(builder).selector("__key__ = '8675309' AND (event_type LIKE '3ds_%')");
+        assertThat((Map<String, Object>) result.structuredContent()).containsEntry("topic", SESSIONS)
+                .containsEntry("key", "8675309").containsEntry("selector", "event_type LIKE '3ds_%'");
+    }
+
+    @Test
+    void aSelectorOnlyResultHasNoKey() {
+        EntityQuery q = new EntityQuery(SESSIONS, null, "event_type = 'a'", Duration.ofHours(1), 50);
+
+        Map<String, Object> r = EntityEventsTool.result(q, TOPIC, stats(1, WindowStats.Status.COMPLETE), List.of(), 0, 1);
+
+        assertThat(r).containsEntry("topic", SESSIONS).containsEntry("selector", "event_type = 'a'")
+                .doesNotContainKey("key");
+    }
+
+    @Test
+    void selectorWarningsComeBackWithTheResult() {
+        EntityQuery q = new EntityQuery(SESSIONS, null, "seq > 5", Duration.ofHours(1), 50, List.of("seq is a header"));
+
+        Map<String, Object> r = EntityEventsTool.result(q, TOPIC, stats(1, WindowStats.Status.COMPLETE), List.of(), 0, 1);
+
+        assertThat(r).containsEntry("selector_warnings", List.of("seq is a header"));
+        assertThat(EntityEventsTool.result(new EntityQuery("1", Duration.ofHours(1), 50), TOPIC,
+                stats(1, WindowStats.Status.COMPLETE), List.of(), 0, 1)).doesNotContainKey("selector_warnings");
     }
 
     @Test

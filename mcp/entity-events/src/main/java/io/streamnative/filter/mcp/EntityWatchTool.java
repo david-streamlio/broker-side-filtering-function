@@ -43,14 +43,16 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * The {@code watch_entity_events} tool (spike): one entity's history, then its new events as they
- * happen, for an agent that keeps helping while things change.
+ * The {@code watch_entity_events} tool (spike): the history of the events matching a key, a selector,
+ * or both, then the new ones as they happen, for an agent that keeps helping while things change.
  *
- * <p>The first call opens a live windowed read ({@code __key__ = '<key>'} over
- * {@code TimeWindow.since(lookback)}) and keeps it open on this server: it returns the history up to the
+ * <p>The first call validates its topic, key and selector ({@link EntityQuery}), then opens a live
+ * windowed read ({@code __key__ = '<key>' AND (<selector>)} over {@code TimeWindow.since(lookback)})
+ * and keeps it open on this server: it returns the history up to the
  * caught-up marker, with the window's completeness status, and a {@code watch_id}. Each later call with
  * that {@code watch_id} waits on the same open read for up to {@code wait_s} and returns only the events
  * that arrived since the last call. Nothing is re-scanned between calls; the agent still has to make
@@ -73,7 +75,8 @@ final class EntityWatchTool {
     }
 
     private final Supplier<Session> sessions;
-    private final String topic;
+    private final Topics topics;
+    private final Function<String, FieldCatalog.Fields> fields;
     private final EntityQuery.Limits limits;
     private final WatchLimits watchLimits;
     private final Clock clock;
@@ -84,21 +87,43 @@ final class EntityWatchTool {
         return t;
     });
 
-    EntityWatchTool(Supplier<Session> sessions, String topic, EntityQuery.Limits limits, WatchLimits watchLimits,
-                    Clock clock) {
+    /** Fields known by name only: selectors are checked against the names, with no type hints. */
+    EntityWatchTool(Supplier<Session> sessions, Topics topics, Function<String, Set<String>> fieldNames,
+                    EntityQuery.Limits limits, WatchLimits watchLimits, Clock clock) {
+        this(sessions, topics, limits, watchLimits, clock, t -> FieldCatalog.Fields.ofNames(t, fieldNames.apply(t)));
+    }
+
+    /** Fields from the catalog: selectors are checked against them, and comparisons that can't match are flagged. */
+    EntityWatchTool(Supplier<Session> sessions, Topics topics, FieldCatalog catalog, EntityQuery.Limits limits,
+                    WatchLimits watchLimits, Clock clock) {
+        this(sessions, topics, limits, watchLimits, clock, catalog::fields);
+    }
+
+    private EntityWatchTool(Supplier<Session> sessions, Topics topics, EntityQuery.Limits limits,
+                            WatchLimits watchLimits, Clock clock, Function<String, FieldCatalog.Fields> fields) {
         this.sessions = sessions;
-        this.topic = topic;
+        this.topics = topics;
+        this.fields = fields;
         this.limits = limits;
         this.watchLimits = watchLimits;
         this.clock = clock;
         reaper.scheduleWithFixedDelay(this::closeIdle, 30, 30, TimeUnit.SECONDS);
     }
 
+    /** One topic and no known fields: key-only watches, as before selectors. */
+    EntityWatchTool(Supplier<Session> sessions, String topic, EntityQuery.Limits limits, WatchLimits watchLimits,
+                    Clock clock) {
+        this(sessions, Topics.of(topic), t -> Set.of(), limits, watchLimits, clock);
+    }
+
     /** The tool as the agent sees it. */
     McpSchema.Tool definition() {
         Map<String, Object> props = new LinkedHashMap<>();
+        props.put("topic", EntityEventsTool.topicProperty(topics, "First call, optional: "));
         props.put("key", Map.of("type", "string",
-                "description", "First call: the entity's key, for example a customer or order ID. Letters, digits and . _ : - only."));
+                "description", "First call: the entity's key, for example a customer or order ID. Letters, digits "
+                        + "and . _ : - only. Give a key, a selector, or both."));
+        props.put("selector", EntityEventsTool.selectorProperty("First call, optional: "));
         props.put("lookback", Map.of("type", "string", "default", "1h",
                 "description", "First call: how much history to return before watching, for example \"15m\". At most "
                         + EntityQuery.format(limits.maxLookback()) + "."));
@@ -120,9 +145,12 @@ final class EntityWatchTool {
         return McpSchema.Tool.builder()
                 .name(NAME)
                 .title("Watch entity events")
-                .description("Watches one entity's events in the event log (" + topic + ") while you help: the first "
-                        + "call (with key) returns the history and a watch_id; each later call (with watch_id) waits "
-                        + "for and returns only the events that happened since your last call. Use it when the "
+                .description("Watches the events matching a key, a selector, or both, in an event log topic ("
+                        + String.join(", ", topics.all()) + ") while you help: the first call (with key and/or "
+                        + "selector) returns the history and a watch_id; each later call (with watch_id) waits for "
+                        + "and returns only the matching events that happened since your last call. Topic, key "
+                        + "and selector apply to the first call only. Call get_schema first to learn the fields a "
+                        + "selector can use. Use it when the "
                         + "situation may change while you work, for example a customer retrying a checkout. Call "
                         + "again with watch_id after each answer to keep watching; stop when done. Times are when "
                         + "the log received each event. If status is TRUNCATED_BY_RETENTION, history may be "
@@ -150,7 +178,7 @@ final class EntityWatchTool {
 
     /** First call: open the live read, return the history up to the caught-up marker. */
     private Map<String, Object> open(Map<String, Object> args) throws Exception {
-        EntityQuery query = EntityQuery.parse(args, limits);
+        EntityQuery query = EntityQuery.parseAgainst(args, limits, topics, fields);
         if (watches.size() >= watchLimits.maxWatches()) {
             throw new IllegalStateException("this server already has " + watches.size()
                     + " open watches (its limit); stop one with {watch_id, stop: true} first");
@@ -158,8 +186,8 @@ final class EntityWatchTool {
         long start = clock.millis();
         long deadline = start + limits.timeout().toMillis();
         Consumer<byte[]> consumer = sessions.get().newConsumer()
-                .topic(topic)
-                .selector(query.selector())
+                .topic(query.topic())
+                .selector(query.filter())
                 .window(TimeWindow.since(query.lookback()))
                 .subscribe();
         Watch w = new Watch(UUID.randomUUID().toString().substring(0, 8), query, consumer);
@@ -182,15 +210,16 @@ final class EntityWatchTool {
         }
         w.touch(clock.millis());
         watches.put(w.id, w);
-        Map<String, Object> r = EntityEventsTool.result(query, topic, ((WindowControl) consumer).stats(), events,
+        Map<String, Object> r = EntityEventsTool.result(query, query.topic(), ((WindowControl) consumer).stats(), events,
                 w.matched, clock.millis() - start);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("watch_id", w.id);
         out.put("watching", true);
         out.putAll(r);
         out.put("next", "Call watch_entity_events with {\"watch_id\": \"" + w.id
-                + "\"} to get this entity's new events as they happen.");
-        LOG.info("{} {} key={} lookback={}: {} history events, status {}", NAME, w.id, query.key(),
+                + "\"} to get new matching events as they happen.");
+        LOG.info("{} {} topic={} filter={} lookback={}: {} history events, status {}", NAME, w.id, query.topic(),
+                query.filter(),
                 EntityQuery.format(query.lookback()), w.matched, r.get("status"));
         return out;
     }
@@ -200,7 +229,7 @@ final class EntityWatchTool {
         Watch w = watches.get(id);
         if (w == null) {
             throw new IllegalArgumentException("no open watch " + id + " (it was stopped, or closed after "
-                    + EntityQuery.format(watchLimits.idleTimeout()) + " without a call); start a new one with key");
+                    + EntityQuery.format(watchLimits.idleTimeout()) + " without a call); start a new one with key and/or selector");
         }
         if (Boolean.TRUE.equals(args.get("stop"))) {
             watches.remove(id);
@@ -228,7 +257,8 @@ final class EntityWatchTool {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("watch_id", id);
         out.put("watching", true);
-        out.put("key", w.query.key());
+        out.put("topic", w.query.topic());
+        EntityEventsTool.putFilter(out, w.query);
         boolean more = events.size() >= max;
         out.put("new_events", events.size());
         out.put("more_events", more);

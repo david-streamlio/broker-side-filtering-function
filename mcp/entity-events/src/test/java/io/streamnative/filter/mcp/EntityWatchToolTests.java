@@ -40,6 +40,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -77,12 +78,13 @@ class EntityWatchToolTests {
     private final MovableClock clock = new MovableClock();
     private volatile boolean historyLoads = true;
     private FilterableConsumerBuilder<byte[]> builder;
+    private Session session;
     private EntityWatchTool tool;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() throws Exception {
-        Session session = mock(Session.class);
+        session = mock(Session.class);
         builder = mock(FilterableConsumerBuilder.class, RETURNS_SELF);
         when(session.newConsumer()).thenReturn(builder);
         when(builder.subscribe()).thenAnswer(inv -> newConsumer());
@@ -148,8 +150,13 @@ class EntityWatchToolTests {
         assertThat(schema).doesNotContainKey("required"); // key on the first call, watch_id after
         @SuppressWarnings("unchecked")
         Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
-        assertThat(properties).containsOnlyKeys("key", "lookback", "max_events", "watch_id", "wait_s", "stop");
+        assertThat(properties).containsOnlyKeys("topic", "key", "selector", "lookback", "max_events", "watch_id",
+                "wait_s", "stop");
+        assertThat(schema).containsEntry("additionalProperties", false);
         assertThat(properties.get("wait_s").toString()).contains("At most 30");
+        assertThat(properties.get("selector").toString()).contains("First call").contains("get_schema");
+        assertThat(properties.get("topic").toString()).contains("session_events");
+        assertThat(def.description()).contains("get_schema").contains("first call only");
     }
 
     @Test
@@ -321,6 +328,65 @@ class EntityWatchToolTests {
         assertThat(r.isError()).isTrue();
         assertThat(text(r)).contains("key must be");
         verify(builder, never()).subscribe();
+    }
+
+    /** A watch tool over two topics whose fields are known. */
+    private EntityWatchTool selectorTool() {
+        return new EntityWatchTool(() -> session, Topics.of(TOPIC, "persistent://public/default/orders"),
+                t -> Set.of("__key__", "event_type"), LIMITS, WATCH_LIMITS, clock);
+    }
+
+    @Test
+    void aSelectorWatchPassesTheCombinedFilterAndLaterCallsEchoIt() {
+        EntityWatchTool selectorTool = selectorTool();
+        try {
+            log.add(event("1:0:-1", "3ds_timeout"));
+            Map<String, Object> first = body(selectorTool.call(Map.of("topic", "session_events", "key", KEY,
+                    "selector", "event_type LIKE '3ds_%'")));
+            String id = (String) first.get("watch_id");
+            log.add(event("1:1:-1", "3ds_approved"));
+
+            Map<String, Object> later = body(selectorTool.call(Map.of("watch_id", id, "wait_s", 5)));
+
+            verify(builder).topic(TOPIC);
+            verify(builder).selector("__key__ = '8675309' AND (event_type LIKE '3ds_%')");
+            assertThat(first).containsEntry("topic", TOPIC).containsEntry("key", KEY)
+                    .containsEntry("selector", "event_type LIKE '3ds_%'");
+            assertThat(later).containsEntry("topic", TOPIC).containsEntry("key", KEY)
+                    .containsEntry("selector", "event_type LIKE '3ds_%'");
+            assertThat(types(later)).containsExactly("3ds_approved");
+        } finally {
+            selectorTool.close();
+        }
+    }
+
+    @Test
+    void aSelectorOnlyWatchHasNoKey() {
+        EntityWatchTool selectorTool = selectorTool();
+        try {
+            Map<String, Object> r = body(selectorTool.call(Map.of("selector", "event_type = 'chat_opened'")));
+
+            verify(builder).selector("event_type = 'chat_opened'");
+            assertThat(r).containsEntry("selector", "event_type = 'chat_opened'").doesNotContainKey("key");
+        } finally {
+            selectorTool.close();
+        }
+    }
+
+    @Test
+    void anInvalidSelectorOrTopicNeverReachesTheBroker() throws Exception {
+        EntityWatchTool selectorTool = selectorTool();
+        try {
+            assertThat(text(selectorTool.call(Map.of("selector", "colour = 'red'")))).contains("colour")
+                    .contains("get_schema");
+            assertThat(text(selectorTool.call(Map.of("selector", "event_type LIKE")))).contains("JMS selector syntax");
+            assertThat(text(selectorTool.call(Map.of("key", KEY, "topic", "secrets")))).contains("isn't one this server reads");
+            assertThat(text(selectorTool.call(Map.of("lookback", "1h")))).contains("give a key, a selector, or both");
+            verify(builder, never()).subscribe();
+            assertThat(selectorTool.openWatches()).isZero();
+        } finally {
+            selectorTool.close();
+        }
     }
 
     @Test
