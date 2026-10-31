@@ -50,7 +50,7 @@ import java.util.regex.Pattern;
  * the selector is valid and the agent may mean it.
  */
 record EntityQuery(String topic, String key, String selector, Duration lookback, int maxEvents,
-                   List<String> selectorWarnings) {
+                   List<String> selectorWarnings, SqlTranslation sql) {
 
     /** Letters, digits and {@code . _ : -}, up to 128 characters. */
     static final Pattern KEY = Pattern.compile("[A-Za-z0-9._:-]{1,128}");
@@ -73,6 +73,12 @@ record EntityQuery(String topic, String key, String selector, Duration lookback,
 
     EntityQuery {
         selectorWarnings = selectorWarnings == null ? List.of() : List.copyOf(selectorWarnings);
+    }
+
+    /** A query not written as SQL. */
+    EntityQuery(String topic, String key, String selector, Duration lookback, int maxEvents,
+                List<String> selectorWarnings) {
+        this(topic, key, selector, lookback, maxEvents, selectorWarnings, null);
     }
 
     /** A query with no selector warnings. */
@@ -117,16 +123,96 @@ record EntityQuery(String topic, String key, String selector, Duration lookback,
     static EntityQuery parseAgainst(Map<String, Object> args, Limits limits, Topics topics,
                                     Function<String, FieldCatalog.Fields> fields) {
         Map<String, Object> a = args == null ? Map.of() : args;
+        SqlTranslation sql = null;
+        if (a.get("sql") != null) {
+            sql = translate(a, topics, fields);
+            a = withSql(a, sql, topics);
+        }
         String topic = topics.resolve(a.get("topic"));
         Object rawKey = a.get("key");
         String key = rawKey == null ? null : parseKey(rawKey);
         CheckedSelector checked = a.get("selector") == null ? null : checkSelector(a.get("selector"), topic, fields);
         if (key == null && checked == null) {
+            if (sql != null) {
+                throw new IllegalArgumentException("the SQL has no condition besides the time window, and no key was "
+                        + "given: add a WHERE condition (for example event_type = 'login') or pass key");
+            }
             throw new IllegalArgumentException("give a key, a selector, or both: a key picks one entity's events, "
                     + "a selector (for example event_type LIKE '3ds_%') picks events by their fields");
         }
-        return new EntityQuery(topic, key, checked == null ? null : checked.text(), parseLookback(a, limits),
-                parseMaxEvents(a), checked == null ? List.of() : checked.warnings());
+        Duration lookback;
+        try {
+            lookback = parseLookback(a, limits);
+        } catch (IllegalArgumentException e) {
+            throw sql != null && sql.lookback() != null
+                    ? new IllegalArgumentException("the SQL's time window: " + e.getMessage()) : e;
+        }
+        return new EntityQuery(topic, key, checked == null ? null : checked.text(), lookback,
+                parseMaxEvents(a), checked == null ? List.of() : checked.warnings(), sql);
+    }
+
+    /**
+     * The call's {@code sql}, translated ({@link SqlTranslator}). {@code sql} is used instead of {@code selector},
+     * never with it.
+     *
+     * @throws IllegalArgumentException if both are given, or the SQL can't be translated
+     */
+    static SqlTranslation translate(Map<String, Object> args, Topics topics,
+                                    Function<String, FieldCatalog.Fields> fields) {
+        Object raw = args.get("sql");
+        if (args.get("selector") != null) {
+            throw new IllegalArgumentException("pass either sql or selector, not both: sql is a whole query whose "
+                    + "WHERE becomes the selector, selector is the WHERE condition alone");
+        }
+        if (!(raw instanceof String text) || text.isBlank()) {
+            throw new IllegalArgumentException("sql must be a non-empty string, for example " + SqlTranslator.EXAMPLE);
+        }
+        return SqlTranslator.translate(text, topics, args.get("topic"), fields);
+    }
+
+    /**
+     * The call's arguments with what the SQL set: its selector, and the topic, lookback and max_events it implies.
+     * An explicit argument that agrees with the SQL is fine; one that disagrees is an error, since either could be
+     * the one meant.
+     */
+    static Map<String, Object> withSql(Map<String, Object> args, SqlTranslation sql, Topics topics) {
+        Map<String, Object> a = new java.util.HashMap<>(args);
+        a.remove("sql");
+        if (sql.topic() != null) {
+            Object explicit = args.get("topic");
+            if (explicit != null && !String.valueOf(explicit).isBlank() && !topics.resolve(explicit).equals(sql.topic())) {
+                throw new IllegalArgumentException("the SQL reads FROM " + Topics.shortName(sql.topic()) + " but topic is "
+                        + explicit + "; drop one of them, or make them name the same topic");
+            }
+            a.put("topic", sql.topic());
+        }
+        if (sql.lookback() != null) {
+            Object explicit = args.get("lookback");
+            if (explicit != null && !parseDuration(String.valueOf(explicit)).equals(sql.lookback())) {
+                throw new IllegalArgumentException("the SQL's time window is " + format(sql.lookback()) + " but lookback is "
+                        + explicit + "; drop one of them, or make them agree");
+            }
+            a.put("lookback", format(sql.lookback()));
+        }
+        if (sql.maxEvents() != null) {
+            Object explicit = args.get("max_events");
+            if (explicit != null && parseCount(explicit) != sql.maxEvents()) {
+                throw new IllegalArgumentException("the SQL says LIMIT " + sql.maxEvents() + " but max_events is "
+                        + explicit + "; drop one of them, or make them agree");
+            }
+            a.put("max_events", sql.maxEvents());
+        }
+        if (sql.selector() != null) {
+            a.put("selector", sql.selector());
+        } else {
+            a.remove("selector");
+        }
+        return a;
+    }
+
+    /** An event as the result returns it: trimmed to the SQL's {@code SELECT} columns, when it named some. */
+    Map<String, Object> project(Map<String, Object> event) {
+        return sql == null ? event : sql.project(event);
     }
 
     /**

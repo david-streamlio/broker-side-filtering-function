@@ -51,7 +51,8 @@ final class TopicTools {
             + "watch_entity_events. It uses SQL-92 WHERE syntax: = <> < > <= >= IN LIKE BETWEEN IS NULL AND OR NOT, "
             + "with strings in single quotes. Use only the field names listed here. Prefer key and header fields: "
             + "they are read without decoding the message value. The time window is the lookback argument, not a "
-            + "selector term. Before a long lookback, try the selector with check_selector.";
+            + "selector term. Before a long lookback, try the selector with check_selector. To write a whole SQL query "
+            + "instead (SELECT * FROM <topic> WHERE … LIMIT n), pass it as sql.";
 
     private final Topics topics;
     private final FieldCatalog catalog;

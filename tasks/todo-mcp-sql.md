@@ -80,32 +80,67 @@ the same length/syntax/field checks as a hand-written one. The result echoes `sq
 ## Phases
 
 ### Phase 1 — `WHERE` only (≈1 day)
-- [ ] Add the JSqlParser dependency to `mcp/entity-events/pom.xml`; confirm the shaded jar still builds
+- [x] Add the JSqlParser dependency to `mcp/entity-events/pom.xml`; confirm the shaded jar still builds
       and `mvn -o` resolves it.
-- [ ] `SqlTranslator`: accept a bare `WHERE`-clause expression, or `SELECT * FROM t WHERE …`; walk the
+- [x] `SqlTranslator`: accept a bare `WHERE`-clause expression, or `SELECT * FROM t WHERE …`; walk the
       `Expression` AST with the whitelist; print JMS (`!=` → `<>`, identifiers unquoted, strings
       re-quoted with `''` escaping).
-- [ ] Reject everything off the whitelist with the construct's name and a suggestion.
-- [ ] `sql` argument on the event tools and `check_selector`; mutual exclusion with `selector`.
-- [ ] Tests: ~40 table rows (translations plus rejections), plus a round-trip check that every emitted
+- [x] Reject everything off the whitelist with the construct's name and a suggestion.
+- [x] `sql` argument on the event tools and `check_selector`; mutual exclusion with `selector`.
+- [x] Tests: ~40 table rows (translations plus rejections), plus a round-trip check that every emitted
       selector passes `Selector.compile` and references only the columns in the SQL.
 
 ### Phase 2 — the statement around the `WHERE` (≈1 day)
-- [ ] `FROM` → `topic` through `Topics.resolve`.
-- [ ] `LIMIT` → `max_events`; `ORDER BY <time> DESC` accepted, other orderings rejected.
-- [ ] Time predicate → `lookback`: only as a top-level `AND` term on the time column; units → duration;
+- [x] `FROM` → `topic` through `Topics.resolve`.
+- [x] `LIMIT` → `max_events`; `ORDER BY <time> DESC` accepted, other orderings rejected.
+- [x] Time predicate → `lookback`: only as a top-level `AND` term on the time column; units → duration;
       reject the same term nested under `OR`/`NOT` (it can't become a window).
-- [ ] Conflicts with explicit arguments are errors; results echo `sql`, `selector` and the derived arguments.
-- [ ] Header-versus-number warnings, using `FieldCatalog` types.
+- [x] Conflicts with explicit arguments are errors; results echo `sql`, `selector` and the derived arguments.
+- [x] Header-versus-number warnings, using `FieldCatalog` types.
 
 ### Phase 3 — projection and polish (≈0.5–1 day)
-- [ ] `SELECT a, b`: trim each returned event to those fields (key and time always kept). This applies to
+- [x] `SELECT a, b`: trim each returned event to those fields (key and time always kept). This applies to
       the result only; the filter still reads whole events.
-- [ ] README: a "SQL" section with the mapping table and rejection list; update the tool descriptions
+- [x] README: a "SQL" section with the mapping table and rejection list; update the tool descriptions
       and server instructions ("selector is a SQL WHERE clause; or pass full SQL as sql").
-- [ ] `check_selector` shows the SQL → selector translation and any notes.
+- [x] `check_selector` shows the SQL → selector translation and any notes.
 
 **Total: about 2.5–3 days**, plus review.
+
+### Status and deviations
+
+All three phases are implemented (`SqlTranslator`, `SqlTranslation`, wiring in `EntityQuery`,
+`SelectorCheckTool`, the event tools, server instructions and README). Where the result differs from the plan:
+
+- **JSqlParser pinned at 5.3, with `jmh-core` excluded.** Its 5.3 pom declares JMH (its own benchmarks) at
+  compile scope, which `mvn -o` can't resolve and no class in the jar uses; with the exclusion the parser has
+  no runtime dependencies. Parsing calls `CCJSqlParserUtil.newParser(...)` directly: `CCJSqlParserUtil.parse*`
+  runs each parse on an executor thread (for its timeout) that keeps a JVM alive. The SQL is length-capped
+  (4000 characters) instead.
+- **JSqlParser 5.3 mis-parses `IN`:** the list's right side is parsed as a whole expression, so
+  `x IN ('a') AND y = 1` becomes `x IN (('a') AND y = 1)`, and `a AND NOT x IN ('a') OR b` binds the `OR`
+  inside the `IN`. The translator takes each `[NOT] IN (…)` list out of the text before parsing (replacing it
+  with `= <placeholder>`, which has the same precedence) and puts it back when printing. Subqueries
+  (`IN (SELECT …)`) are left in place and rejected.
+- **`IN` of numbers or booleans** is written as `=` terms joined by `OR` (`amount IN (5, 10)` →
+  `amount = 5 OR amount = 10`), because the selector grammar's `IN` takes string literals only. The two are
+  the same test, NULL included; a note says so.
+- **Time window spellings:** beyond the plan, `>=`, the mirrored `now() - INTERVAL … < ts`, `INTERVAL 15
+  MINUTE` (unquoted), `INTERVAL '15 minutes'`, plural units, and `CURRENT_TIMESTAMP` / `LOCALTIMESTAMP` /
+  `NOW` are accepted. The aliases `ts`, `time`, `timestamp`, `publish_time` count as the time column only when
+  the topic has no real field of that name; otherwise `ts > now() - …` is an error pointing at
+  `__publish_time__`. An alias used any other way (`ts = 5`) is an error saying how to write a time window.
+- **A SQL whose only condition is the time window** still needs a `key`, like any call without a selector
+  (the error says so); `check_selector` reports it as `valid: false`.
+- **`SELECT` columns are checked** against the topic's fields (unknown names are an error with "did you mean",
+  as for a selector), since a column the topic doesn't have would only ever come back empty.
+  `ts`/`__publish_time__`/`__key__` in the list are accepted and always returned as `time` and `key`.
+- **A final guard:** the `SELECT` is rebuilt from the parts the translator understood and compared with
+  JSqlParser's own rendering of the statement, so a clause it doesn't know (`QUALIFY`, `WINDOW`, a dialect
+  extension) is rejected rather than dropped.
+- **Testing:** the differential check is a combinatorial one in `SqlTranslatorTests` (translated selector vs a
+  fully parenthesised hand-written one, over every combination of a few field values), not a port of
+  `SelectorOracleTest`. The agent-in-the-loop smoke test with `make window-demo` has not been run.
 
 ## Testing
 

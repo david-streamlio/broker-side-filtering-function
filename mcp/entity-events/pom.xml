@@ -77,6 +77,20 @@
             <artifactId>mcp-json-jackson2</artifactId>
             <version>${mcp.version}</version>
         </dependency>
+        <!-- SQL to JMS selector translation for the tools' sql argument (SqlTranslator).
+             LGPL-2.1 / Apache-2.0 dual licensed. Its 5.3 pom declares jmh-core (its benchmarks) at compile
+             scope, though no class in the jar uses it: excluded, so the parser has no runtime dependencies. -->
+        <dependency>
+            <groupId>com.github.jsqlparser</groupId>
+            <artifactId>jsqlparser</artifactId>
+            <version>5.3</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.openjdk.jmh</groupId>
+                    <artifactId>jmh-core</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>

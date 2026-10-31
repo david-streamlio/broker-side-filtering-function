@@ -81,14 +81,53 @@ class SelectorCheckToolTests {
     }
 
     @Test
-    void theDefinitionRequiresOnlyTheSelector() {
+    void theDefinitionTakesASelectorOrSql() {
         McpSchema.Tool def = tool(SAMPLES).definition();
 
         assertThat(def.name()).isEqualTo("check_selector");
-        assertThat(def.inputSchema()).containsEntry("required", List.of("selector"));
+        assertThat(def.inputSchema()).doesNotContainKey("required"); // a selector or sql
         @SuppressWarnings("unchecked")
         Map<String, Object> properties = (Map<String, Object>) def.inputSchema().get("properties");
-        assertThat(properties).containsOnlyKeys("selector", "topic", "key");
+        assertThat(properties).containsOnlyKeys("selector", "sql", "topic", "key");
+        assertThat(def.description()).contains("SQL query");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sqlIsTranslatedThenCheckedLikeASelector() {
+        String sql = "SELECT * FROM session_events WHERE event_type LIKE '3ds_%' AND amount > 10 "
+                + "AND ts > now() - INTERVAL '2' HOUR LIMIT 25";
+        Map<String, Object> r = body(tool(SAMPLES).call(Map.of("sql", sql)));
+
+        assertThat(r).containsEntry("topic", SESSIONS).containsEntry("sql", sql).containsEntry("valid", true)
+                .containsEntry("filter", "event_type LIKE '3ds_%' AND amount > 10")
+                .containsEntry("matched_in_sample", 2);
+        Map<String, Object> translation = (Map<String, Object>) r.get("translation");
+        assertThat(translation).containsEntry("selector", "event_type LIKE '3ds_%' AND amount > 10")
+                .containsEntry("lookback", "2h").containsEntry("max_events", 25).containsEntry("topic", SESSIONS);
+        assertThat((List<String>) translation.get("notes")).anyMatch(n -> n.contains("→ lookback 2h"));
+    }
+
+    @Test
+    void sqlThatCanNotBeTranslatedIsInvalidWithTheReason() {
+        Map<String, Object> r = body(tool(SAMPLES).call(Map.of("sql", "SELECT count(*) FROM session_events")));
+        assertThat(r).containsEntry("valid", false).containsEntry("sql", "SELECT count(*) FROM session_events");
+        assertThat((String) r.get("error")).contains("aggregates");
+
+        Map<String, Object> header = body(tool(SAMPLES).call(Map.of("sql", "seq > 5")));
+        assertThat(header).containsEntry("valid", true);
+        assertThat(warnings(header)).anyMatch(w -> w.contains("seq"));
+
+        Map<String, Object> onlyTime = body(tool(SAMPLES).call(Map.of("sql", "ts > now() - INTERVAL '5' MINUTE")));
+        assertThat(onlyTime).containsEntry("valid", false);
+        assertThat((String) onlyTime.get("error")).contains("no condition besides the time window");
+    }
+
+    @Test
+    void sqlAndSelectorTogetherIsInvalid() {
+        Map<String, Object> r = body(tool(SAMPLES).call(Map.of("sql", "seq = '1'", "selector", "seq = '1'")));
+        assertThat(r).containsEntry("valid", false);
+        assertThat((String) r.get("error")).contains("either sql or selector, not both");
     }
 
     @Test

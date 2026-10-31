@@ -108,11 +108,25 @@ final class EntityEventsTool {
     /** The {@code selector} argument. */
     static Map<String, Object> selectorProperty(String forWhichCall) {
         return Map.of("type", "string", "maxLength", EntityQuery.MAX_SELECTOR_LENGTH,
-                "description", forWhichCall + "a JMS message selector (SQL-92 WHERE syntax: = <> < > LIKE IN "
-                        + "BETWEEN IS NULL AND OR NOT) choosing which events to return, for example "
-                        + "event_type LIKE '3ds_%'. Use only field names get_schema lists for the topic. Key and "
-                        + "header fields are cheap to filter on; body fields decode each event's value. With key, "
-                        + "both must match. Try it first with check_selector.");
+                "description", forWhichCall + "a SQL WHERE clause without the WHERE (a JMS message selector, the "
+                        + "SQL-92 subset: = <> < > LIKE IN BETWEEN IS NULL AND OR NOT) choosing which events to "
+                        + "return, for example event_type LIKE '3ds_%'. Use only field names get_schema lists for "
+                        + "the topic. Key and header fields are cheap to filter on; body fields decode each event's "
+                        + "value. With key, both must match. Try it first with check_selector. Or pass a whole SQL "
+                        + "query as sql instead.");
+    }
+
+    /** The {@code sql} argument. */
+    static Map<String, Object> sqlProperty(String forWhichCall) {
+        return Map.of("type", "string", "maxLength", SqlTranslator.MAX_SQL_LENGTH,
+                "description", forWhichCall + "instead of selector, a whole SQL query in the RTCE style (SELECT … "
+                        + "WHERE … LIMIT), for example " + SqlTranslator.EXAMPLE + ". The server translates it: "
+                        + "WHERE becomes the selector, FROM the topic, LIMIT max_events, a top-level AND term "
+                        + "ts > now() - INTERVAL 'n' MINUTE (or HOUR, DAY, SECOND) the lookback, and SELECT columns "
+                        + "trim each event (time and key always stay; * keeps everything). A bare WHERE condition "
+                        + "works too. ORDER BY accepts only ts DESC, the default. Functions (LOWER, CAST, …), CASE, "
+                        + "ILIKE, regex, subqueries, joins and aggregates are rejected with the nearest supported "
+                        + "form. The result shows the selector it ran. Don't pass both sql and selector.");
     }
 
     /** The tool as the agent sees it. */
@@ -132,6 +146,7 @@ final class EntityEventsTool {
         properties.put("topic", topicProperty(topics, "Optional: "));
         properties.put("key", key);
         properties.put("selector", selectorProperty("Optional: "));
+        properties.put("sql", sqlProperty("Optional: "));
         properties.put("lookback", lookback);
         properties.put("max_events", maxEvents);
         schema.put("properties", properties);
@@ -143,7 +158,8 @@ final class EntityEventsTool {
                         + "both, from an event log topic (" + String.join(", ", topics.all()) + "), with a "
                         + "completeness status. The window is read and filtered on the server, so only matching "
                         + "events are returned. Use it to answer \"what happened to <entity> in the last <time>?\" "
-                        + "(key) or \"which events like this happened?\" (selector). Call get_schema first to "
+                        + "(key) or \"which events like this happened?\" (selector: a SQL WHERE clause, the "
+                        + "SQL-92 subset; or sql: a whole SELECT … WHERE … LIMIT query). Call get_schema first to "
                         + "learn the fields a selector can use. Times are when the log received each event. If "
                         + "status is TRUNCATED_BY_RETENTION, events may be missing: don't conclude that nothing happened.")
                 .inputSchema(schema)
@@ -197,7 +213,8 @@ final class EntityEventsTool {
                 }
                 String sourceId = m.getProperty(WindowProtocol.SRC_MSGID_PROPERTY);
                 if (seen.add(sourceId != null ? sourceId : m.getMessageId().toString())) {
-                    keepNewest(events, event(m.getKey(), m.getProperties(), m.getData(), m.getPublishTime()), query.maxEvents());
+                    keepNewest(events, query.project(event(m.getKey(), m.getProperties(), m.getData(),
+                            m.getPublishTime())), query.maxEvents());
                 }
                 consumer.acknowledge(m);
             }
@@ -205,10 +222,13 @@ final class EntityEventsTool {
         }
     }
 
-    /** The key and selector the agent gave, each only when given. */
+    /** The key and selector the agent gave (and the SQL the selector came from), each only when given. */
     static void putFilter(Map<String, Object> r, EntityQuery query) {
         if (query.key() != null) {
             r.put("key", query.key());
+        }
+        if (query.sql() != null) {
+            r.put("sql", query.sql().sql());
         }
         if (query.selector() != null) {
             r.put("selector", query.selector());
@@ -235,6 +255,9 @@ final class EntityEventsTool {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("topic", query.topic() != null ? query.topic() : topic);
         putFilter(r, query);
+        if (query.sql() != null) {
+            r.put("translation", query.sql().describe());
+        }
         if (!query.selectorWarnings().isEmpty()) {
             // Valid, so not rejected, but likely not what the agent meant: say so next to the (maybe empty) result.
             r.put("selector_warnings", query.selectorWarnings());

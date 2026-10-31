@@ -88,7 +88,10 @@ class EntityEventsToolTests {
         assertThat(schema).containsEntry("additionalProperties", false);
         @SuppressWarnings("unchecked")
         Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
-        assertThat(properties).containsOnlyKeys("topic", "key", "selector", "lookback", "max_events");
+        assertThat(properties).containsOnlyKeys("topic", "key", "selector", "sql", "lookback", "max_events");
+        assertThat(properties.get("sql").toString()).contains("SELECT").contains("LIMIT")
+                .contains("Don't pass both sql and selector");
+        assertThat(tool.description()).contains("SQL WHERE clause");
         assertThat(properties.get("lookback").toString()).contains("At most 24h");
         assertThat(tool.description()).contains("get_schema");
     }
@@ -159,6 +162,64 @@ class EntityEventsToolTests {
         verify(builder).selector("__key__ = '8675309' AND (event_type LIKE '3ds_%')");
         assertThat((Map<String, Object>) result.structuredContent()).containsEntry("topic", SESSIONS)
                 .containsEntry("key", "8675309").containsEntry("selector", "event_type LIKE '3ds_%'");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aSqlCallRunsTheTranslationAndEchoesIt() throws Exception {
+        Session session = mock(Session.class);
+        FilterableConsumerBuilder<byte[]> builder = mock(FilterableConsumerBuilder.class, RETURNS_SELF);
+        Consumer<byte[]> consumer = mock(Consumer.class, withSettings().extraInterfaces(WindowControl.class));
+        when(session.newConsumer()).thenReturn(builder);
+        when(builder.subscribe()).thenReturn(consumer);
+        when(((WindowControl) consumer).isComplete()).thenReturn(true);
+        when(((WindowControl) consumer).stats()).thenReturn(stats(5, WindowStats.Status.COMPLETE));
+        EntityEventsTool tool = new EntityEventsTool(() -> session, TOPICS, t -> Set.of("__key__", "event_type"),
+                LIMITS, Clock.systemUTC());
+        String sql = "SELECT event_type FROM orders WHERE event_type IN ('a', 'b') "
+                + "AND ts > now() - INTERVAL '15' MINUTE ORDER BY ts DESC LIMIT 20";
+
+        McpSchema.CallToolResult result = tool.call(Map.of("sql", sql, "key", "8675309"));
+
+        assertThat(result.isError()).as("tool error: %s", result.content()).isNotEqualTo(Boolean.TRUE);
+        verify(builder).topic(TOPIC);
+        verify(builder).selector("__key__ = '8675309' AND (event_type IN ('a', 'b'))");
+        Map<String, Object> r = (Map<String, Object>) result.structuredContent();
+        assertThat(r).containsEntry("topic", TOPIC).containsEntry("sql", sql)
+                .containsEntry("selector", "event_type IN ('a', 'b')");
+        Map<String, Object> translation = (Map<String, Object>) r.get("translation");
+        assertThat(translation).containsEntry("selector", "event_type IN ('a', 'b')").containsEntry("topic", TOPIC)
+                .containsEntry("lookback", "15m").containsEntry("max_events", 20)
+                .containsEntry("columns", List.of("event_type"));
+        assertThat((List<String>) translation.get("notes")).contains("LIMIT 20 → max_events 20 (the newest 20, "
+                + "listed oldest first)");
+    }
+
+    @Test
+    void sqlAndSelectorTogetherOrAConflictIsAToolErrorBeforeTheBroker() {
+        assertThat(text(selectorToolWithoutBroker().call(Map.of("sql", "event_type = 'a'",
+                "selector", "event_type = 'a'")))).contains("either sql or selector, not both");
+        assertThat(text(selectorToolWithoutBroker().call(Map.of("sql", "SELECT * FROM orders WHERE event_type = 'a' "
+                + "LIMIT 5", "max_events", 6)))).contains("LIMIT 5 but max_events is 6");
+        assertThat(text(selectorToolWithoutBroker().call(Map.of("sql", "SELECT * FROM orders WHERE event_type = 'a'",
+                "topic", "session_events")))).contains("FROM orders but topic is session_events");
+        assertThat(text(selectorToolWithoutBroker().call(Map.of("sql", "event_type ILIKE 'a%'"))))
+                .contains("case-insensitive matching");
+        assertThat(text(selectorToolWithoutBroker().call(Map.of("sql", "colour = 'red'")))).contains("colour")
+                .contains("get_schema");
+    }
+
+    @Test
+    void sqlColumnsTrimTheReturnedEvents() {
+        EntityQuery q = EntityQuery.parseAgainst(Map.of("sql", "SELECT event_type FROM orders WHERE event_type = 'a'"),
+                LIMITS, TOPICS, t -> FieldCatalog.Fields.ofNames(t, Set.of("__key__", "event_type", "amount")));
+        Map<String, Object> e = EntityEventsTool.event("8675309", Map.of("event_type", "a", "seq", "2"),
+                "{\"event_type\":\"a\",\"amount\":5}".getBytes(StandardCharsets.UTF_8), 1_000L);
+
+        Map<String, Object> p = q.project(e);
+
+        assertThat(p).containsEntry("key", "8675309").containsEntry("properties", Map.of("event_type", "a"));
+        assertThat(p.get("value").toString()).isEqualTo("{\"event_type\":\"a\"}");
     }
 
     @Test

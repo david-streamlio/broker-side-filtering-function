@@ -150,8 +150,9 @@ class EntityWatchToolTests {
         assertThat(schema).doesNotContainKey("required"); // key on the first call, watch_id after
         @SuppressWarnings("unchecked")
         Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
-        assertThat(properties).containsOnlyKeys("topic", "key", "selector", "lookback", "max_events", "watch_id",
-                "wait_s", "stop");
+        assertThat(properties).containsOnlyKeys("topic", "key", "selector", "sql", "lookback", "max_events",
+                "watch_id", "wait_s", "stop");
+        assertThat(properties.get("sql").toString()).contains("First call").contains("LIMIT");
         assertThat(schema).containsEntry("additionalProperties", false);
         assertThat(properties.get("wait_s").toString()).contains("At most 30");
         assertThat(properties.get("selector").toString()).contains("First call").contains("get_schema");
@@ -382,6 +383,53 @@ class EntityWatchToolTests {
             assertThat(text(selectorTool.call(Map.of("selector", "event_type LIKE")))).contains("JMS selector syntax");
             assertThat(text(selectorTool.call(Map.of("key", KEY, "topic", "secrets")))).contains("isn't one this server reads");
             assertThat(text(selectorTool.call(Map.of("lookback", "1h")))).contains("give a key, a selector, or both");
+            verify(builder, never()).subscribe();
+            assertThat(selectorTool.openWatches()).isZero();
+        } finally {
+            selectorTool.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aSqlWatchRunsTheTranslationAndTrimsEveryCallsEvents() {
+        EntityWatchTool selectorTool = selectorTool();
+        try {
+            log.add(event("1:0:-1", "3ds_timeout"));
+            String sql = "SELECT ts, __key__ FROM session_events WHERE event_type LIKE '3ds_%' "
+                    + "AND ts > now() - INTERVAL '15' MINUTE ORDER BY ts DESC LIMIT 5";
+            Map<String, Object> first = body(selectorTool.call(Map.of("sql", sql, "key", KEY)));
+            String id = (String) first.get("watch_id");
+            log.add(event("1:1:-1", "3ds_approved"));
+            Map<String, Object> later = body(selectorTool.call(Map.of("watch_id", id, "wait_s", 5)));
+
+            verify(builder).topic(TOPIC);
+            verify(builder).selector("__key__ = '8675309' AND (event_type LIKE '3ds_%')");
+            assertThat(first).containsEntry("sql", sql).containsEntry("selector", "event_type LIKE '3ds_%'");
+            Map<String, Object> translation = (Map<String, Object>) first.get("translation");
+            assertThat(translation).containsEntry("lookback", "15m").containsEntry("max_events", 5)
+                    .containsEntry("topic", TOPIC).containsEntry("columns", List.of());
+            assertThat(later).containsEntry("sql", sql);
+            for (Map<String, Object> r : List.of(first, later)) {
+                List<Map<String, Object>> events = (List<Map<String, Object>>) r.get("events");
+                assertThat(events).hasSize(1);
+                assertThat(events.get(0)).containsEntry("key", KEY).containsEntry("properties", Map.of())
+                        .containsKey("time");
+                assertThat(events.get(0).get("value").toString()).isEqualTo("{}");
+            }
+        } finally {
+            selectorTool.close();
+        }
+    }
+
+    @Test
+    void sqlWithASelectorOrAnUntranslatableSqlNeverReachesTheBroker() throws Exception {
+        EntityWatchTool selectorTool = selectorTool();
+        try {
+            assertThat(text(selectorTool.call(Map.of("sql", "event_type = 'a'", "selector", "event_type = 'a'"))))
+                    .contains("either sql or selector, not both");
+            assertThat(text(selectorTool.call(Map.of("sql", "LOWER(event_type) = 'a'"))))
+                    .contains("case-insensitive matching");
             verify(builder, never()).subscribe();
             assertThat(selectorTool.openWatches()).isZero();
         } finally {
