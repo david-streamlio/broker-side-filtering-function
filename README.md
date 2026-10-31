@@ -127,8 +127,19 @@ or any MCP client.
 ## Selector language
 
 Queries use **JMS selector** syntax — a subset of SQL92 `WHERE` clauses operating on typed
-properties. The parser is provided by DataStax `pulsar-jms-filters-common` (which itself reuses
-Apache ActiveMQ's selector implementation).
+properties. The parser and evaluator are this repo's own, dependency-free engine
+(`Lexer` / `Parser` / `Expression` in `common/src/main/java/io/streamnative/filter/common/selector/`),
+shared by the filter function, the broker `EntryFilter`, and the client SDK. It follows the same
+grammar and three-valued (TRUE / FALSE / UNKNOWN) semantics as Apache ActiveMQ's JMS selector;
+the ActiveMQ-based `pulsar-jms-filters` library is used only as a test-scope oracle for
+differential tests.
+
+**`AND` / `OR` short-circuit left to right.** `AND` skips its right side when the left is FALSE;
+`OR` skips it when the left is TRUE (an UNKNOWN left still evaluates the right, so results are
+exactly the three-valued ones). Put cheap terms (`__key__`, `__topic__`, properties) first: a
+body-field term such as `detail.reason = 'timeout'` then decodes the message value only for events
+the cheap terms didn't already rule out. `__key__ = '8675309' AND detail.reason = 'timeout'` never
+decodes the value of an event with a different key.
 
 ### Bindings available to selectors
 
@@ -204,8 +215,8 @@ Pulsar testcontainer.
 
 ### Important constraints
 
-1. **Pulsar user properties are always `String`.** ActiveMQ JMS selector semantics return `UNKNOWN`
-   (no match) when comparing a `String` property to a numeric literal. Compare strings to strings:
+1. **Pulsar user properties are always `String`.** JMS selector semantics (which this engine follows)
+   return `UNKNOWN` (no match) when comparing a `String` property to a numeric literal. Compare strings to strings:
    `price = '150.5'`, not `price > 150`. If you need numeric comparisons, encode buckets:
    `marketcap_bucket = 'LARGE'`.
 2. **No JMS pseudo-headers.** This function exposes only `__key__`, `__topic__`, and user
@@ -684,8 +695,8 @@ Session.builder()
 
 ### Selector translation
 
-Selectors are parsed by `com.datastax.oss:pulsar-jms-filters-common`, which wraps Apache
-ActiveMQ's `SelectorParser`. The **client** uses the same library to validate selector syntax at
+Selectors are parsed by this repo's own selector engine (`common/.../selector/`: `Lexer`, `Parser`,
+`Selector`), which follows the JMS selector grammar. The **client** uses the same engine to validate selector syntax at
 `subscribe()` / `setSelector()` time — so malformed expressions fail locally with
 `IllegalArgumentException` instead of being silently dropped as bad queries on the function's
 control topic. The **function** compiles and caches the same expression for O(1) per-message
