@@ -130,6 +130,51 @@ topic.
 | Portability | selectors with functions are a superset of JMS | the same, but hidden behind splitting |
 | When it's the right call | functions that run per event on one event's fields: all of the subset above | stage 2 needing what a per-event evaluator can't do: joins, enrichment from another source, stateful or windowed logic, or a full SQL engine (Flink SQL / Calcite) |
 
+## Flink in the JVM: where it fits
+
+Flink can run inside a single JVM: `StreamExecutionEnvironment` starts an embedded MiniCluster in the
+same process, and `StreamTableEnvironment` on top of it runs Flink SQL with `executeSql(...)`. The SQL
+Client's default "embedded" mode works the same way. The artifacts are `flink-streaming-java`,
+`flink-table-api-java-bridge`, `flink-table-planner` and `flink-table-runtime`. Could it give us functions
+without writing an evaluator?
+
+**Not inside the filter (Option A's job).**
+- **It runs jobs, not expressions.** Flink takes a stream in and produces a stream out. There's no
+  supported public API to evaluate one predicate on one record from inside the filter's per-message loop;
+  the code-generated evaluators in the planner are internal.
+- **It's heavy for a Pulsar Function.** The planner and runtime add tens of MB of dependencies, start in
+  seconds, and bring their own threads, memory and checkpointing. Today's filter evaluates a parsed
+  selector in microseconds per event (M4).
+- **Classloading:** a Pulsar Function's classloader together with Flink's dependencies (Calcite, Janino,
+  shaded libraries) is a known source of conflicts.
+
+**As Option B's second stage, yes, when stage 2 needs real stream processing.** If a query needs what
+a per-event evaluator can't do (a join with another stream, enrichment, aggregation over time,
+deduplication across events), an in-JVM Flink job is a sound stage 2:
+- **Stage 1** (our filter) does the cheap, selective pushdown, so Flink sees a small stream.
+- **Stage 2** runs Flink SQL over the stage-1 private topic (the Pulsar connector) and writes the final
+  topic, with functions, joins and windows for free.
+
+Option B's hard parts remain:
+- **Window protocol:** a Flink job doesn't speak our completion records or `caught up` marker, so the
+  orchestrator has to wrap it to keep `COMPLETE` and `TRUNCATED_BY_RETENTION` honest.
+- **Lifecycle and sharing:** starting, connecting and tearing down the chain, and sharing stage 2 between
+  queries.
+- **Start time:** seconds for a Flink job, on top of the filter's ~2 s.
+- **Resources:** a MiniCluster per query is expensive. Sharing one Flink runtime across queries is, in
+  effect, running a Flink cluster.
+
+This is roughly Confluent RTCE's architecture (Flink upstream, a serving layer in front), so choosing it
+moves the design toward RTCE's rather than away from it. Scope it as its own feature, "a
+stream-processing stage after the filter", not as the way to get `LOWER`. **Estimate on top of Option B:
+roughly 2–3 weeks** to embed and wrap Flink SQL as the stage-2 engine (connector setup, protocol wrapper,
+job lifecycle, resource limits, tests), replacing Option B's custom function filter.
+
+**A cheaper piece to borrow: Calcite.** Flink SQL's parser and validator are Apache Calcite. For the SQL
+translator (`todo-mcp-sql.md`), Calcite would parse agent SQL by the same rules Flink SQL uses, without the
+Flink runtime. It's heavier than JSqlParser but gives Flink/RTCE-style SQL compatibility. Decide when
+Phase 1 of the translator starts.
+
 ## Recommendation
 
 Do **Option A**. Every function in the subset is a pure function of one event's fields, which is
