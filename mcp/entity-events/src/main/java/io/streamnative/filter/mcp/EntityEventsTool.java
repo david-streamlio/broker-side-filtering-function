@@ -82,7 +82,8 @@ final class EntityEventsTool {
                 "description", "How far back to read: for example \"15m\", \"6h\" or \"24h\". At most "
                         + EntityQuery.format(limits.maxLookback()) + ".");
         Map<String, Object> maxEvents = Map.of("type", "integer", "minimum", 1, "default", EntityQuery.DEFAULT_MAX_EVENTS,
-                "description", "The most events to return, oldest first. At most " + limits.maxEvents() + ".");
+                "description", "The most events to return: the newest ones, listed oldest first. Set it higher or "
+                        + "lower as you need; matched and more_events say whether older ones were left out.");
         Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "object");
         schema.put("properties", Map.of("key", key, "lookback", lookback, "max_events", maxEvents));
@@ -146,13 +147,24 @@ final class EntityEventsTool {
                     continue; // nothing yet; only the completion record means done
                 }
                 String sourceId = m.getProperty(WindowProtocol.SRC_MSGID_PROPERTY);
-                if (seen.add(sourceId != null ? sourceId : m.getMessageId().toString()) && events.size() < query.maxEvents()) {
-                    events.add(event(m.getKey(), m.getProperties(), m.getData(), m.getPublishTime()));
+                if (seen.add(sourceId != null ? sourceId : m.getMessageId().toString())) {
+                    keepNewest(events, event(m.getKey(), m.getProperties(), m.getData(), m.getPublishTime()), query.maxEvents());
                 }
                 consumer.acknowledge(m);
             }
             return result(query, topic, window.stats(), events, seen.size(), clock.millis() - start);
         }
+    }
+
+    /**
+     * Add an event, keeping only the newest {@code max}, oldest first. The window is read oldest to
+     * newest, and for "what just happened?" the newest events matter most, so the oldest give way.
+     */
+    static void keepNewest(List<Map<String, Object>> events, Map<String, Object> event, int max) {
+        if (events.size() >= max) {
+            events.remove(0);
+        }
+        events.add(event);
     }
 
     /** The tool's result: the window, its status and what it means, the counts, and the events. */
@@ -186,6 +198,10 @@ final class EntityEventsTool {
         r.put("matched", matched);
         r.put("returned", events.size());
         r.put("more_events", matched > events.size());
+        if (matched > events.size()) {
+            r.put("omitted", (matched - events.size()) + " older matching events aren't in this list; these are the newest "
+                    + events.size() + ". Ask again with a larger max_events to include them.");
+        }
         r.put("elapsed_ms", elapsedMs);
         r.put("events", events);
         return r;

@@ -30,20 +30,22 @@ import java.util.regex.Pattern;
  *
  * <p>Agent input is treated as input. The key must match {@link #KEY}, which admits no quotes or
  * spaces, so it can't change the selector it's placed in. A lookback beyond the server's maximum is
- * rejected rather than shortened, because a shorter window answers a different question; a
- * {@code max_events} above the maximum is lowered to it, and the result says how many events matched.
+ * rejected rather than shortened, because a shorter window answers a different question. The agent
+ * chooses how many events come back with {@code max_events} (default {@link #DEFAULT_MAX_EVENTS}, no
+ * server cap); the result says how many events matched either way.
  */
 record EntityQuery(String key, Duration lookback, int maxEvents) {
 
     /** Letters, digits and {@code . _ : -}, up to 128 characters. */
     static final Pattern KEY = Pattern.compile("[A-Za-z0-9._:-]{1,128}");
     static final Duration DEFAULT_LOOKBACK = Duration.ofHours(1);
-    static final int DEFAULT_MAX_EVENTS = 50;
+    /** Events returned when the agent doesn't set {@code max_events}; it can ask for more or fewer. */
+    static final int DEFAULT_MAX_EVENTS = 1000;
 
     private static final Pattern DURATION = Pattern.compile("(\\d+)\\s*([smhd])");
 
     /** What one call may ask for: set by the server's operator, not by the agent. */
-    record Limits(Duration maxLookback, int maxEvents, Duration timeout) {
+    record Limits(Duration maxLookback, Duration timeout) {
     }
 
     /**
@@ -68,12 +70,9 @@ record EntityQuery(String key, Duration lookback, int maxEvents) {
                     + format(limits.maxLookback()) + "); ask for a shorter window");
         }
 
-        int maxEvents = DEFAULT_MAX_EVENTS;
         Object rawMax = args.get("max_events");
-        if (rawMax != null) {
-            maxEvents = parseCount(rawMax);
-        }
-        return new EntityQuery(key, lookback, Math.min(maxEvents, limits.maxEvents()));
+        int maxEvents = rawMax == null ? DEFAULT_MAX_EVENTS : parseCount(rawMax);
+        return new EntityQuery(key, lookback, maxEvents);
     }
 
     /** The selector for this key. Safe to build by concatenation: {@link #KEY} admits no quotes. */
@@ -112,7 +111,7 @@ record EntityQuery(String key, Duration lookback, int maxEvents) {
         return s % 60 == 0 ? s / 60 + "m" : s + "s";
     }
 
-    private static int parseCount(Object raw) {
+    static int parseCount(Object raw) {
         long n;
         try {
             n = raw instanceof Number num ? num.longValue() : Long.parseLong(String.valueOf(raw).trim());

@@ -31,7 +31,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class EntityQueryTests {
 
     private static final EntityQuery.Limits LIMITS =
-            new EntityQuery.Limits(Duration.ofHours(24), 200, Duration.ofSeconds(60));
+            new EntityQuery.Limits(Duration.ofHours(24), Duration.ofSeconds(60));
 
     private static Map<String, Object> args(Object... kv) {
         Map<String, Object> m = new HashMap<>();
@@ -42,10 +42,10 @@ class EntityQueryTests {
     }
 
     @Test
-    void defaultsToTheLastHourAndFiftyEvents() {
+    void defaultsToTheLastHourAndAThousandEvents() {
         EntityQuery q = EntityQuery.parse(args("key", "8675309"), LIMITS);
 
-        assertThat(q).isEqualTo(new EntityQuery("8675309", Duration.ofHours(1), 50));
+        assertThat(q).isEqualTo(new EntityQuery("8675309", Duration.ofHours(1), 1000));
         assertThat(q.selector()).isEqualTo("__key__ = '8675309'");
     }
 
@@ -80,14 +80,15 @@ class EntityQueryTests {
 
     @Test
     void theDefaultLookbackNeverExceedsTheMaximum() {
-        EntityQuery.Limits tight = new EntityQuery.Limits(Duration.ofMinutes(15), 200, Duration.ofSeconds(60));
+        EntityQuery.Limits tight = new EntityQuery.Limits(Duration.ofMinutes(15), Duration.ofSeconds(60));
 
         assertThat(EntityQuery.parse(args("key", "1"), tight).lookback()).isEqualTo(Duration.ofMinutes(15));
     }
 
     @Test
-    void maxEventsIsLoweredToTheServerMaximum() {
-        assertThat(EntityQuery.parse(args("key", "1", "max_events", 500), LIMITS).maxEvents()).isEqualTo(200);
+    void maxEventsDefaultsToAThousandAndTheAgentCanAskForMoreOrFewer() {
+        assertThat(EntityQuery.parse(args("key", "1"), LIMITS).maxEvents()).isEqualTo(1000);
+        assertThat(EntityQuery.parse(args("key", "1", "max_events", 5000), LIMITS).maxEvents()).isEqualTo(5000);
         assertThat(EntityQuery.parse(args("key", "1", "max_events", "7"), LIMITS).maxEvents()).isEqualTo(7);
         assertThat(EntityQuery.parse(args("key", "1", "max_events", 12.0), LIMITS).maxEvents()).isEqualTo(12);
         assertThatThrownBy(() -> EntityQuery.parse(args("key", "1", "max_events", 0), LIMITS))
